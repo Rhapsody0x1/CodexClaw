@@ -1,0 +1,11 @@
+[general]
+data_dir = "./data"
+codex_binary = "codex"
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+
+[qq]
+app_id = "YOUR_APP_ID"
+app_secret = "YOUR_APP_SECRET"
+api_base_url = "https://api.sgroup.qq.com"
+token_url = "https://bots.qq.com/app/getAppAccessToken"
