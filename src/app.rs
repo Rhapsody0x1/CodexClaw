@@ -4,9 +4,10 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{error, info, warn};
 
@@ -15,17 +16,22 @@ use crate::{
         executor::{CodexExecutor, ExecutionRequest},
         output::{Directive, parse_output},
         prompt::build_prompt,
-        runtime::read_codex_runtime_profile,
+        runtime::read_codex_runtime_profile_from_path,
     },
     commands::{CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
+    launcher,
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
     qq::{
         api::QqApiClient,
         passive::PassiveTurnEmitter,
         types::{C2CMessageEvent, MSG_TYPE_QUOTE, MessageAttachment, MsgElement},
     },
-    session::store::SessionStore,
+    self_update,
+    session::{
+        state::{DialogProfile, SessionState},
+        store::SessionStore,
+    },
 };
 
 pub struct App {
@@ -56,7 +62,8 @@ impl App {
 
     pub async fn handle_c2c_event(&self, event: C2CMessageEvent) -> Result<()> {
         let normalized = self.normalize_message(event).await?;
-        let runtime_profile = read_codex_runtime_profile();
+        let profile_path = self.runtime_profile_path();
+        let runtime_profile = read_codex_runtime_profile_from_path(&profile_path);
         info!(
             sender_openid = %normalized.sender_openid,
             message_id = %normalized.message_id,
@@ -69,24 +76,34 @@ impl App {
 
         match maybe_handle_command(
             &normalized.text,
+            &normalized.sender_openid,
             &self.session,
             &self.config.general.default_model,
             &runtime_profile,
             self.busy.load(Ordering::SeqCst),
         )
-        .await? {
+        .await?
+        {
             CommandOutcome::Reply(reply) => {
                 info!(
                     sender_openid = %normalized.sender_openid,
                     message_id = %normalized.message_id,
                     "handled as direct command"
                 );
-                self.send_command_reply(
-                    &normalized.sender_openid,
-                    &normalized.message_id,
-                    &reply,
-                )
-                .await?;
+                self.send_command_reply(&normalized.sender_openid, &normalized.message_id, &reply)
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::CancelCurrent(message) => {
+                self.cancel_active_turn().await;
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &message,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
                 return Ok(());
             }
             CommandOutcome::StopCurrent(message) => {
@@ -98,6 +115,11 @@ impl App {
                         &message,
                         Some(&normalized.message_id),
                     )
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::SelfUpdate => {
+                self.handle_self_update_command(&normalized.sender_openid, &normalized.message_id)
                     .await?;
                 return Ok(());
             }
@@ -121,32 +143,65 @@ impl App {
             return Ok(());
         }
 
-        let result = self.run_turn(normalized).await;
+        let result = self.run_turn(normalized, runtime_profile).await;
         self.busy.store(false, Ordering::SeqCst);
         result
     }
 
-    async fn run_turn(&self, message: IncomingMessage) -> Result<()> {
-        let snapshot = self.session.snapshot().await;
-        let configured_model = snapshot.settings.model_override.clone();
-        let model_label = configured_model
-            .clone()
-            .unwrap_or_else(|| self.config.general.default_model.clone());
-        let reasoning = snapshot
+    async fn run_turn(
+        &self,
+        message: IncomingMessage,
+        runtime_profile: crate::codex::runtime::CodexRuntimeProfile,
+    ) -> Result<()> {
+        let user_snapshot = self
+            .session
+            .snapshot_for_user(&message.sender_openid)
+            .await?;
+        let effective_settings = user_snapshot
             .settings
+            .merged_with_profile(user_snapshot.foreground.profile.as_ref());
+        let runtime_state = SessionState {
+            session_id: user_snapshot.foreground.session_id.clone(),
+            settings: effective_settings.clone(),
+        };
+        let workspace_dir = user_snapshot.foreground.workspace_dir.clone();
+        let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
+        let codex_home = self.session.codex_home().to_path_buf();
+        let effective_model = effective_settings
+            .model_override
+            .clone()
+            .or_else(|| runtime_profile.configured_model.clone())
+            .unwrap_or_else(|| self.config.general.default_model.clone());
+        let reasoning = effective_settings
             .reasoning_effort
+            .or(runtime_profile.reasoning_effort)
             .unwrap_or(self.config.general.default_reasoning_effort);
+        let service_tier = effective_settings
+            .service_tier
+            .or(runtime_profile.service_tier);
+        let context_mode = effective_settings
+            .context_mode
+            .or(runtime_profile.context_mode);
         let prompt = build_prompt(
             &message,
-            &snapshot.settings,
-            &self.config.general.default_model,
+            &runtime_state.settings,
+            &effective_model,
+            &workspace_dir,
+            &shared_workspace_dir,
+            &self.config.general.self_repo_dir,
         );
+        let mut add_dirs = vec![self.session.inbox_dir().to_path_buf()];
+        if workspace_dir != shared_workspace_dir {
+            add_dirs.push(shared_workspace_dir.clone());
+        }
         info!(
             sender_openid = %message.sender_openid,
             message_id = %message.message_id,
-            model = %model_label,
+            model = %effective_model,
             reasoning = %reasoning.as_str(),
-            plan_mode = snapshot.settings.plan_mode,
+            plan_mode = effective_settings.plan_mode,
+            codex_home = %codex_home.display(),
+            workspace_dir = %workspace_dir.display(),
             "starting codex turn"
         );
 
@@ -156,28 +211,35 @@ impl App {
                 self.qq_client.clone(),
                 message.sender_openid.clone(),
                 message.message_id.clone(),
-                self.session.workspace_dir().to_path_buf(),
-                snapshot.settings.verbose,
+                workspace_dir.clone(),
+                effective_settings.verbose,
             )
             .run(update_rx),
         );
 
         let execution = self
             .codex
-            .execute(ExecutionRequest {
-                prompt,
-                workspace_dir: self.session.workspace_dir().to_path_buf(),
-                session_state: snapshot.clone(),
-                model: configured_model,
-                service_tier: snapshot.settings.service_tier,
-                context_mode: snapshot.settings.context_mode,
-                reasoning_effort: reasoning,
-                image_paths: message
-                    .images
-                    .iter()
-                    .map(|image| image.local_path.clone())
-                    .collect(),
-            }, Some(self.install_active_turn().await), Some(update_tx))
+            .execute(
+                ExecutionRequest {
+                    prompt,
+                    workspace_dir: workspace_dir.clone(),
+                    codex_home,
+                    config_overrides: Vec::new(),
+                    add_dirs,
+                    session_state: runtime_state,
+                    model: Some(effective_model.clone()),
+                    service_tier,
+                    context_mode,
+                    reasoning_effort: reasoning,
+                    image_paths: message
+                        .images
+                        .iter()
+                        .map(|image| image.local_path.clone())
+                        .collect(),
+                },
+                Some(self.install_active_turn().await),
+                Some(update_tx),
+            )
             .await;
         self.clear_active_turn().await;
         let dispatch_report = emitter.await??;
@@ -191,9 +253,26 @@ impl App {
                     text_len = output.text.len(),
                     "codex turn completed"
                 );
-                self.session.set_session_id(output.session_id).await?;
+                if let Some(session_id) = output.session_id.clone() {
+                    self.session
+                        .bind_foreground_session_profile(
+                            &message.sender_openid,
+                            Some(session_id),
+                            DialogProfile {
+                                model_override: Some(effective_model.clone()),
+                                reasoning_effort: Some(reasoning),
+                                service_tier: None,
+                                context_mode,
+                            },
+                        )
+                        .await?;
+                } else {
+                    self.session
+                        .set_foreground_session_id(&message.sender_openid, None)
+                        .await?;
+                }
                 if !dispatch_report.saw_agent_message {
-                    let parsed = parse_output(&output.text, self.session.workspace_dir());
+                    let parsed = parse_output(&output.text, &workspace_dir);
                     if !parsed.text.is_empty() {
                         self.qq_client
                             .send_text(
@@ -209,6 +288,30 @@ impl App {
                             .await?;
                     }
                 }
+
+                if self_update::changed_self_repo(
+                    &workspace_dir,
+                    &output.changed_files,
+                    &self.config.general.self_repo_dir,
+                ) {
+                    let text = match self_update::run_build(&self.config).await {
+                        Ok(build_result) => format!(
+                            "检测到修改了 codex-claw 源码，已自动触发构建：\n{}",
+                            build_result.summary
+                        ),
+                        Err(err) => {
+                            format!("检测到修改了 codex-claw 源码，但自动构建触发失败：{err}")
+                        }
+                    };
+                    self.qq_client
+                        .send_text(
+                            &message.sender_openid,
+                            &message.message_id,
+                            &text,
+                            Some(&message.message_id),
+                        )
+                        .await?;
+                }
                 Ok(())
             }
             Err(err) => {
@@ -217,7 +320,9 @@ impl App {
                     return Ok(());
                 }
                 error!("codex execution failed: {err:#}");
-                let text = format!("Codex 执行失败：{err}");
+                let text = self
+                    .format_execution_error_message(&err, &workspace_dir)
+                    .unwrap_or_else(|| format!("Codex 执行失败：{err}"));
                 if dispatch_report.sent_replies == 0 {
                     self.qq_client
                         .send_text(
@@ -231,6 +336,105 @@ impl App {
                 Err(err)
             }
         }
+    }
+
+    fn runtime_profile_path(&self) -> PathBuf {
+        let codex_home = &self.config.general.codex_home_global;
+        codex_home.join("config.toml")
+    }
+
+    fn format_execution_error_message(
+        &self,
+        err: &anyhow::Error,
+        workspace_dir: &std::path::Path,
+    ) -> Option<String> {
+        let raw = err.to_string();
+        if !raw.contains("Operation not permitted (os error 1)") {
+            return None;
+        }
+        let current_binary = std::env::current_exe()
+            .map(|path| format!("`{}`", path.display()))
+            .unwrap_or_else(|_| "`~/.codex-claw/bin/codex-claw`".to_string());
+        Some(format!(
+            "Codex 执行失败：系统返回 `Operation not permitted (os error 1)`。\n\
+这通常是 macOS 的文件权限（TCC）限制导致的。\n\
+请执行以下检查：\n\
+1) 在“系统设置 -> 隐私与安全性 -> 完全磁盘访问”里，允许 {current_binary} 与 `{}`
+\n\
+2) 重启服务：`launchctl kickstart -k gui/$(id -u)/com.codex-claw`\n\
+3) 若仍失败，可先把工作目录换到非 `Desktop/Documents/Downloads` 的路径后再 `/new <目录>`\n\
+当前工作目录：`{}`",
+            self.config.general.codex_binary,
+            workspace_dir.display()
+        ))
+    }
+
+    async fn handle_self_update_command(&self, openid: &str, message_id: &str) -> Result<()> {
+        if self.busy.load(Ordering::SeqCst) {
+            self.qq_client
+                .send_text(
+                    openid,
+                    message_id,
+                    "当前有任务在运行，请先等待当前任务完成后再执行 `/self-update`。",
+                    Some(message_id),
+                )
+                .await?;
+            return Ok(());
+        }
+        let build_result = self_update::ensure_successful_build(&self.config).await?;
+        if !build_result.success {
+            self.qq_client
+                .send_text(openid, message_id, &build_result.summary, Some(message_id))
+                .await?;
+            return Ok(());
+        }
+        if self.config.general.enable_launcher || std::env::var(launcher::ENV_LAUNCHER_ADDR).is_ok()
+        {
+            let launcher_addr = std::env::var(launcher::ENV_LAUNCHER_ADDR)
+                .unwrap_or_else(|_| self.config.general.launcher_control_addr.clone());
+            match launcher::request_deploy(&launcher_addr, &build_result.binary_path).await {
+                Ok(message) => {
+                    self.qq_client
+                        .send_text(
+                            openid,
+                            message_id,
+                            &format!("部署请求已提交：{message}"),
+                            Some(message_id),
+                        )
+                        .await?;
+                }
+                Err(err) => {
+                    self.qq_client
+                        .send_text(
+                            openid,
+                            message_id,
+                            &format!("部署失败：{err}"),
+                            Some(message_id),
+                        )
+                        .await?;
+                }
+            }
+            return Ok(());
+        }
+
+        let running_binary =
+            std::env::current_exe().context("failed to detect current executable")?;
+        self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await?;
+        self.qq_client
+            .send_text(
+                openid,
+                message_id,
+                &format!(
+                    "已覆盖运行中的二进制：`{}`\n即将退出当前进程，交由守护服务自动重启。",
+                    running_binary.display()
+                ),
+                Some(message_id),
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::process::exit(0);
+        #[allow(unreachable_code)]
+        Ok(())
     }
 
     async fn send_command_reply(
