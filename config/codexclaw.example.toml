@@ -1,8 +1,16 @@
 [general]
-data_dir = "./data"
+data_dir = "~/.codex-claw/data"
+system_codex_home = "~/.codex"
+codex_home_global = "~/.codex-claw/.codex"
+default_workspace_dir = "~/.codex-claw/data/session/workspace"
 codex_binary = "codex"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
+self_repo_dir = "."
+self_build_command = "cargo build --release"
+self_binary_path = "./target/release/codex-claw"
+launcher_control_addr = "127.0.0.1:8765"
+enable_launcher = true
 
 [qq]
 app_id = "YOUR_APP_ID"

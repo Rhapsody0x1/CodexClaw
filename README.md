@@ -58,13 +58,13 @@ git --version
 codex exec --json "reply with exactly: ok"
 ```
 
-3. 确认 `~/.codex/config.toml` 与 `~/.codex/auth.json` 已存在。如不存在，则提示用户先完成 Codex 登录；如需要部署到 root 或 systemd 运行用户下，确保对应用户也能访问这些文件。
+3. 确认系统 Codex 目录 `~/.codex` 已存在，且至少包含 `config.toml` 与 `auth.json`。`codex-claw` 首次启动会将这些文件及 `skills/` 复制到 `~/.codex-claw/.codex/` 作为独立运行目录。
 
-4. 选择部署目录，例如 `/opt/codex-claw`，然后拉取仓库：
+4. 使用用户目录部署（无需提权），例如：
 
 ```bash
-mkdir -p /opt/codex-claw
-cd /opt/codex-claw
+mkdir -p ~/.codex-claw
+cd ~/.codex-claw
 git clone https://github.com/Rhapsdody0x1/CodexClaw.git repo
 cd repo
 ```
@@ -72,18 +72,26 @@ cd repo
 若目录已存在仓库，则改为：
 
 ```bash
-cd /opt/codex-claw/repo
+cd ~/.codex-claw/repo
 git pull --ff-only
 ```
 
-5. 创建运行配置文件，例如 `/opt/codex-claw/codexclaw.toml`。将用户提供的 `AppID` 与 `AppSecret` 写入其中对应位置：
+5. 创建运行配置文件，例如 `~/.codex-claw/codexclaw.toml`。将用户提供的 `AppID` 与 `AppSecret` 写入其中对应位置：
 
 ```toml
 [general]
-data_dir = "/opt/codex-claw/data"
+data_dir = "~/.codex-claw/data"
+system_codex_home = "~/.codex"
+codex_home_global = "~/.codex-claw/.codex"
+default_workspace_dir = "~/.codex-claw/data/session/workspace"
 codex_binary = "codex"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
+self_repo_dir = "~/.codex-claw/repo"
+self_build_command = "cargo build --release"
+self_binary_path = "~/.codex-claw/repo/target/release/codex-claw"
+launcher_control_addr = "127.0.0.1:8765"
+enable_launcher = true
 
 [qq]
 app_id = "YOUR_APP_ID"
@@ -95,7 +103,7 @@ token_url = "https://bots.qq.com/app/getAppAccessToken"
 6. 先做一次编译检查，再构建 release：
 
 ```bash
-cd /opt/codex-claw/repo
+cd ~/.codex-claw/repo
 cargo check
 cargo build --release
 ```
@@ -103,50 +111,21 @@ cargo build --release
 7. 用前台方式先启动一次，确认程序能正常连上 QQ Gateway，且没有明显配置错误：
 
 ```bash
-cd /opt/codex-claw/repo
-CODEX_CLAW_CONFIG=/opt/codex-claw/codexclaw.toml ./target/release/codex-claw
+cd ~/.codex-claw/repo
+CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml ./target/release/codex-claw
 ```
 
 如果日志中出现 access token 获取失败、Gateway 连接失败或 Codex 启动失败，先停止并修复问题，再继续后续步骤。
 
-8. 如果需要注册为 systemd 服务，可写入 `/etc/systemd/system/codex-claw.service`；如果系统无 systemd，请按照实际环境进行系统服务注册。
+8. 注册为“用户级自启服务”时，需要按系统环境灵活处理（如 macOS `launchd`、Linux 用户级 `systemd`、其他 init 系统）。核心要求：
+- 工作目录指向 `~/.codex-claw/repo`
+- 设置 `CODEX_CLAW_CONFIG=~/.codex-claw/codexclaw.toml`
+- 启动命令为 `~/.codex-claw/repo/target/release/codex-claw`
+- 使用当前登录用户运行，不要求 root
 
-```ini
-[Unit]
-Description=CodexClaw QQ Bot
-After=network-online.target
-Wants=network-online.target
+9. 启用并启动服务（命令因系统而异）。
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/codex-claw/repo
-Environment=HOME=/root
-Environment=CODEX_HOME=/root/.codex
-Environment=CODEX_CLAW_CONFIG=/opt/codex-claw/codexclaw.toml
-ExecStart=/opt/codex-claw/repo/target/release/codex-claw
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-9. 启用并启动服务：
-
-```bash
-systemctl daemon-reload
-systemctl enable --now codex-claw
-systemctl status codex-claw --no-pager
-journalctl -u codex-claw -f
-```
-
-10. 最后提醒从 QQ 客户端发送一条普通私聊消息进行联调。若需要验证运行状态，可继续检查：
-
-```bash
-systemctl status codex-claw --no-pager
-journalctl -u codex-claw --since "10 minutes ago" --no-pager
-```
+10. 最后提醒从 QQ 客户端发送一条普通私聊消息进行联调，并检查服务日志。
 
 ## 命令列表
 
@@ -160,13 +139,33 @@ journalctl -u codex-claw --since "10 minutes ago" --no-pager
 - `/verbose [on|off|status]`：切换工具输出的简略或详细模式；
 - `/plan [on|off|status]`：切换计划模式；
 - `/status`：查看当前会话状态；
-- `/new`：保留当前设置并重置 Codex 会话；
-- `/stop` 或 `/interrupt`：停止当前运行。
+- `/sessions [all]`：先查看项目（按目录）列表；
+- `/sessions <项目编号> [page]`：查看该项目下的会话列表；
+- `/import`：查看系统 `~/.codex/sessions` 中可导入的项目；
+- `/import <项目编号> [page]`：查看该项目下可导入会话；
+- `/import <编号|会话ID>`：导入系统会话到 `~/.codex-claw/.codex/sessions`；
+- `/resume <编号|会话ID>`：把磁盘会话恢复到前台；
+- `/loadbg <编号|会话ID> [alias]`：把磁盘会话加载到后台；
+- `/bg [alias]`：把当前前台会话转入后台；
+- `/fg <alias>`：把后台会话切回前台；
+- `/rename <old_alias> <new_alias>`：重命名后台会话标签；
+- `/save`：显式保存当前前台会话；
+- `/new [工作目录]`：将前台（若有内容）转后台并新建临时前台；可选指定工作目录，支持绝对路径，相对路径默认按当前前台工作目录解析；
+- `/stop`：结束当前前台会话（已保存则保留，未保存则丢弃）并新建临时前台；
+- `/interrupt`：仅停止当前运行，不结束会话；
+- `/self-update`：触发重部署。若启用 launcher 则走热切换；否则覆盖当前运行二进制并退出，由守护服务自动拉起。
 
 ## 运行时文件
 
-- 收到的图片和文件会下载到 `data/session/main/workspace/inbox/`。
-- 会话设置将持久化到 `data/session/main/settings.json`。
+- 收到的图片和文件会下载到 `data/session/workspace/inbox/`。
+- 每用户前后台会话状态会持久化到 `data/session/state.json`。
+- CodexClaw 运行使用独立目录 `~/.codex-claw/.codex/`，其 `sessions/`、`skills/`、`config.toml` 与系统 `~/.codex` 分离。
+- 首次启动会从系统 `~/.codex` 复制 `config.toml`、`auth.json`、`skills/` 到 `~/.codex-claw/.codex/`（已存在文件不覆盖）。
+- 仓库内置 `codex-claw-update` Skill 位于 `.agents/skills/codex-claw-update/SKILL.md`，仅在该仓库上下文中生效。
+- 会话采用统一运行语义；恢复会话优先按会话元数据继承配置，不足项回退到 `config.toml` 默认值。
+- `/import` 可将系统 `~/.codex/sessions` 中的历史会话导入到 `~/.codex-claw/.codex/sessions/`。
+- 新建临时前台会话默认工作目录位于 `~/.codex-claw/data/session/workspace/`；若执行 `/new <工作目录>`，则前台直接切到指定目录并在需要时自动创建该目录。
+- 自动构建状态会写入 `data/self-update/last-build.json`。
 
 ## 贡献指南
 

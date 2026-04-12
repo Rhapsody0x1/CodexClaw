@@ -88,14 +88,14 @@ impl GatewaySessionStore {
 
 pub fn spawn_gateway(app: Arc<App>) {
     tokio::spawn(async move {
-        let session_store = match GatewaySessionStore::load_or_init(&app.config.general.data_dir).await
-        {
-            Ok(store) => store,
-            Err(err) => {
-                error!("failed to initialize qq gateway session store: {err:#}");
-                return;
-            }
-        };
+        let session_store =
+            match GatewaySessionStore::load_or_init(&app.config.general.data_dir).await {
+                Ok(store) => store,
+                Err(err) => {
+                    error!("failed to initialize qq gateway session store: {err:#}");
+                    return;
+                }
+            };
         let mut reconnect_delay = Duration::from_secs(1);
         loop {
             match connect_once(app.clone(), &session_store).await {

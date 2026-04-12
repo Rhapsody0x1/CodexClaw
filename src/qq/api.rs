@@ -27,7 +27,10 @@ struct CachedToken {
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
-    #[serde(default = "default_expires_in", deserialize_with = "deserialize_expires_in")]
+    #[serde(
+        default = "default_expires_in",
+        deserialize_with = "deserialize_expires_in"
+    )]
     expires_in: u64,
 }
 
@@ -130,8 +133,8 @@ impl QqApiClient {
         );
         for chunk in split_text(text, 4500) {
             let msg_seq = self.next_msg_seq(message_id.unwrap_or(openid)).await;
-            let message_reference = reference_message_id
-                .map(|value| MessageReference { message_id: value });
+            let message_reference =
+                reference_message_id.map(|value| MessageReference { message_id: value });
             let markdown_body = SendMarkdownBody {
                 msg_type: 2,
                 msg_id: message_id,

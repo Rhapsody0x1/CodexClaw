@@ -172,7 +172,12 @@ fn compact_tool_display(display: &str) -> String {
     let trimmed = display.trim();
     match trimmed.find(']') {
         Some(index) if trimmed.starts_with('[') => trimmed[..=index].to_string(),
-        _ => trimmed.lines().next().unwrap_or_default().trim().to_string(),
+        _ => trimmed
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     }
 }
 
