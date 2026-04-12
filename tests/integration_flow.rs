@@ -37,16 +37,23 @@ printf '%s\n' '{"type":"turn.completed"}'
         sqlite_home: dir.path().join("sqlite-home"),
     };
     let result = executor
-        .execute(ExecutionRequest {
-            prompt: "hi".into(),
-            workspace_dir: dir.path().to_path_buf(),
-            session_state: SessionState::default(),
-            model: Some("gpt-test".into()),
-            service_tier: None,
-            context_mode: None,
-            reasoning_effort: Default::default(),
-            image_paths: Vec::new(),
-        }, None, None)
+        .execute(
+            ExecutionRequest {
+                prompt: "hi".into(),
+                workspace_dir: dir.path().to_path_buf(),
+                codex_home: dir.path().join("codex-home"),
+                config_overrides: Vec::new(),
+                add_dirs: Vec::new(),
+                session_state: SessionState::default(),
+                model: Some("gpt-test".into()),
+                service_tier: None,
+                context_mode: None,
+                reasoning_effort: Default::default(),
+                image_paths: Vec::new(),
+            },
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(result.session_id.as_deref(), Some("thread-123"));
@@ -143,7 +150,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     config.general.codex_binary = script_path.to_string_lossy().into_owned();
     let app = build_app(config, dir.path().to_path_buf()).await;
     app.session
-        .update_settings(|state| state.settings.verbose = true)
+        .update_settings_for_user("user-1", |settings| settings.verbose = true)
         .await
         .unwrap();
 
@@ -228,9 +235,21 @@ async fn qq_text_send_falls_back_to_plain_text_when_markdown_is_rejected() {
 
 async fn build_app(config: AppConfig, data_dir: PathBuf) -> Arc<App> {
     let codex_binary = config.general.codex_binary.clone();
-    let session = Arc::new(SessionStore::load_or_init(&data_dir).await.unwrap());
+    let session = Arc::new(
+        SessionStore::load_or_init(
+            &data_dir,
+            &config.general.codex_home_global,
+            &config.general.codex_home_global,
+            &config.general.default_workspace_dir,
+        )
+        .await
+        .unwrap(),
+    );
     let qq_client = Arc::new(QqApiClient::new(config.qq.clone()).unwrap());
-    let codex = Arc::new(CodexExecutor::new(codex_binary, config.general.data_dir.clone()));
+    let codex = Arc::new(CodexExecutor::new(
+        codex_binary,
+        config.general.data_dir.clone(),
+    ));
     Arc::new(App::new(config, session, qq_client, codex))
 }
 
@@ -256,10 +275,18 @@ async fn mock_any_send_text(server: &MockServer, openid: &str) {
 fn test_config(data_dir: PathBuf, base_url: String) -> AppConfig {
     AppConfig {
         general: GeneralConfig {
-            data_dir,
+            data_dir: data_dir.clone(),
+            system_codex_home: data_dir.join("system-codex-home"),
+            codex_home_global: data_dir.join("codex-home-global"),
+            default_workspace_dir: data_dir.join("workspace"),
             codex_binary: "codex".into(),
             default_model: "gpt-5-codex".into(),
             default_reasoning_effort: Default::default(),
+            self_repo_dir: data_dir.clone(),
+            self_build_command: "cargo build --release".into(),
+            self_binary_path: data_dir.join("target/release/codex-claw"),
+            launcher_control_addr: "127.0.0.1:0".into(),
+            enable_launcher: false,
         },
         qq: QqConfig {
             app_id: "app".into(),

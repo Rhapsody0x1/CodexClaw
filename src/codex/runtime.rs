@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -32,6 +35,10 @@ pub fn read_codex_runtime_profile() -> CodexRuntimeProfile {
                 .join(".codex")
         });
     let config_path = codex_home.join("config.toml");
+    read_codex_runtime_profile_from_path(&config_path)
+}
+
+pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeProfile {
     let Ok(raw) = std::fs::read_to_string(config_path) else {
         return CodexRuntimeProfile::default();
     };
@@ -42,13 +49,11 @@ pub fn read_codex_runtime_profile() -> CodexRuntimeProfile {
         configured_model: parsed.model.filter(|value| !value.trim().is_empty()),
         reasoning_effort: parsed.model_reasoning_effort,
         service_tier: parsed.service_tier,
-        context_mode: parsed.model_context_window.map(|value| {
-            if value >= 1_000_000 {
-                ContextMode::OneM
-            } else {
-                ContextMode::Standard
-            }
-        }),
-        model_provider: parsed.model_provider.filter(|value| !value.trim().is_empty()),
+        context_mode: parsed
+            .model_context_window
+            .map(ContextMode::from_model_context_window),
+        model_provider: parsed
+            .model_provider
+            .filter(|value| !value.trim().is_empty()),
     }
 }

@@ -1,3 +1,4 @@
+pub mod config_snapshot;
 pub mod events;
 pub mod executor;
 pub mod output;

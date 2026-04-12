@@ -1,4 +1,10 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow};
 use tokio::{
@@ -12,6 +18,8 @@ use crate::{
     session::state::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
 };
 
+const OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[derive(Debug, Clone)]
 pub struct CodexExecutor {
     pub binary: PathBuf,
@@ -22,6 +30,9 @@ pub struct CodexExecutor {
 pub struct ExecutionRequest {
     pub prompt: String,
     pub workspace_dir: PathBuf,
+    pub codex_home: PathBuf,
+    pub config_overrides: Vec<String>,
+    pub add_dirs: Vec<PathBuf>,
     pub session_state: SessionState,
     pub model: Option<String>,
     pub service_tier: Option<ServiceTier>,
@@ -34,6 +45,7 @@ pub struct ExecutionRequest {
 pub struct ExecutionResult {
     pub session_id: Option<String>,
     pub text: String,
+    pub changed_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,46 +68,82 @@ impl CodexExecutor {
         cancel_rx: Option<oneshot::Receiver<()>>,
         update_tx: Option<mpsc::UnboundedSender<ExecutionUpdate>>,
     ) -> Result<ExecutionResult> {
-        tokio::fs::create_dir_all(&self.sqlite_home).await?;
+        let sqlite_home = request.codex_home.join("sqlite");
+        if tokio::fs::create_dir_all(&sqlite_home).await.is_err() {
+            tokio::fs::create_dir_all(&self.sqlite_home).await?;
+        }
+        let sqlite_home_env = if sqlite_home.exists() {
+            sqlite_home.clone()
+        } else {
+            self.sqlite_home.clone()
+        };
         let mut command = Command::new(&self.binary);
+        command.arg("exec");
         if let Some(session_id) = request.session_state.session_id.clone() {
+            command.arg("-C").arg(&request.workspace_dir);
+            for add_dir in &request.add_dirs {
+                command.arg("--add-dir").arg(add_dir);
+            }
             command
-                .arg("exec")
                 .arg("resume")
                 .arg("--json")
                 .arg("--full-auto")
                 .arg("--skip-git-repo-check")
                 .arg("-c")
-                .arg(format!("model_reasoning_effort=\"{}\"", request.reasoning_effort.as_str()));
+                .arg(format!(
+                    "model_reasoning_effort=\"{}\"",
+                    request.reasoning_effort.as_str()
+                ));
+            for override_arg in &request.config_overrides {
+                command.arg("-c").arg(override_arg);
+            }
             if let Some(model) = &request.model {
                 command.arg("--model").arg(model);
             }
             append_runtime_overrides(&mut command, request.service_tier, request.context_mode);
-            command.arg(session_id).arg(&request.prompt);
+            for image in &request.image_paths {
+                command.arg("--image").arg(image);
+            }
+            command.arg(session_id).arg("--").arg(&request.prompt);
         } else {
             command
-                .arg("exec")
                 .arg("--json")
                 .arg("--full-auto")
                 .arg("--skip-git-repo-check")
                 .arg("-C")
                 .arg(&request.workspace_dir)
                 .arg("-c")
-                .arg(format!("model_reasoning_effort=\"{}\"", request.reasoning_effort.as_str()));
+                .arg(format!(
+                    "model_reasoning_effort=\"{}\"",
+                    request.reasoning_effort.as_str()
+                ));
+            for override_arg in &request.config_overrides {
+                command.arg("-c").arg(override_arg);
+            }
             if let Some(model) = &request.model {
                 command.arg("--model").arg(model);
             }
             append_runtime_overrides(&mut command, request.service_tier, request.context_mode);
-            command.arg(&request.prompt);
-        }
-        for image in &request.image_paths {
-            command.arg("--image").arg(image);
+            for image in &request.image_paths {
+                command.arg("--image").arg(image);
+            }
+            for add_dir in &request.add_dirs {
+                command.arg("--add-dir").arg(add_dir);
+            }
+            command.arg("--").arg(&request.prompt);
         }
         command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("CODEX_SQLITE_HOME", &self.sqlite_home)
+            .env("CODEX_HOME", &request.codex_home)
+            .env("CODEX_SQLITE_HOME", sqlite_home_env)
             .current_dir(&request.workspace_dir);
+        if let Some(path_env) = build_codex_path_env(
+            env::var_os("PATH").as_ref(),
+            env::var_os("HOME").as_deref().map(Path::new),
+        ) {
+            command.env("PATH", path_env);
+        }
 
         let mut child = command.spawn().context("failed to spawn codex process")?;
         let stdout = child.stdout.take().context("missing codex stdout")?;
@@ -113,17 +161,24 @@ impl CodexExecutor {
         let mut reader = BufReader::new(stdout).lines();
         let mut current_session_id = request.session_state.session_id.clone();
         let mut text_parts = Vec::new();
+        let mut changed_files = Vec::new();
         let mut cancel_rx = cancel_rx;
         loop {
-            let next_line = async {
-                match reader.next_line().await {
-                    Ok(line) => Ok(line),
-                    Err(err) => Err(err),
-                }
-            };
             let line = if let Some(cancel) = cancel_rx.as_mut() {
                 tokio::select! {
-                    line = next_line => line?,
+                    line = tokio::time::timeout(OUTPUT_IDLE_TIMEOUT, reader.next_line()) => {
+                        match line {
+                            Ok(result) => result?,
+                            Err(_) => {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return Err(anyhow!(
+                                    "codex 输出超时（{} 秒无新事件）",
+                                    OUTPUT_IDLE_TIMEOUT.as_secs()
+                                ));
+                            }
+                        }
+                    }
                     _ = cancel => {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
@@ -131,7 +186,17 @@ impl CodexExecutor {
                     }
                 }
             } else {
-                next_line.await?
+                match tokio::time::timeout(OUTPUT_IDLE_TIMEOUT, reader.next_line()).await {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Err(anyhow!(
+                            "codex 输出超时（{} 秒无新事件）",
+                            OUTPUT_IDLE_TIMEOUT.as_secs()
+                        ));
+                    }
+                }
             };
             let Some(line) = line else {
                 break;
@@ -161,10 +226,16 @@ impl CodexExecutor {
                         }
                     }
                     CodexEvent::ItemCompleted { item } => {
+                        if item.item_type == "file_change" {
+                            for change in &item.changes {
+                                changed_files.push(PathBuf::from(change.path.clone()));
+                            }
+                        }
                         if item.item_type == "agent_message" {
                             if let Some(text) = item.text {
                                 if let Some(tx) = update_tx.as_ref() {
-                                    let _ = tx.send(ExecutionUpdate::AgentMessage { text: text.clone() });
+                                    let _ = tx
+                                        .send(ExecutionUpdate::AgentMessage { text: text.clone() });
                                 }
                                 text_parts.push(text);
                             }
@@ -178,7 +249,9 @@ impl CodexExecutor {
                             }
                         }
                     }
-                    CodexEvent::ResponseItem { payload: ResponseItemPayload::Unknown } => {}
+                    CodexEvent::ResponseItem {
+                        payload: ResponseItemPayload::Unknown,
+                    } => {}
                     CodexEvent::ResponseItem { .. } => {}
                     CodexEvent::TurnFailed { error } => {
                         return Err(anyhow!("codex turn failed: {}", error));
@@ -203,7 +276,43 @@ impl CodexExecutor {
         Ok(ExecutionResult {
             session_id: current_session_id,
             text: text_parts.join("\n\n").trim().to_string(),
+            changed_files,
         })
+    }
+}
+
+fn build_codex_path_env(current: Option<&OsString>, home: Option<&Path>) -> Option<OsString> {
+    let mut dirs = Vec::new();
+    if let Some(current) = current {
+        for dir in env::split_paths(current) {
+            push_unique_dir(&mut dirs, dir);
+        }
+    }
+    if let Some(home) = home {
+        push_unique_dir(&mut dirs, home.join(".cargo").join("bin"));
+        push_unique_dir(&mut dirs, home.join(".local").join("bin"));
+    }
+    for dir in [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ] {
+        push_unique_dir(&mut dirs, dir);
+    }
+    if dirs.is_empty() {
+        return None;
+    }
+    env::join_paths(dirs).ok()
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
     }
 }
 
@@ -223,9 +332,10 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
         "web_search" if phase == ToolEventPhase::Completed => {
             Some(web_search_display_from_item(item))
         }
-        "reasoning" if phase == ToolEventPhase::Completed => item.text.as_deref().map(|text| {
-            format!("[Thinking]\n{}", truncate(text.trim(), 500))
-        }),
+        "reasoning" if phase == ToolEventPhase::Completed => item
+            .text
+            .as_deref()
+            .map(|text| format!("[Thinking]\n{}", truncate(text.trim(), 500))),
         "todo_list" if matches!(phase, ToolEventPhase::Started | ToolEventPhase::Updated) => {
             let detail = format_todo_items(&item.items);
             if detail.is_empty() {
@@ -294,9 +404,10 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
                 .unwrap_or_default();
             Some(format!("[Tool: {}]{}", label, detail))
         }
-        "error" if phase == ToolEventPhase::Completed => item.message.as_deref().map(|message| {
-            format!("[Error] {}", truncate(message.trim(), 220))
-        }),
+        "error" if phase == ToolEventPhase::Completed => item
+            .message
+            .as_deref()
+            .map(|message| format!("[Error] {}", truncate(message.trim(), 220))),
         _ => None,
     }
 }
@@ -383,7 +494,8 @@ fn format_patch_changes(changes: &[crate::codex::events::FileUpdateChange]) -> S
 }
 
 fn format_todo_items(items: &[crate::codex::events::TodoEntry]) -> String {
-    items.iter()
+    items
+        .iter()
         .take(6)
         .map(|item| {
             let mark = if item.completed { "x" } else { " " };
@@ -440,7 +552,8 @@ fn parse_update_from_raw_json(line: &str) -> Option<ExecutionUpdate> {
             if payload.get("status").and_then(|value| value.as_str()) != Some("completed") {
                 return None;
             }
-            let action = serde_json::from_value::<WebSearchAction>(payload.get("action")?.clone()).ok()?;
+            let action =
+                serde_json::from_value::<WebSearchAction>(payload.get("action")?.clone()).ok()?;
             Some(ExecutionUpdate::ToolCall {
                 display: web_search_display_from_action(&action),
             })
@@ -450,7 +563,8 @@ fn parse_update_from_raw_json(line: &str) -> Option<ExecutionUpdate> {
             if item.get("type")?.as_str()? != "web_search" {
                 return None;
             }
-            let action = serde_json::from_value::<WebSearchAction>(item.get("action")?.clone()).ok()?;
+            let action =
+                serde_json::from_value::<WebSearchAction>(item.get("action")?.clone()).ok()?;
             let query = item
                 .get("query")
                 .and_then(|value| value.as_str())
@@ -459,9 +573,7 @@ fn parse_update_from_raw_json(line: &str) -> Option<ExecutionUpdate> {
                 WebSearchAction::Other => web_search_display_from_detail(query),
                 _ => web_search_display_from_action(&action),
             };
-            Some(ExecutionUpdate::ToolCall {
-                display,
-            })
+            Some(ExecutionUpdate::ToolCall { display })
         }
         _ => None,
     }
@@ -480,7 +592,9 @@ fn append_runtime_overrides(
     match context_mode {
         Some(ContextMode::OneM) => {
             command.arg("-c").arg("model_context_window=1000000");
-            command.arg("-c").arg("model_auto_compact_token_limit=900000");
+            command
+                .arg("-c")
+                .arg("model_auto_compact_token_limit=900000");
         }
         Some(ContextMode::Standard) => {
             command.arg("-c").arg("model_context_window=272000");
@@ -491,12 +605,17 @@ fn append_runtime_overrides(
 
 #[cfg(test)]
 mod tests {
+    use std::{env, ffi::OsString};
+
+    use tempfile::tempdir;
+
     use crate::codex::{
         events::{CodexItem, PatchChangeKind, TodoEntry, WebSearchAction},
         executor::{
-            format_todo_items, humanize_tool_label, parse_update_from_raw_json,
-            tool_display_for_item, web_search_action_detail, web_search_display_from_action,
-            web_search_display_from_detail, ExecutionUpdate, ToolEventPhase,
+            ExecutionUpdate, ToolEventPhase, build_codex_path_env, format_todo_items,
+            humanize_tool_label, parse_update_from_raw_json, tool_display_for_item,
+            web_search_action_detail, web_search_display_from_action,
+            web_search_display_from_detail,
         },
     };
 
@@ -697,5 +816,15 @@ mod tests {
             tool_display_for_item(&item, ToolEventPhase::Completed).as_deref(),
             Some("[Thinking]\n先检查当前目录，再决定下一步。")
         );
+    }
+
+    #[test]
+    fn path_env_includes_home_bin_fallbacks() {
+        let home = tempdir().unwrap();
+        let joined =
+            build_codex_path_env(Some(&OsString::from("/usr/bin")), Some(home.path())).unwrap();
+        let paths = env::split_paths(&joined).collect::<Vec<_>>();
+        assert!(paths.contains(&home.path().join(".cargo").join("bin")));
+        assert!(paths.contains(&home.path().join(".local").join("bin")));
     }
 }

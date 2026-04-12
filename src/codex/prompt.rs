@@ -1,9 +1,14 @@
+use std::path::Path;
+
 use crate::{message::IncomingMessage, session::state::SessionSettings};
 
 pub fn build_prompt(
     message: &IncomingMessage,
     settings: &SessionSettings,
     default_model: &str,
+    workspace_dir: &Path,
+    shared_workspace_dir: &Path,
+    self_repo_dir: &Path,
 ) -> String {
     let mut sections = Vec::new();
     sections.push(
@@ -22,6 +27,30 @@ pub fn build_prompt(
         "If you want QQ to send attachments, append one trailing fenced block named qqbot. Supported lines: `image path=REL_OR_ABS_PATH` and `file path=REL_OR_ABS_PATH name=DOWNLOAD_NAME`."
             .to_string(),
     );
+    if workspace_dir == shared_workspace_dir {
+        sections.push(format!(
+            "All conversations can access shared workspace `{}`. Current workspace is this shared workspace.",
+            shared_workspace_dir.display()
+        ));
+    } else {
+        sections.push(format!(
+            "All conversations can access shared workspace `{}`. Current session workspace is `{}`; both directories are accessible.",
+            shared_workspace_dir.display(),
+            workspace_dir.display()
+        ));
+    }
+    if workspace_dir.starts_with(self_repo_dir) {
+        sections.push(format!(
+            "Repository-scoped self-update is enabled in this session. Allowed repository root: `{}`. You may edit/build codex-claw here, but deployment must be triggered explicitly by user command `/self-update`.",
+            self_repo_dir.display()
+        ));
+    } else {
+        sections.push(format!(
+            "Repository-scoped self-update is disabled for this session because current workspace `{}` is outside allowed repository `{}`. If user asks to modify/deploy codex-claw itself, refuse and ask to switch workspace first.",
+            workspace_dir.display(),
+            self_repo_dir.display()
+        ));
+    }
     if let Some(quote) = &message.quote {
         sections.push(format!("Quoted message:\n{}", quote.text));
     }
