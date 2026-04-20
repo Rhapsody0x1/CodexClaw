@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{error, info, warn};
 
+use rust_i18n::t;
+
 use crate::{
     codex::{
         executor::{CodexExecutor, ExecutionRequest},
@@ -22,6 +24,7 @@ use crate::{
     config::AppConfig,
     launcher,
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
+    normalize_lang,
     qq::{
         api::QqApiClient,
         passive::PassiveTurnEmitter,
@@ -29,10 +32,12 @@ use crate::{
     },
     self_update,
     session::{
-        state::{DialogProfile, SessionState},
+        state::{ContextMode, DialogProfile, SessionState, TokenUsageSnapshot},
         store::SessionStore,
     },
 };
+
+const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
 
 pub struct App {
     pub config: AppConfig,
@@ -199,7 +204,6 @@ impl App {
             message_id = %message.message_id,
             model = %effective_model,
             reasoning = %reasoning.as_str(),
-            plan_mode = effective_settings.plan_mode,
             codex_home = %codex_home.display(),
             workspace_dir = %workspace_dir.display(),
             "starting codex turn"
@@ -271,14 +275,52 @@ impl App {
                         .set_foreground_session_id(&message.sender_openid, None)
                         .await?;
                 }
+                let usage_snapshot = if let Some(usage) = output.last_usage {
+                    let window = output
+                        .context_window
+                        .or_else(|| context_mode.map(context_mode_window))
+                        .unwrap_or(ContextMode::STANDARD_CONTEXT_WINDOW);
+                    let snapshot = TokenUsageSnapshot {
+                        total_tokens: usage.total(),
+                        window,
+                        input_tokens: usage.input_tokens,
+                        cached_input_tokens: usage.cached_input_tokens,
+                        output_tokens: usage.output_tokens,
+                        updated_at: chrono::Utc::now(),
+                    };
+                    let _ = self
+                        .session
+                        .set_foreground_usage(&message.sender_openid, snapshot.clone())
+                        .await;
+                    Some(snapshot)
+                } else {
+                    None
+                };
+                let lang_for_warning = self
+                    .session
+                    .snapshot_for_user(&message.sender_openid)
+                    .await
+                    .ok()
+                    .map(|snap| snap.settings.language)
+                    .unwrap_or_else(|| "en".to_string());
+                let context_warning = usage_snapshot
+                    .as_ref()
+                    .and_then(|snap| build_context_warning(snap, &lang_for_warning));
                 if !dispatch_report.saw_agent_message {
                     let parsed = parse_output(&output.text, &workspace_dir);
-                    if !parsed.text.is_empty() {
+                    let mut payload = parsed.text.clone();
+                    if let Some(warning) = context_warning.as_deref() {
+                        if !payload.is_empty() {
+                            payload.push_str("\n\n");
+                        }
+                        payload.push_str(warning);
+                    }
+                    if !payload.is_empty() {
                         self.qq_client
                             .send_text(
                                 &message.sender_openid,
                                 &message.message_id,
-                                &parsed.text,
+                                &payload,
                                 Some(&message.message_id),
                             )
                             .await?;
@@ -287,6 +329,15 @@ impl App {
                         self.send_directive(&message.sender_openid, &message.message_id, directive)
                             .await?;
                     }
+                } else if let Some(warning) = context_warning.as_deref() {
+                    self.qq_client
+                        .send_text(
+                            &message.sender_openid,
+                            &message.message_id,
+                            warning,
+                            Some(&message.message_id),
+                        )
+                        .await?;
                 }
 
                 if self_update::changed_self_repo(
@@ -531,6 +582,45 @@ impl App {
             .await?;
         Ok(destination)
     }
+}
+
+fn context_mode_window(mode: ContextMode) -> u64 {
+    match mode {
+        ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
+        ContextMode::OneM => 1_000_000,
+    }
+}
+
+fn format_tokens_compact(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{}K", (value + 500) / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_context_warning(snapshot: &TokenUsageSnapshot, lang: &str) -> Option<String> {
+    if snapshot.window == 0 {
+        return None;
+    }
+    let ratio = snapshot.total_tokens as f64 / snapshot.window as f64;
+    if ratio < CONTEXT_WARNING_THRESHOLD {
+        return None;
+    }
+    let percent = (ratio * 100.0).round() as u64;
+    let lang = normalize_lang(lang);
+    Some(
+        t!(
+            "warnings.context_near_limit",
+            percent = percent,
+            used = format_tokens_compact(snapshot.total_tokens),
+            total = format_tokens_compact(snapshot.window),
+            locale = lang
+        )
+        .into_owned(),
+    )
 }
 
 fn infer_filename(attachment: &MessageAttachment) -> String {

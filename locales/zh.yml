@@ -1,0 +1,183 @@
+commands:
+  help:
+    header: "# 命令指南"
+    section_basic: "## 基础命令"
+    section_advanced: "## 高级命令"
+    entry_help: "- 💡 `/help` 或 `/帮助`：显示这份帮助"
+    entry_status: "- 📌 `/status` 或 `/状态`：查看当前会话状态"
+    entry_sessions: "- 🗂️ `/sessions [all]` 或 `/sessions <项目编号> [page]`：列出项目和会话"
+    entry_import: "- 📥 `/import`：从当前工作目录导入原生 Codex 会话"
+    entry_resume: "- ♻️ `/resume <会话ID或编号>`：恢复一个会话到前台"
+    entry_loadbg: "- 📚 `/loadbg <会话ID或编号> [别名]`：把会话载入后台"
+    entry_bg: "- 🌙 `/bg <别名>`：将前台会话转入后台"
+    entry_fg: "- ☀️ `/fg <别名>`：将后台会话切回前台"
+    entry_rename: "- 🏷️ `/rename <旧名> <新名>`：重命名后台别名"
+    entry_save: "- 💾 `/save`：保存当前前台会话"
+    entry_new: "- ✨ `/new [目录]`：新开前台会话，可选指定工作目录"
+    entry_stop: "- 🛑 `/stop`：结束当前前台会话"
+    entry_interrupt: "- ⏹️ `/interrupt`：中断当前正在运行的任务"
+    entry_self_update: "- 🚀 `/self-update`：触发 codex-claw 自更新部署"
+    entry_model: "- 🤖 `/model` 或 `/模型` `[名称|status|inherit]`：切换模型或查看状态"
+    entry_fast: "- ⚡ `/fast` 或 `/快速` `[on|off|inherit|status]`：切换快速模式"
+    entry_context: "- 🧠 `/context` 或 `/上下文` `[1m|standard|inherit|status]`：设置上下文窗口"
+    entry_reasoning: "- 🔍 `/reasoning` 或 `/思考` `[none|minimal|low|medium|high|xhigh|inherit|status]`：设置思考深度"
+    entry_verbose: "- 🪄 `/verbose [on|off|status]`：切换详细输出"
+    entry_alias: "- 🧩 `/alias` 或 `/别名` `add <名称> <命令1>|<命令2>... | list | remove <名称>`：管理命令别名"
+    entry_lang: "- 🌐 `/lang` 或 `/语言` `[en|zh|status]`：切换界面语言"
+
+  runtime:
+    last_user_message: "最近用户消息: %{preview}"
+    model: "模型: %{summary}"
+
+  new:
+    created_temp: "已创建新的临时前台会话。"
+    created_with_workspace: "已创建新的临时前台会话。\n工作目录: `%{dir}`"
+    parked: "已将原前台会话转入后台：`%{alias}`"
+
+  stop:
+    ended_restored: "%{prefix} 已自动切回最近的后台会话 `%{alias}`。"
+    ended_new_temp: "前台会话已结束。已创建新的临时前台会话。"
+    had_none_restored: "前台没有可结束的会话。已自动切回后台会话 `%{alias}`。"
+    had_none_reset: "前台没有可结束的会话，已重置为新的临时会话。"
+    ended_saved: "前台会话已结束并保留。"
+    ended_dropped: "前台会话已结束并丢弃（未保存）。"
+    ended_plain: "前台会话已结束。"
+    ended_saved_new: "前台会话已结束并保留。已创建新的临时前台会话。"
+    ended_dropped_new: "前台会话已结束并丢弃（未保存）。已创建新的临时前台会话。"
+    ended_plain_new: "前台会话已结束。已创建新的临时前台会话。"
+
+  sessions:
+    empty: "没有可用会话。可先发起对话并使用 `/save` 或 `/bg` 保存。"
+    project_header: "项目列表 total=%{count}："
+    project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
+    projects_footer: "使用 `/sessions <项目编号> [page]` 查看项目中的会话。"
+    project_empty: "项目 `%{path}` 下暂无会话。"
+    page_out_of_range: "页码超出范围：项目 `%{path}` 共 %{total} 条，会话页大小 %{size}，当前页 %{page}。"
+    page_header: "项目会话 project=%{path} page=%{page}/%{total_pages} (total=%{total})"
+    row: "%{index}. %{updated} | %{summary}"
+    page_footer: "使用 `/resume <编号|会话ID>` 恢复前台，或 `/loadbg <编号|会话ID> [alias]` 加载到后台。"
+    no_summary: "无摘要"
+    scope_invalid: "范围仅支持 all"
+    project_selector_empty: "项目选择不能为空"
+    project_not_found: "未找到项目：%{selector}（先用 `/sessions` 查看项目列表）"
+    project_ambiguous: "项目前缀不唯一，请使用完整路径或编号"
+    session_not_found: "未找到会话：%{selector}"
+    session_ambiguous: "会话前缀不唯一，请使用完整ID"
+
+  status:
+    workspace: "工作目录: %{dir}"
+    model: "模型: %{summary}"
+    verbose_on: "详细输出: 开启"
+    verbose_off: "详细输出: 关闭"
+    bg_header: "后台会话（%{count}）："
+    bg_none: "后台会话：无"
+    fg_busy: "前台状态：运行中"
+    fg_idle: "前台状态：空闲"
+    context_usage: "上下文: %{percent}%% (%{used}/%{total} tokens)"
+    context_unknown: "上下文: —（尚无用量数据）"
+    lang: "语言: %{lang}"
+
+  model:
+    updated: "模型已更新为：%{model}"
+    status: "model: %{effective}    override: %{override_value}\n提示：完整会话状态请用 `/status`"
+    invalid: "无效的模型名称"
+    usage: "用法：/model <名称> | inherit | status"
+
+  fast:
+    updated: "fast 已更新为：%{value}"
+    status: "fast: %{value}"
+    invalid: "无效的取值。可选：on | off | inherit | status"
+    usage: "用法：/fast [on|off|inherit|status]"
+
+  context:
+    updated: "上下文模式已更新为：%{value}"
+    status: "上下文: %{value}"
+    invalid: "无效的取值。可选：1m | standard | inherit | status"
+    usage: "用法：/context [1m|standard|inherit|status]"
+
+  reasoning:
+    updated: "思考深度已更新为：%{value}"
+    status: "思考深度: %{value}"
+    invalid: "无效思考深度。可选：none | minimal | low | medium | high | xhigh | inherit | status"
+    usage: "用法：/reasoning [none|minimal|low|medium|high|xhigh|inherit|status]"
+
+  shared:
+    inherit_default: "继承默认"
+    unknown: "unknown"
+
+  verbose:
+    updated_on: "详细输出已开启"
+    updated_off: "详细输出已关闭"
+    status_on: "详细输出：开启"
+    status_off: "详细输出：关闭"
+    invalid: "无效的取值。可选：on | off | status"
+
+  alias:
+    added: "别名 `/%{name}` 已注册，包含 %{count} 步"
+    removed: "别名 `/%{name}` 已删除"
+    not_found: "别名 `/%{name}` 不存在"
+    list_header: "已注册别名："
+    list_item: "  /%{name} → %{steps}"
+    empty: "当前没有别名。用下面方式创建：\n/alias add <名称> <命令1> | <命令2> | ..."
+    protected: "不能使用 `/%{name}` —— 与内置命令冲突"
+    invalid_name: "无效别名。规则：1-20 字符，不含 `|`，不能以 `/` 开头"
+    empty_steps: "至少需要一条子命令"
+    too_deep: "别名展开层级过深（上限：%{max}）"
+    usage: "用法：/alias add <名称> <命令1> | <命令2> | ... | list | remove <名称>"
+    executed_header: "别名 `/%{name}` 执行结果："
+    skipped_non_command: "• %{step}（已跳过：不是命令）"
+
+  bg:
+    moved: "前台会话已转为后台：`%{alias}`。"
+    reset_empty: "当前前台是空白临时会话，已重置为新的临时会话。"
+
+  fg:
+    usage: "用法：`/fg <alias>`"
+    parked: "原前台已转入后台：`%{alias}`。\n"
+    switched: "%{parked}已切换到后台会话 `%{alias}`。\n%{runtime}"
+
+  resume:
+    usage: "用法：`/resume <编号或会话ID>`（先用 `/sessions` 查看项目，再 `/sessions <项目编号>` 查看会话）"
+    parked: "原前台已转入后台：`%{alias}`。\n"
+    restored: "%{parked}已恢复会话：%{summary}（workspace: `%{workspace}`）。\n%{runtime}"
+
+  loadbg:
+    usage: "用法：`/loadbg <编号或会话ID> [alias]`"
+    loaded: "已加载会话到后台标签 `%{alias}`：%{summary}。"
+
+  save:
+    updated: "前台会话已标记为持久保存。"
+    already_saved: "前台会话已处于保存状态。"
+
+  rename:
+    usage: "用法：`/rename <old_alias> <new_alias>`"
+    renamed: "后台标签已重命名：`%{old}` -> `%{new}`"
+
+  import:
+    imported: "已导入会话"
+    refreshed: "会话已存在，已刷新导入配置"
+    result: "%{action}：%{summary}\n工作目录: `%{workspace}`\n模型: %{model}"
+    empty: "系统 `~/.codex/sessions` 中没有可导入会话。"
+    project_header: "可导入项目 total=%{count}"
+    project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
+    projects_footer: "使用 `/import <项目编号> [page]` 查看该项目中的会话。"
+    project_empty: "项目 `%{path}` 下暂无可导入会话。"
+    page_out_of_range: "页码超出范围：项目 `%{path}` 共 %{total} 条，会话页大小 %{size}，当前页 %{page}。"
+    page_header: "可导入会话 project=%{path} page=%{page}/%{total_pages} (total=%{total})"
+    row: "%{index}. [%{updated}] %{summary}"
+    page_footer: "使用 `/import <编号|会话ID>` 导入会话。"
+
+  lang:
+    updated: "语言已切换为：%{lang}"
+    status: "当前语言：%{lang}"
+    unsupported: "不支持的语言 `%{lang}`。可选：en, zh"
+    usage: "用法：/lang [en|zh|status]"
+
+errors:
+  busy: "当前有任务在运行，请先等待当前任务完成后再执行，或使用 /interrupt 中断。"
+  permission: "Codex 执行失败：系统返回 Operation not permitted。请检查文件系统权限。"
+  generic: "命令失败：%{message}"
+  interrupt_requested: "已请求停止当前运行。"
+
+warnings:
+  context_near_limit: "⚠️ 上下文已使用 %{percent}%%（%{used}/%{total} tokens）。建议使用 `/new` 开启新会话。"

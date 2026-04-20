@@ -233,7 +233,7 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
                         websocket.send(Message::Pong(payload)).await?;
                     }
                     Message::Close(frame) => {
-                        return Err(anyhow!("qq gateway closed: {:?}", frame));
+                        return Err(anyhow!("qq gateway closed: {frame:?}"));
                     }
                     _ => {}
                 }

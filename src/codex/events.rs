@@ -15,7 +15,10 @@ pub enum CodexEvent {
     #[serde(rename = "item.completed")]
     ItemCompleted { item: CodexItem },
     #[serde(rename = "turn.completed")]
-    TurnCompleted,
+    TurnCompleted {
+        #[serde(default)]
+        usage: Option<TokenUsage>,
+    },
     #[serde(rename = "turn.failed")]
     TurnFailed { error: serde_json::Value },
     #[serde(rename = "response_item")]
@@ -134,6 +137,22 @@ pub struct McpToolCallError {
 pub struct TodoEntry {
     pub text: String,
     pub completed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
 }
 
 #[cfg(test)]

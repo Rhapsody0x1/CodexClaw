@@ -115,6 +115,12 @@ pub struct SessionSettings {
     pub verbose: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 impl Default for SessionSettings {
@@ -126,6 +132,7 @@ impl Default for SessionSettings {
             context_mode: None,
             verbose: false,
             plan_mode: false,
+            language: default_language(),
         }
     }
 }
@@ -231,6 +238,19 @@ impl ImportedSessionProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageSnapshot {
+    pub total_tokens: u64,
+    pub window: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DialogState {
     pub session_id: Option<String>,
     #[serde(default)]
@@ -240,6 +260,8 @@ pub struct DialogState {
     pub saved: bool,
     #[serde(default)]
     pub profile: Option<DialogProfile>,
+    #[serde(default)]
+    pub last_usage: Option<TokenUsageSnapshot>,
 }
 
 impl DialogState {
@@ -250,12 +272,20 @@ impl DialogState {
             workspace_dir,
             saved: false,
             profile: None,
+            last_usage: None,
         }
     }
 
     pub fn is_temporary(&self) -> bool {
         self.session_id.is_none()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandAlias {
+    pub name: String,
+    pub commands: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +309,8 @@ pub struct UserSessionState {
     pub last_import_sessions_view: Vec<String>,
     #[serde(default)]
     pub saved_local_session_ids: Vec<String>,
+    #[serde(default)]
+    pub command_aliases: BTreeMap<String, CommandAlias>,
 }
 
 impl UserSessionState {
@@ -294,6 +326,7 @@ impl UserSessionState {
             last_import_projects_view: Vec::new(),
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
+            command_aliases: BTreeMap::new(),
         }
     }
 }

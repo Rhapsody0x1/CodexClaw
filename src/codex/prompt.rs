@@ -18,11 +18,6 @@ pub fn build_prompt(
         "Current effective model: {}",
         settings.model_override.as_deref().unwrap_or(default_model)
     ));
-    if settings.plan_mode {
-        sections.push(
-            "Plan mode is ON. Only produce an implementation plan. Do not claim to have changed files or executed actions.".to_string(),
-        );
-    }
     sections.push(
         "If you want QQ to send attachments, append one trailing fenced block named qqbot. Supported lines: `image path=REL_OR_ABS_PATH` and `file path=REL_OR_ABS_PATH name=DOWNLOAD_NAME`."
             .to_string(),
@@ -62,8 +57,7 @@ pub fn build_prompt(
             .collect::<Vec<_>>()
             .join("\n");
         sections.push(format!(
-            "Images are attached separately and also available at:\n{}",
-            list
+            "Images are attached separately and also available at:\n{list}"
         ));
     }
     if !message.files.is_empty() {
@@ -81,8 +75,7 @@ pub fn build_prompt(
             .collect::<Vec<_>>()
             .join("\n");
         sections.push(format!(
-            "User uploaded files. Read them from disk if needed:\n{}",
-            list
+            "User uploaded files. Read them from disk if needed:\n{list}"
         ));
     }
     let user_text = if message.text.trim().is_empty() {
@@ -90,6 +83,6 @@ pub fn build_prompt(
     } else {
         &message.text
     };
-    sections.push(format!("User message:\n{}", user_text));
+    sections.push(format!("User message:\n{user_text}"));
     sections.join("\n\n")
 }

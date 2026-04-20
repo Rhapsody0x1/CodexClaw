@@ -324,9 +324,7 @@ impl QqApiClient {
         }
         anyhow::ensure!(
             status.is_success(),
-            "QQ API request failed with status {}: {}",
-            status,
-            raw
+            "QQ API request failed with status {status}: {raw}"
         );
         if raw.is_empty() && StatusCode::NO_CONTENT == status {
             return serde_json::from_str("null").context("failed to parse empty response");

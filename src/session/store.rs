@@ -11,9 +11,9 @@ use rand::{Rng, seq::SliceRandom};
 use tokio::sync::RwLock;
 
 use crate::session::state::{
-    ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
+    CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
     PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings, SessionState,
-    UserSessionState,
+    TokenUsageSnapshot, UserSessionState,
 };
 
 const ALIAS_WORDS: &[&str] = &[
@@ -279,6 +279,62 @@ impl SessionStore {
         .await
     }
 
+    pub async fn set_foreground_usage(
+        &self,
+        openid: &str,
+        usage: TokenUsageSnapshot,
+    ) -> Result<()> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.foreground.last_usage = Some(usage);
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn add_command_alias(
+        &self,
+        openid: &str,
+        alias: CommandAlias,
+    ) -> Result<CommandAlias> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.command_aliases
+                .insert(alias.name.clone(), alias.clone());
+            Ok(alias)
+        })
+        .await
+    }
+
+    pub async fn remove_command_alias(&self, openid: &str, name: &str) -> Result<bool> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            Ok(user.command_aliases.remove(name).is_some())
+        })
+        .await
+    }
+
+    pub async fn get_command_alias(
+        &self,
+        openid: &str,
+        name: &str,
+    ) -> Result<Option<CommandAlias>> {
+        let state = self.state.read().await;
+        Ok(state
+            .users
+            .get(openid)
+            .and_then(|user| user.command_aliases.get(name).cloned()))
+    }
+
+    pub async fn list_command_aliases(&self, openid: &str) -> Result<Vec<CommandAlias>> {
+        let state = self.state.read().await;
+        Ok(state
+            .users
+            .get(openid)
+            .map(|user| user.command_aliases.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
     pub async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
@@ -399,6 +455,7 @@ impl SessionStore {
                     .unwrap_or_else(|| target.cwd.clone()),
                 saved: true,
                 profile: resolved_profile.clone().map(|value| value.dialog_profile()),
+                last_usage: None,
             };
             Ok(SwitchResult { parked_alias })
         })
@@ -442,6 +499,7 @@ impl SessionStore {
                         .unwrap_or_else(|| target.cwd.clone()),
                     saved: true,
                     profile: resolved_profile.clone().map(|value| value.dialog_profile()),
+                    last_usage: None,
                 },
             );
             record_background_alias(user, &alias);
@@ -778,6 +836,7 @@ fn load_legacy_state(
                 workspace_dir: prepare_workspace_dir(shared_workspace_dir)?,
                 saved: false,
                 profile: None,
+                last_usage: None,
             },
             background: BTreeMap::new(),
             background_order: Vec::new(),
@@ -788,6 +847,7 @@ fn load_legacy_state(
             last_import_projects_view: Vec::new(),
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
+            command_aliases: BTreeMap::new(),
         },
     );
     Ok(PersistedSessionState {
@@ -819,6 +879,7 @@ fn ensure_user_mut<'a>(
             last_import_projects_view: Vec::new(),
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
+            command_aliases: BTreeMap::new(),
         },
     );
     Ok(state.users.get_mut(openid).expect("user entry must exist"))
@@ -1820,6 +1881,7 @@ mod tests {
                         workspace_dir: workspace.path().to_path_buf(),
                         saved: true,
                         profile: None,
+                        last_usage: None,
                     },
                 );
                 Ok(())

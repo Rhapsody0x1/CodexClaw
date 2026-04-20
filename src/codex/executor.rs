@@ -14,7 +14,9 @@ use tokio::{
 };
 
 use crate::{
-    codex::events::{CodexEvent, CodexItem, PatchChangeKind, ResponseItemPayload, WebSearchAction},
+    codex::events::{
+        CodexEvent, CodexItem, PatchChangeKind, ResponseItemPayload, TokenUsage, WebSearchAction,
+    },
     session::state::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
 };
 
@@ -46,6 +48,8 @@ pub struct ExecutionResult {
     pub session_id: Option<String>,
     pub text: String,
     pub changed_files: Vec<PathBuf>,
+    pub last_usage: Option<TokenUsage>,
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +166,11 @@ impl CodexExecutor {
         let mut current_session_id = request.session_state.session_id.clone();
         let mut text_parts = Vec::new();
         let mut changed_files = Vec::new();
+        let mut last_usage: Option<TokenUsage> = None;
+        let context_window = request.context_mode.map(|mode| match mode {
+            ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
+            ContextMode::OneM => 1_000_000u64,
+        });
         let mut cancel_rx = cancel_rx;
         loop {
             let line = if let Some(cancel) = cancel_rx.as_mut() {
@@ -253,8 +262,10 @@ impl CodexExecutor {
                         payload: ResponseItemPayload::Unknown,
                     } => {}
                     CodexEvent::ResponseItem { .. } => {}
+                    CodexEvent::TurnCompleted { usage: Some(usage) } => last_usage = Some(usage),
+                    CodexEvent::TurnCompleted { usage: None } => {}
                     CodexEvent::TurnFailed { error } => {
-                        return Err(anyhow!("codex turn failed: {}", error));
+                        return Err(anyhow!("codex turn failed: {error}"));
                     }
                     _ => {}
                 }
@@ -277,6 +288,8 @@ impl CodexExecutor {
             session_id: current_session_id,
             text: text_parts.join("\n\n").trim().to_string(),
             changed_files,
+            last_usage,
+            context_window,
         })
     }
 }
@@ -362,7 +375,7 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
                 .filter(|value| !value.is_empty())
                 .map(|value| format!(" {}", truncate(&value, 160)))
                 .unwrap_or_default();
-            Some(format!("[Tool: MCP {}:{}]{}", server, tool, args))
+            Some(format!("[Tool: MCP {server}:{tool}]{args}"))
         }
         "mcp_tool_call" if phase == ToolEventPhase::Completed => {
             let server = item.server.as_deref().unwrap_or("unknown");
@@ -370,7 +383,7 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
             let summary = if let Some(error) = item.error.as_ref() {
                 format!(" failed: {}", truncate(error.message.trim(), 180))
             } else if let Some(result) = item.result.as_ref() {
-                let detail = result
+                result
                     .structured_content
                     .as_ref()
                     .map(short_json)
@@ -382,19 +395,18 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
                             .and_then(|value| serde_json::to_string(value).ok())
                     })
                     .map(|value| format!(" {}", truncate(&value, 180)))
-                    .unwrap_or_else(|| " completed".to_string());
-                detail
+                    .unwrap_or_else(|| " completed".to_string())
             } else {
                 " completed".to_string()
             };
-            Some(format!("[Tool: MCP {}:{}]{}", server, tool, summary))
+            Some(format!("[Tool: MCP {server}:{tool}]{summary}"))
         }
         "collab_tool_call" if phase == ToolEventPhase::Started => {
             let label = humanize_tool_label(&item.tool.clone().unwrap_or_else(|| "collab".into()));
             let detail = item
                 .receiver_thread_ids
                 .first()
-                .map(|thread_id| format!(" -> {}", thread_id))
+                .map(|thread_id| format!(" -> {thread_id}"))
                 .or_else(|| {
                     item.prompt
                         .as_deref()
@@ -402,7 +414,7 @@ fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<Stri
                         .map(|prompt| format!(" {}", truncate(prompt.trim(), 120)))
                 })
                 .unwrap_or_default();
-            Some(format!("[Tool: {}]{}", label, detail))
+            Some(format!("[Tool: {label}]{detail}"))
         }
         "error" if phase == ToolEventPhase::Completed => item
             .message
@@ -431,7 +443,7 @@ fn web_search_action_detail(action: &WebSearchAction) -> String {
             .unwrap_or_default(),
         WebSearchAction::OpenPage { url } => url.clone().unwrap_or_default(),
         WebSearchAction::FindInPage { url, pattern } => match (pattern, url) {
-            (Some(pattern), Some(url)) => format!("'{}' in {}", pattern, url),
+            (Some(pattern), Some(url)) => format!("'{pattern}' in {url}"),
             (Some(pattern), None) => pattern.clone(),
             (None, Some(url)) => url.clone(),
             (None, None) => String::new(),

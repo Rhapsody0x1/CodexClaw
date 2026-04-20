@@ -1,15 +1,54 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
+use rust_i18n::t;
 
 use crate::{
     codex::runtime::CodexRuntimeProfile,
+    normalize_lang,
     session::{
-        state::{ContextMode, ReasoningEffort, ServiceTier, UserSessionState},
+        state::{CommandAlias, ContextMode, ReasoningEffort, ServiceTier, UserSessionState},
         store::{DiskSessionMeta, SessionListScope, SessionStore},
     },
 };
+
+const MAX_ALIAS_DEPTH: usize = 3;
+
+const PROTECTED_COMMANDS: &[&str] = &[
+    "help",
+    "lang",
+    "model",
+    "fast",
+    "context",
+    "reasoning",
+    "verbose",
+    "status",
+    "session",
+    "sessions",
+    "import",
+    "new",
+    "bg",
+    "fg",
+    "resume",
+    "loadbg",
+    "save",
+    "rename",
+    "stop",
+    "interrupt",
+    "self-update",
+    "alias",
+    // Chinese aliases also protected
+    "帮助",
+    "状态",
+    "会话",
+    "模型",
+    "快速",
+    "上下文",
+    "思考",
+    "别名",
+    "语言",
+];
 
 const PROJECT_KEY_SEP: char = '\u{1f}';
 
@@ -41,191 +80,423 @@ pub async fn maybe_handle_command(
     runtime_profile: &CodexRuntimeProfile,
     is_busy: bool,
 ) -> Result<CommandOutcome> {
-    if !text.trim_start().starts_with('/') {
-        return Ok(CommandOutcome::Continue);
+    maybe_handle_command_inner(
+        text,
+        openid,
+        session,
+        default_model,
+        runtime_profile,
+        is_busy,
+        0,
+    )
+    .await
+}
+
+fn maybe_handle_command_inner<'a>(
+    text: &'a str,
+    openid: &'a str,
+    session: &'a SessionStore,
+    default_model: &'a str,
+    runtime_profile: &'a CodexRuntimeProfile,
+    is_busy: bool,
+    alias_depth: usize,
+) -> Pin<Box<dyn Future<Output = Result<CommandOutcome>> + Send + 'a>> {
+    Box::pin(async move {
+        if !text.trim_start().starts_with('/') {
+            return Ok(CommandOutcome::Continue);
+        }
+        let trimmed = text.trim();
+        let mut parts = trimmed.split_whitespace();
+        let raw_command = parts.next().unwrap_or_default().to_ascii_lowercase();
+        let command = canonicalize_core_command(&raw_command).to_string();
+        let rest = parts.collect::<Vec<_>>();
+        match command.as_str() {
+            "/help" => Ok(CommandOutcome::Reply(CommandReply {
+                text: help_text(&session.snapshot_for_user(openid).await?.settings.language),
+            })),
+            "/lang" => handle_lang(&rest, openid, session).await,
+            "/model" => {
+                handle_model(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/fast" => {
+                handle_fast(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/context" => {
+                handle_context(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/reasoning" => {
+                handle_reasoning(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/verbose" => {
+                handle_verbose(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/status" => Ok(CommandOutcome::Reply(CommandReply {
+                text: build_status_text(
+                    &session.snapshot_for_user(openid).await?,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                ),
+            })),
+            "/sessions" => {
+                handle_sessions(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/import" => {
+                handle_import(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/new" => {
+                let raw_args = trimmed
+                    .strip_prefix(command.as_str())
+                    .unwrap_or_default()
+                    .trim();
+                handle_new(
+                    raw_args,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/bg" => {
+                handle_bg(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/fg" => {
+                handle_fg(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/resume" => {
+                handle_resume(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/loadbg" => {
+                handle_loadbg(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/save" => handle_save(openid, session, default_model, runtime_profile, is_busy).await,
+            "/rename" => {
+                handle_rename(
+                    &rest,
+                    openid,
+                    session,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                )
+                .await
+            }
+            "/stop" => handle_stop(openid, session, default_model, runtime_profile).await,
+            "/interrupt" => {
+                let lang = session
+                    .snapshot_for_user(openid)
+                    .await?
+                    .settings
+                    .language
+                    .clone();
+                Ok(CommandOutcome::CancelCurrent(
+                    t!("errors.interrupt_requested", locale = lang.as_str()).into_owned(),
+                ))
+            }
+            "/self-update" => Ok(CommandOutcome::SelfUpdate),
+            "/alias" => handle_alias(&rest, openid, session).await,
+            other => {
+                let alias_name = other.trim_start_matches('/').to_ascii_lowercase();
+                if !alias_name.is_empty()
+                    && let Some(alias) = session.get_command_alias(openid, &alias_name).await?
+                {
+                    return expand_alias(
+                        &alias,
+                        openid,
+                        session,
+                        default_model,
+                        runtime_profile,
+                        is_busy,
+                        alias_depth,
+                    )
+                    .await;
+                }
+                Ok(CommandOutcome::Continue)
+            }
+        }
+    })
+}
+
+async fn expand_alias(
+    alias: &CommandAlias,
+    openid: &str,
+    session: &SessionStore,
+    default_model: &str,
+    runtime_profile: &CodexRuntimeProfile,
+    is_busy: bool,
+    alias_depth: usize,
+) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
+    if alias_depth >= MAX_ALIAS_DEPTH {
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: t!(
+                "commands.alias.too_deep",
+                max = MAX_ALIAS_DEPTH,
+                locale = lang.as_str()
+            )
+            .into_owned(),
+        }));
     }
-    let trimmed = text.trim();
-    let mut parts = trimmed.split_whitespace();
-    let command = parts.next().unwrap_or_default().to_ascii_lowercase();
-    let rest = parts.collect::<Vec<_>>();
-    match command.as_str() {
-        "/help" => Ok(CommandOutcome::Reply(CommandReply { text: help_text() })),
-        "/bind" => Ok(CommandOutcome::Reply(CommandReply {
-            text: "绑定/授权限制已禁用，所有私聊用户都可直接使用机器人。".to_string(),
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(
+        t!(
+            "commands.alias.executed_header",
+            name = alias.name.as_str(),
+            locale = lang.as_str()
+        )
+        .into_owned(),
+    );
+    for step in &alias.commands {
+        let outcome = maybe_handle_command_inner(
+            step,
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            is_busy,
+            alias_depth + 1,
+        )
+        .await?;
+        match outcome {
+            CommandOutcome::Reply(reply) => parts.push(reply.text),
+            CommandOutcome::Continue => {
+                parts.push(
+                    t!(
+                        "commands.alias.skipped_non_command",
+                        step = step,
+                        locale = lang.as_str()
+                    )
+                    .into_owned(),
+                );
+            }
+            CommandOutcome::CancelCurrent(msg) => {
+                parts.push(msg);
+                return Ok(CommandOutcome::CancelCurrent(parts.join("\n")));
+            }
+            CommandOutcome::StopCurrent(msg) => {
+                parts.push(msg);
+                return Ok(CommandOutcome::StopCurrent(parts.join("\n")));
+            }
+            CommandOutcome::SelfUpdate => return Ok(CommandOutcome::SelfUpdate),
+        }
+    }
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: parts.join("\n"),
+    }))
+}
+
+async fn handle_alias(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
+    let locale = lang.as_str();
+
+    let show_list = || async {
+        let aliases = session.list_command_aliases(openid).await?;
+        if aliases.is_empty() {
+            return Ok::<CommandOutcome, anyhow::Error>(CommandOutcome::Reply(CommandReply {
+                text: t!("commands.alias.empty", locale = locale).into_owned(),
+            }));
+        }
+        let mut lines = vec![t!("commands.alias.list_header", locale = locale).into_owned()];
+        for alias in aliases {
+            let steps = alias.commands.join(" | ");
+            lines.push(
+                t!(
+                    "commands.alias.list_item",
+                    name = alias.name.as_str(),
+                    steps = steps.as_str(),
+                    locale = locale
+                )
+                .into_owned(),
+            );
+        }
+        Ok(CommandOutcome::Reply(CommandReply {
+            text: lines.join("\n"),
+        }))
+    };
+
+    if args.is_empty() {
+        return show_list().await;
+    }
+
+    match args[0].to_ascii_lowercase().as_str() {
+        "list" | "ls" => show_list().await,
+        "remove" | "rm" | "delete" | "del" => {
+            let Some(raw_name) = args.get(1) else {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.alias.usage", locale = locale).into_owned(),
+                }));
+            };
+            let name = raw_name.trim_start_matches('/').trim().to_ascii_lowercase();
+            let removed = session.remove_command_alias(openid, &name).await?;
+            let key = if removed {
+                "commands.alias.removed"
+            } else {
+                "commands.alias.not_found"
+            };
+            Ok(CommandOutcome::Reply(CommandReply {
+                text: t!(key, name = name, locale = locale).into_owned(),
+            }))
+        }
+        "add" => {
+            let Some(raw_name) = args.get(1) else {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.alias.usage", locale = locale).into_owned(),
+                }));
+            };
+            let Ok(name) = normalize_command_alias_name(raw_name) else {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.alias.invalid_name", locale = locale).into_owned(),
+                }));
+            };
+            if PROTECTED_COMMANDS.contains(&name.as_str()) {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!(
+                        "commands.alias.protected",
+                        name = name.as_str(),
+                        locale = locale
+                    )
+                    .into_owned(),
+                }));
+            }
+            if args.len() < 3 {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.alias.empty_steps", locale = locale).into_owned(),
+                }));
+            }
+            let joined = args[2..].join(" ");
+            let commands: Vec<String> = joined
+                .split('|')
+                .map(|piece| piece.trim().to_string())
+                .filter(|piece| !piece.is_empty())
+                .collect();
+            if commands.is_empty() {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.alias.empty_steps", locale = locale).into_owned(),
+                }));
+            }
+            let alias = CommandAlias {
+                name: name.clone(),
+                commands: commands.clone(),
+                created_at: Utc::now(),
+            };
+            session.add_command_alias(openid, alias).await?;
+            Ok(CommandOutcome::Reply(CommandReply {
+                text: t!(
+                    "commands.alias.added",
+                    name = name.as_str(),
+                    count = commands.len(),
+                    locale = locale
+                )
+                .into_owned(),
+            }))
+        }
+        _ => Ok(CommandOutcome::Reply(CommandReply {
+            text: t!("commands.alias.usage", locale = locale).into_owned(),
         })),
-        "/model" => {
-            handle_model(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/fast" => {
-            handle_fast(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/context" => {
-            handle_context(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/reasoning" => {
-            handle_reasoning(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/verbose" => {
-            handle_verbose(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/plan" => {
-            handle_plan(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/status" | "/session" => Ok(CommandOutcome::Reply(CommandReply {
-            text: build_status_text(
-                &session.snapshot_for_user(openid).await?,
-                default_model,
-                runtime_profile,
-                is_busy,
-            ),
-        })),
-        "/sessions" => {
-            handle_sessions(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/import" => {
-            handle_import(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/new" => {
-            let raw_args = trimmed
-                .strip_prefix(command.as_str())
-                .unwrap_or_default()
-                .trim();
-            handle_new(
-                raw_args,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/bg" => {
-            handle_bg(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/fg" => {
-            handle_fg(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/resume" => {
-            handle_resume(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/loadbg" => {
-            handle_loadbg(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/save" => handle_save(openid, session, default_model, runtime_profile, is_busy).await,
-        "/rename" => {
-            handle_rename(
-                &rest,
-                openid,
-                session,
-                default_model,
-                runtime_profile,
-                is_busy,
-            )
-            .await
-        }
-        "/stop" => handle_stop(openid, session, default_model, runtime_profile).await,
-        "/interrupt" => Ok(CommandOutcome::CancelCurrent(
-            "已请求停止当前运行。".to_string(),
-        )),
-        "/self-update" => Ok(CommandOutcome::SelfUpdate),
-        _ => Ok(CommandOutcome::Continue),
     }
 }
 
@@ -249,14 +520,17 @@ async fn handle_model(
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         let active_override = merged_settings(&snapshot).model_override;
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "model: {}\nmodel_override: {}\n提示：完整会话状态请用 `/status`。",
-                effective_model(&snapshot, default_model, runtime_profile),
-                active_override.as_deref().unwrap_or("inherit"),
-            ),
+            text: t!(
+                "commands.model.status",
+                effective = effective_model(&snapshot, default_model, runtime_profile),
+                override_value = active_override.as_deref().unwrap_or("inherit"),
+                locale = lang.as_str()
+            )
+            .into_owned(),
         }));
     }
     let value = args.join(" ");
@@ -270,10 +544,12 @@ async fn handle_model(
         .await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "模型已更新为：{}",
-            effective_model(&snapshot, default_model, runtime_profile)
-        ),
+        text: t!(
+            "commands.model.updated",
+            model = effective_model(&snapshot, default_model, runtime_profile),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -286,29 +562,33 @@ async fn handle_fast(
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "fast: {}\n提示：完整会话状态请用 `/status`。",
-                effective_fast_label(&snapshot, runtime_profile)
-            ),
+            text: t!(
+                "commands.fast.status",
+                value = effective_fast_label(&snapshot, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned(),
         }));
     }
     let next = if args[0].eq_ignore_ascii_case("inherit") {
         None
     } else {
-        Some(
-            ServiceTier::parse(args[0])
-                .ok_or_else(|| anyhow!("用法：`/fast [on|off|inherit|status]`"))?,
-        )
+        Some(ServiceTier::parse(args[0]).ok_or_else(|| {
+            anyhow!(t!("commands.fast.usage", locale = lang.as_str()).into_owned())
+        })?)
     };
     session.set_service_tier_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "fast 已更新为：{}",
-            effective_fast_label(&snapshot, runtime_profile)
-        ),
+        text: t!(
+            "commands.fast.updated",
+            value = effective_fast_label(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -321,29 +601,33 @@ async fn handle_context(
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "context: {}\n提示：完整会话状态请用 `/status`。",
-                effective_context_label(&snapshot, runtime_profile)
-            ),
+            text: t!(
+                "commands.context.status",
+                value = effective_context_label(&snapshot, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned(),
         }));
     }
     let next = if args[0].eq_ignore_ascii_case("inherit") {
         None
     } else {
-        Some(
-            ContextMode::parse(args[0])
-                .ok_or_else(|| anyhow!("用法：`/context [1m|standard|inherit|status]`"))?,
-        )
+        Some(ContextMode::parse(args[0]).ok_or_else(|| {
+            anyhow!(t!("commands.context.usage", locale = lang.as_str()).into_owned())
+        })?)
     };
     session.set_context_mode_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "上下文模式已更新为：{}",
-            effective_context_label(&snapshot, runtime_profile)
-        ),
+        text: t!(
+            "commands.context.updated",
+            value = effective_context_label(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -356,74 +640,33 @@ async fn handle_reasoning(
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "reasoning: {}\n提示：完整会话状态请用 `/status`。",
-                effective_reasoning(&snapshot, runtime_profile)
-            ),
+            text: t!(
+                "commands.reasoning.status",
+                value = effective_reasoning(&snapshot, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned(),
         }));
     }
     let next = if args[0].eq_ignore_ascii_case("inherit") {
         None
     } else {
         Some(ReasoningEffort::parse(args[0]).ok_or_else(|| {
-            anyhow!("无效思考深度：可选 none|minimal|low|medium|high|xhigh|inherit")
+            anyhow!(t!("commands.reasoning.invalid", locale = lang.as_str()).into_owned())
         })?)
     };
     session.set_reasoning_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "思考深度已更新为：{}",
-            effective_reasoning(&snapshot, runtime_profile)
-        ),
-    }))
-}
-
-async fn handle_plan(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
-        let snapshot = session.snapshot_for_user(openid).await?;
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "plan: {}\n提示：完整会话状态请用 `/status`。",
-                if snapshot.settings.plan_mode {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-        }));
-    }
-    let enabled = match args[0].to_ascii_lowercase().as_str() {
-        "on" => true,
-        "off" => false,
-        _ => {
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: "用法：`/plan [on|off|status]`".to_string(),
-            }));
-        }
-    };
-    session
-        .update_settings_for_user(openid, |state| state.plan_mode = enabled)
-        .await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "plan 已更新为：{}",
-            if snapshot.settings.plan_mode {
-                "on"
-            } else {
-                "off"
-            }
-        ),
+        text: t!(
+            "commands.reasoning.updated",
+            value = effective_reasoning(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -435,17 +678,21 @@ async fn handle_verbose(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
         let snapshot = session.snapshot_for_user(openid).await?;
+        let key = if snapshot.settings.verbose {
+            "commands.verbose.status_on"
+        } else {
+            "commands.verbose.status_off"
+        };
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "verbose: {}\n提示：完整会话状态请用 `/status`。",
-                if snapshot.settings.verbose {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
+            text: t!(key, locale = lang.as_str()).into_owned(),
         }));
     }
     let enabled = match args[0].to_ascii_lowercase().as_str() {
@@ -453,23 +700,20 @@ async fn handle_verbose(
         "off" | "false" => false,
         _ => {
             return Ok(CommandOutcome::Reply(CommandReply {
-                text: "用法：`/verbose [on|off|status]`".to_string(),
+                text: t!("commands.verbose.invalid", locale = lang.as_str()).into_owned(),
             }));
         }
     };
     session
         .update_settings_for_user(openid, |state| state.verbose = enabled)
         .await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
+    let key = if enabled {
+        "commands.verbose.updated_on"
+    } else {
+        "commands.verbose.updated_off"
+    };
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "verbose 已更新为：{}",
-            if snapshot.settings.verbose {
-                "on"
-            } else {
-                "off"
-            }
-        ),
+        text: t!(key, locale = lang.as_str()).into_owned(),
     }))
 }
 
@@ -482,6 +726,7 @@ async fn handle_new(
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
     let moved = if raw_args.trim().is_empty() {
         session.new_foreground(openid).await?
     } else {
@@ -492,16 +737,27 @@ async fn handle_new(
     };
     let parked = moved
         .parked_alias
-        .map(|alias| format!("已将原前台会话转入后台：`{alias}`\n"))
+        .map(|alias| {
+            let mut line = t!(
+                "commands.new.parked",
+                alias = alias.as_str(),
+                locale = lang.as_str()
+            )
+            .into_owned();
+            line.push('\n');
+            line
+        })
         .unwrap_or_default();
     let snapshot = session.snapshot_for_user(openid).await?;
     let mut lines = vec![if raw_args.trim().is_empty() {
-        "已创建新的临时前台会话。".to_string()
+        t!("commands.new.created_temp", locale = lang.as_str()).into_owned()
     } else {
-        format!(
-            "已创建新的临时前台会话。\n工作目录: `{}`",
-            snapshot.foreground.workspace_dir.display()
+        t!(
+            "commands.new.created_with_workspace",
+            dir = snapshot.foreground.workspace_dir.display().to_string(),
+            locale = lang.as_str()
         )
+        .into_owned()
     }];
     lines.push(format_effective_runtime_text(
         &snapshot,
@@ -522,13 +778,24 @@ async fn handle_bg(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let moved = session
         .move_foreground_to_background(openid, args.first().copied())
         .await?;
     let text = if let Some(alias) = moved.parked_alias {
-        format!("前台会话已转为后台：`{alias}`。")
+        t!(
+            "commands.bg.moved",
+            alias = alias.as_str(),
+            locale = lang.as_str()
+        )
+        .into_owned()
     } else {
-        "当前前台是空白临时会话，已重置为新的临时会话。".to_string()
+        t!("commands.bg.reset_empty", locale = lang.as_str()).into_owned()
     };
     Ok(CommandOutcome::Reply(CommandReply { text }))
 }
@@ -541,9 +808,15 @@ async fn handle_fg(
     runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let Some(alias) = args.first() else {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: "用法：`/fg <alias>`".to_string(),
+            text: t!("commands.fg.usage", locale = lang.as_str()).into_owned(),
         }));
     };
     let switched = session.foreground_from_background(openid, alias).await?;
@@ -551,20 +824,29 @@ async fn handle_fg(
     let preview = foreground_last_user_message(session, openid, &snapshot).await?;
     let parked = switched
         .parked_alias
-        .map(|value| format!("原前台已转入后台：`{value}`。\n"))
+        .map(|value| {
+            t!(
+                "commands.fg.parked",
+                alias = value.as_str(),
+                locale = lang.as_str()
+            )
+            .into_owned()
+        })
         .unwrap_or_default();
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "{}已切换到后台会话 `{}`。\n{}",
-            parked,
-            alias,
-            format_effective_runtime_text(
+        text: t!(
+            "commands.fg.switched",
+            parked = parked,
+            alias = *alias,
+            runtime = format_effective_runtime_text(
                 &snapshot,
                 default_model,
                 runtime_profile,
                 preview.as_deref()
-            )
-        ),
+            ),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -576,10 +858,15 @@ async fn handle_resume(
     runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let Some(selector) = args.first() else {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: "用法：`/resume <编号或会话ID>`（先用 `/sessions` 查看项目，再 `/sessions <项目编号>` 查看会话）"
-                .to_string(),
+            text: t!("commands.resume.usage", locale = lang.as_str()).into_owned(),
         }));
     };
     let sessions = session
@@ -589,6 +876,7 @@ async fn handle_resume(
         selector,
         &sessions,
         &session.last_sessions_view(openid).await?,
+        lang.as_str(),
     )?;
     let switched = session.resume_disk_session(openid, &target).await?;
     let imported_profile = session.imported_profile_for_session(&target.id).await?;
@@ -599,21 +887,30 @@ async fn handle_resume(
     let snapshot = session.snapshot_for_user(openid).await?;
     let parked = switched
         .parked_alias
-        .map(|value| format!("原前台已转入后台：`{value}`。\n"))
+        .map(|value| {
+            t!(
+                "commands.resume.parked",
+                alias = value.as_str(),
+                locale = lang.as_str()
+            )
+            .into_owned()
+        })
         .unwrap_or_default();
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "{}已恢复会话：{}（workspace: `{}`）。\n{}",
-            parked,
-            session_summary(&target),
-            workspace_display,
-            format_effective_runtime_text(
+        text: t!(
+            "commands.resume.restored",
+            parked = parked,
+            summary = session_summary(&target, lang.as_str()),
+            workspace = workspace_display,
+            runtime = format_effective_runtime_text(
                 &snapshot,
                 default_model,
                 runtime_profile,
                 target.last_user_message.as_deref(),
             ),
-        ),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -625,9 +922,15 @@ async fn handle_loadbg(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let Some(selector) = args.first() else {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: "用法：`/loadbg <编号或会话ID> [alias]`".to_string(),
+            text: t!("commands.loadbg.usage", locale = lang.as_str()).into_owned(),
         }));
     };
     let sessions = session
@@ -637,16 +940,19 @@ async fn handle_loadbg(
         selector,
         &sessions,
         &session.last_sessions_view(openid).await?,
+        lang.as_str(),
     )?;
     let alias = session
         .load_disk_session_to_background(openid, &target, args.get(1).copied())
         .await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!(
-            "已加载会话到后台标签 `{}`：{}。",
-            alias,
-            session_summary(&target),
-        ),
+        text: t!(
+            "commands.loadbg.loaded",
+            alias = alias.as_str(),
+            summary = session_summary(&target, lang.as_str()),
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -657,14 +963,20 @@ async fn handle_save(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let changed = session.save_foreground(openid).await?;
-    let prefix = if changed {
-        "前台会话已标记为持久保存。"
+    let key = if changed {
+        "commands.save.updated"
     } else {
-        "前台会话已处于保存状态。"
+        "commands.save.already_saved"
     };
     Ok(CommandOutcome::Reply(CommandReply {
-        text: prefix.to_string(),
+        text: t!(key, locale = lang.as_str()).into_owned(),
     }))
 }
 
@@ -676,16 +988,28 @@ async fn handle_rename(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     if args.len() != 2 {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: "用法：`/rename <old_alias> <new_alias>`".to_string(),
+            text: t!("commands.rename.usage", locale = lang.as_str()).into_owned(),
         }));
     }
     session
         .rename_background_alias(openid, args[0], args[1])
         .await?;
     Ok(CommandOutcome::Reply(CommandReply {
-        text: format!("后台标签已重命名：`{}` -> `{}`", args[0], args[1]),
+        text: t!(
+            "commands.rename.renamed",
+            old = args[0],
+            new = args[1],
+            locale = lang.as_str()
+        )
+        .into_owned(),
     }))
 }
 
@@ -697,15 +1021,21 @@ async fn handle_sessions(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     if args.is_empty() || is_scope_token(args[0]) {
         let scope = if args.is_empty() {
             SessionListScope::All
         } else {
-            parse_scope(args[0])?
+            parse_scope(args[0], lang.as_str())?
         };
         let sessions = session.list_disk_sessions(openid, scope).await?;
         let projects = collect_projects(&sessions);
-        let (text, project_keys) = format_projects_list(&projects);
+        let (text, project_keys) = format_projects_list(&projects, lang.as_str());
         session.set_last_projects_view(openid, project_keys).await?;
         session.set_last_sessions_view(openid, Vec::new()).await?;
         return Ok(CommandOutcome::Reply(CommandReply { text }));
@@ -716,15 +1046,18 @@ async fn handle_sessions(
         .get(1)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
-    let project_key =
-        resolve_project_selector(selector, &session.last_projects_view(openid).await?)?;
+    let project_key = resolve_project_selector(
+        selector,
+        &session.last_projects_view(openid).await?,
+        lang.as_str(),
+    )?;
     let (scope, project_path) = decode_project_key(&project_key)?;
     let all_sessions = session.list_disk_sessions(openid, scope).await?;
     let sessions = all_sessions
         .into_iter()
         .filter(|item| item.cwd.display().to_string() == project_path)
         .collect::<Vec<_>>();
-    let (text, ids) = format_project_sessions_page(&project_path, &sessions, page);
+    let (text, ids) = format_project_sessions_page(&project_path, &sessions, page, lang.as_str());
     session.set_last_sessions_view(openid, ids).await?;
     Ok(CommandOutcome::Reply(CommandReply { text }))
 }
@@ -737,32 +1070,41 @@ async fn handle_import(
     _runtime_profile: &CodexRuntimeProfile,
     _is_busy: bool,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
     let all = session.list_importable_sessions()?;
     let last_session_view = session.last_import_sessions_view(openid).await?;
     if let Some(selector) = args.first()
         && !last_session_view.is_empty()
-        && let Ok(target) = resolve_selector(selector, &all, &last_session_view)
+        && let Ok(target) = resolve_selector(selector, &all, &last_session_view, lang.as_str())
     {
         let result = session.import_disk_session(&target).await?;
         let profile = result.profile;
         let action = if result.copied {
-            "已导入会话"
+            t!("commands.import.imported", locale = lang.as_str())
         } else {
-            "会话已存在，已刷新导入配置"
+            t!("commands.import.refreshed", locale = lang.as_str())
         };
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!(
-                "{action}：{}\n工作目录: `{}`\n模型: {}",
-                session_summary(&target),
-                profile.workspace_dir.display(),
-                compact_imported_profile_summary(&profile),
-            ),
+            text: t!(
+                "commands.import.result",
+                action = action.as_ref(),
+                summary = session_summary(&target, lang.as_str()),
+                workspace = profile.workspace_dir.display().to_string(),
+                model = compact_imported_profile_summary(&profile, lang.as_str()),
+                locale = lang.as_str()
+            )
+            .into_owned(),
         }));
     }
 
     if args.is_empty() {
         let projects = collect_projects(&all);
-        let (text, project_keys) = format_import_projects_list(&projects);
+        let (text, project_keys) = format_import_projects_list(&projects, lang.as_str());
         session
             .set_last_import_projects_view(openid, project_keys)
             .await?;
@@ -778,24 +1120,27 @@ async fn handle_import(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
     let import_projects = session.last_import_projects_view(openid).await?;
-    let project_key = match resolve_project_selector(selector, &import_projects) {
+    let project_key = match resolve_project_selector(selector, &import_projects, lang.as_str()) {
         Ok(value) => value,
         Err(_) => {
-            let target = resolve_selector(selector, &all, &last_session_view)?;
+            let target = resolve_selector(selector, &all, &last_session_view, lang.as_str())?;
             let result = session.import_disk_session(&target).await?;
             let profile = result.profile;
             let action = if result.copied {
-                "已导入会话"
+                t!("commands.import.imported", locale = lang.as_str())
             } else {
-                "会话已存在，已刷新导入配置"
+                t!("commands.import.refreshed", locale = lang.as_str())
             };
             return Ok(CommandOutcome::Reply(CommandReply {
-                text: format!(
-                    "{action}：{}\n工作目录: `{}`\n模型: {}",
-                    session_summary(&target),
-                    profile.workspace_dir.display(),
-                    compact_imported_profile_summary(&profile),
-                ),
+                text: t!(
+                    "commands.import.result",
+                    action = action.as_ref(),
+                    summary = session_summary(&target, lang.as_str()),
+                    workspace = profile.workspace_dir.display().to_string(),
+                    model = compact_imported_profile_summary(&profile, lang.as_str()),
+                    locale = lang.as_str()
+                )
+                .into_owned(),
             }));
         }
     };
@@ -804,7 +1149,8 @@ async fn handle_import(
         .into_iter()
         .filter(|item| item.cwd.display().to_string() == project_path)
         .collect::<Vec<_>>();
-    let (text, ids) = format_import_project_sessions_page(&project_path, &project_sessions, page);
+    let (text, ids) =
+        format_import_project_sessions_page(&project_path, &project_sessions, page, lang.as_str());
     session.set_last_import_sessions_view(openid, ids).await?;
     Ok(CommandOutcome::Reply(CommandReply { text }))
 }
@@ -815,21 +1161,45 @@ async fn handle_stop(
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
 ) -> Result<CommandOutcome> {
+    let lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
+    let locale = lang.as_str();
     let result = session.stop_foreground(openid).await?;
     let summary = if let Some(alias) = result.restored_alias.as_deref() {
         let snapshot = session.snapshot_for_user(openid).await?;
         let preview = foreground_last_user_message(session, openid, &snapshot).await?;
-        let prefix = if !result.had_session {
-            "前台没有可结束的会话。".to_string()
+        let prefix_key = if !result.had_session {
+            None
         } else if result.saved {
-            "前台会话已结束并保留。".to_string()
+            Some("commands.stop.ended_saved")
         } else if result.dropped_unsaved {
-            "前台会话已结束并丢弃（未保存）。".to_string()
+            Some("commands.stop.ended_dropped")
         } else {
-            "前台会话已结束。".to_string()
+            Some("commands.stop.ended_plain")
+        };
+        let header = if let Some(key) = prefix_key {
+            let prefix = t!(key, locale = locale);
+            t!(
+                "commands.stop.ended_restored",
+                prefix = prefix.as_ref(),
+                alias = alias,
+                locale = locale
+            )
+            .into_owned()
+        } else {
+            t!(
+                "commands.stop.had_none_restored",
+                alias = alias,
+                locale = locale
+            )
+            .into_owned()
         };
         format!(
-            "{prefix} 已自动切回最近的后台会话 `{alias}`。\n{}",
+            "{header}\n{}",
             format_effective_runtime_text(
                 &snapshot,
                 default_model,
@@ -837,14 +1207,17 @@ async fn handle_stop(
                 preview.as_deref()
             )
         )
-    } else if !result.had_session {
-        "前台没有可结束的会话，已重置为新的临时会话。".to_string()
-    } else if result.saved {
-        "前台会话已结束并保留。已创建新的临时前台会话。".to_string()
-    } else if result.dropped_unsaved {
-        "前台会话已结束并丢弃（未保存）。已创建新的临时前台会话。".to_string()
     } else {
-        "前台会话已结束。已创建新的临时前台会话。".to_string()
+        let key = if !result.had_session {
+            "commands.stop.had_none_reset"
+        } else if result.saved {
+            "commands.stop.ended_saved_new"
+        } else if result.dropped_unsaved {
+            "commands.stop.ended_dropped_new"
+        } else {
+            "commands.stop.ended_plain_new"
+        };
+        t!(key, locale = locale).into_owned()
     };
     Ok(CommandOutcome::StopCurrent(summary))
 }
@@ -856,33 +1229,116 @@ fn build_status_text(
     is_busy: bool,
 ) -> String {
     let effective = merged_settings(state);
-    let bg_aliases = if state.background.is_empty() {
-        "无".to_string()
+    let lang = state.settings.language.as_str();
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(
+        t!(
+            "commands.status.workspace",
+            dir = state.foreground.workspace_dir.display().to_string(),
+            locale = lang
+        )
+        .into_owned(),
+    );
+    lines.push(
+        t!(
+            "commands.status.model",
+            summary = compact_runtime_summary(state, default_model, runtime_profile),
+            locale = lang
+        )
+        .into_owned(),
+    );
+    lines.push(
+        t!(
+            if effective.verbose {
+                "commands.status.verbose_on"
+            } else {
+                "commands.status.verbose_off"
+            },
+            locale = lang
+        )
+        .into_owned(),
+    );
+    lines.push(context_usage_line(state, runtime_profile, lang));
+    if state.background.is_empty() {
+        lines.push(t!("commands.status.bg_none", locale = lang).into_owned());
     } else {
-        state
-            .background
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
+        lines.push(
+            t!(
+                "commands.status.bg_header",
+                count = state.background.len(),
+                locale = lang
+            )
+            .into_owned(),
+        );
+        for alias in state.background.keys() {
+            lines.push(format!("  - {alias}"));
+        }
+    }
+    lines.push(
+        t!(
+            if is_busy {
+                "commands.status.fg_busy"
+            } else {
+                "commands.status.fg_idle"
+            },
+            locale = lang
+        )
+        .into_owned(),
+    );
+    lines.push(t!("commands.status.lang", lang = lang, locale = lang).into_owned());
+    lines.join("\n")
+}
+
+fn context_usage_line(
+    state: &UserSessionState,
+    runtime_profile: &CodexRuntimeProfile,
+    lang: &str,
+) -> String {
+    let Some(usage) = state.foreground.last_usage.as_ref() else {
+        return t!("commands.status.context_unknown", locale = lang).into_owned();
     };
-    format!(
-        "工作目录: {}\n模型: {}\n详细输出: {}\n计划模式: {}\n后台对话: {}\n前台状态: {}",
-        state.foreground.workspace_dir.display(),
-        compact_runtime_summary(state, default_model, runtime_profile),
-        if effective.verbose {
-            "开启"
-        } else {
-            "关闭"
-        },
-        if effective.plan_mode {
-            "开启"
-        } else {
-            "关闭"
-        },
-        bg_aliases,
-        if is_busy { "运行中" } else { "空闲" },
+    let window = if usage.window > 0 {
+        usage.window
+    } else {
+        effective_context_window(state, runtime_profile)
+    };
+    let percent = if window == 0 {
+        0
+    } else {
+        ((usage.total_tokens as f64 / window as f64) * 100.0).round() as u64
+    };
+    t!(
+        "commands.status.context_usage",
+        percent = percent,
+        used = format_tokens_compact(usage.total_tokens),
+        total = format_tokens_compact(window),
+        locale = lang
     )
+    .into_owned()
+}
+
+fn effective_context_window(
+    state: &UserSessionState,
+    runtime_profile: &CodexRuntimeProfile,
+) -> u64 {
+    match merged_settings(state)
+        .context_mode
+        .or(runtime_profile.context_mode)
+        .unwrap_or(ContextMode::Standard)
+    {
+        ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
+        ContextMode::OneM => 1_000_000,
+    }
+}
+
+fn format_tokens_compact(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{}K", (value + 500) / 1_000)
+    } else {
+        value.to_string()
+    }
 }
 
 async fn foreground_last_user_message(
@@ -908,14 +1364,26 @@ fn format_effective_runtime_text(
     runtime_profile: &CodexRuntimeProfile,
     preview: Option<&str>,
 ) -> String {
+    let lang = state.settings.language.as_str();
     let mut lines = Vec::new();
     if let Some(preview) = preview {
-        lines.push(format!("最近用户消息: {}", single_line(preview, 48)));
+        lines.push(
+            t!(
+                "commands.runtime.last_user_message",
+                preview = single_line(preview, 48),
+                locale = lang
+            )
+            .into_owned(),
+        );
     }
-    lines.push(format!(
-        "模型: {}",
-        compact_runtime_summary(state, default_model, runtime_profile)
-    ));
+    lines.push(
+        t!(
+            "commands.runtime.model",
+            summary = compact_runtime_summary(state, default_model, runtime_profile),
+            locale = lang
+        )
+        .into_owned(),
+    );
     lines.join("\n")
 }
 
@@ -934,16 +1402,18 @@ fn compact_runtime_summary(
 
 fn compact_imported_profile_summary(
     profile: &crate::session::state::ImportedSessionProfile,
+    lang: &str,
 ) -> String {
+    let inherit_default = t!("commands.shared.inherit_default", locale = lang).into_owned();
     compact_model_summary(
         profile
             .model_override
             .clone()
-            .unwrap_or_else(|| "继承默认".to_string()),
+            .unwrap_or_else(|| inherit_default.clone()),
         profile
             .reasoning_effort
             .map(|value| value.as_str())
-            .unwrap_or("继承默认"),
+            .unwrap_or(inherit_default.as_str()),
         profile.context_mode.map(|value| value.label().to_string()),
         profile.service_tier.map(|value| value.as_str().to_string()),
     )
@@ -1042,10 +1512,12 @@ fn merged_settings(state: &UserSessionState) -> crate::session::state::SessionSe
         .merged_with_profile(state.foreground.profile.as_ref())
 }
 
-fn parse_scope(value: &str) -> Result<SessionListScope> {
+fn parse_scope(value: &str, lang: &str) -> Result<SessionListScope> {
     match value.to_ascii_lowercase().as_str() {
         "all" => Ok(SessionListScope::All),
-        _ => Err(anyhow!("范围仅支持 all")),
+        _ => Err(anyhow!(
+            t!("commands.sessions.scope_invalid", locale = lang).into_owned()
+        )),
     }
 }
 
@@ -1077,57 +1549,81 @@ fn collect_projects(sessions: &[DiskSessionMeta]) -> Vec<ProjectBucket> {
     values
 }
 
-fn format_projects_list(projects: &[ProjectBucket]) -> (String, Vec<String>) {
+fn format_projects_list(projects: &[ProjectBucket], lang: &str) -> (String, Vec<String>) {
     if projects.is_empty() {
         return (
-            "没有可用会话。可先发起对话并使用 `/save` 或 `/bg` 保存。".to_string(),
+            t!("commands.sessions.empty", locale = lang).into_owned(),
             Vec::new(),
         );
     }
-    let mut lines = vec![format!("项目列表 total={}", projects.len())];
+    let mut lines = vec![
+        t!(
+            "commands.sessions.project_header",
+            count = projects.len(),
+            locale = lang
+        )
+        .into_owned(),
+    ];
     let mut keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         let latest = project
             .latest
             .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        lines.push(format!(
-            "{}. {} | sessions={} | latest={}",
-            index + 1,
-            project.path,
-            project.count,
-            latest,
-        ));
+            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        lines.push(
+            t!(
+                "commands.sessions.project_row",
+                index = index + 1,
+                path = project.path.as_str(),
+                sessions = project.count,
+                latest = latest,
+                locale = lang
+            )
+            .into_owned(),
+        );
         keys.push(encode_project_key(SessionListScope::All, &project.path));
     }
-    lines.push("\n使用 `/sessions <项目编号> [page]` 查看项目中的会话。".to_string());
+    lines.push(String::new());
+    lines.push(t!("commands.sessions.projects_footer", locale = lang).into_owned());
     (lines.join("\n"), keys)
 }
 
-fn format_import_projects_list(projects: &[ProjectBucket]) -> (String, Vec<String>) {
+fn format_import_projects_list(projects: &[ProjectBucket], lang: &str) -> (String, Vec<String>) {
     if projects.is_empty() {
         return (
-            "系统 `~/.codex/sessions` 中没有可导入会话。".to_string(),
+            t!("commands.import.empty", locale = lang).into_owned(),
             Vec::new(),
         );
     }
-    let mut lines = vec![format!("可导入项目 total={}", projects.len())];
+    let mut lines = vec![
+        t!(
+            "commands.import.project_header",
+            count = projects.len(),
+            locale = lang
+        )
+        .into_owned(),
+    ];
     let mut keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         let latest = project
             .latest
             .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        lines.push(format!(
-            "{}. {} | sessions={} | latest={}",
-            index + 1,
-            project.path,
-            project.count,
-            latest,
-        ));
+            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        lines.push(
+            t!(
+                "commands.import.project_row",
+                index = index + 1,
+                path = project.path.as_str(),
+                sessions = project.count,
+                latest = latest,
+                locale = lang
+            )
+            .into_owned(),
+        );
         keys.push(encode_project_key(SessionListScope::All, &project.path));
     }
-    lines.push("\n使用 `/import <项目编号> [page]` 查看该项目中的会话。".to_string());
+    lines.push(String::new());
+    lines.push(t!("commands.import.projects_footer", locale = lang).into_owned());
     (lines.join("\n"), keys)
 }
 
@@ -1135,48 +1631,71 @@ fn format_project_sessions_page(
     project_path: &str,
     sessions: &[DiskSessionMeta],
     page: usize,
+    lang: &str,
 ) -> (String, Vec<String>) {
     if sessions.is_empty() {
-        return (format!("项目 `{}` 下暂无会话。", project_path), Vec::new());
+        return (
+            t!(
+                "commands.sessions.project_empty",
+                path = project_path,
+                locale = lang
+            )
+            .into_owned(),
+            Vec::new(),
+        );
     }
     let page_size = 12usize;
     let safe_page = page.max(1);
     let start = (safe_page - 1) * page_size;
     if start >= sessions.len() {
         return (
-            format!(
-                "页码超出范围：项目 `{}` 共 {} 条，会话页大小 {}，当前页 {}。",
-                project_path,
-                sessions.len(),
-                page_size,
-                safe_page
-            ),
+            t!(
+                "commands.sessions.page_out_of_range",
+                path = project_path,
+                total = sessions.len(),
+                size = page_size,
+                page = safe_page,
+                locale = lang
+            )
+            .into_owned(),
             Vec::new(),
         );
     }
     let end = (start + page_size).min(sessions.len());
-    let mut lines = vec![format!(
-        "项目会话 project={} page={}/{} (total={})",
-        project_path,
-        safe_page,
-        sessions.len().div_ceil(page_size),
-        sessions.len(),
-    )];
+    let total_pages = sessions.len().div_ceil(page_size);
+    let mut lines = vec![
+        t!(
+            "commands.sessions.page_header",
+            path = project_path,
+            page = safe_page,
+            total_pages = total_pages,
+            total = sessions.len(),
+            locale = lang
+        )
+        .into_owned(),
+    ];
     let mut view_ids = Vec::new();
     for (offset, session) in sessions[start..end].iter().enumerate() {
         let index = offset + 1;
-        let summary = session_summary(session);
+        let summary = session_summary(session, lang);
         let updated = session
             .updated_at
             .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        lines.push(format!("{}. {} | {}", index, updated, summary));
+            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        lines.push(
+            t!(
+                "commands.sessions.row",
+                index = index,
+                updated = updated,
+                summary = summary,
+                locale = lang
+            )
+            .into_owned(),
+        );
         view_ids.push(session.id.clone());
     }
-    lines.push(
-        "\n使用 `/resume <编号|会话ID>` 恢复前台，或 `/loadbg <编号|会话ID> [alias]` 加载到后台。"
-            .to_string(),
-    );
+    lines.push(String::new());
+    lines.push(t!("commands.sessions.page_footer", locale = lang).into_owned());
     (lines.join("\n"), view_ids)
 }
 
@@ -1184,10 +1703,16 @@ fn format_import_project_sessions_page(
     project_path: &str,
     sessions: &[DiskSessionMeta],
     page: usize,
+    lang: &str,
 ) -> (String, Vec<String>) {
     if sessions.is_empty() {
         return (
-            format!("项目 `{}` 下暂无可导入会话。", project_path),
+            t!(
+                "commands.import.project_empty",
+                path = project_path,
+                locale = lang
+            )
+            .into_owned(),
             Vec::new(),
         );
     }
@@ -1196,46 +1721,63 @@ fn format_import_project_sessions_page(
     let start = (safe_page - 1) * page_size;
     if start >= sessions.len() {
         return (
-            format!(
-                "页码超出范围：项目 `{}` 共 {} 条，会话页大小 {}，当前页 {}。",
-                project_path,
-                sessions.len(),
-                page_size,
-                safe_page
-            ),
+            t!(
+                "commands.import.page_out_of_range",
+                path = project_path,
+                total = sessions.len(),
+                size = page_size,
+                page = safe_page,
+                locale = lang
+            )
+            .into_owned(),
             Vec::new(),
         );
     }
     let end = (start + page_size).min(sessions.len());
-    let mut lines = vec![format!(
-        "可导入会话 project={} page={}/{} (total={})",
-        project_path,
-        safe_page,
-        sessions.len().div_ceil(page_size),
-        sessions.len(),
-    )];
+    let mut lines = vec![
+        t!(
+            "commands.import.page_header",
+            path = project_path,
+            page = safe_page,
+            total_pages = sessions.len().div_ceil(page_size),
+            total = sessions.len(),
+            locale = lang
+        )
+        .into_owned(),
+    ];
     let mut view_ids = Vec::new();
     for (offset, session) in sessions[start..end].iter().enumerate() {
         let index = offset + 1;
-        let summary = session_summary(session);
+        let summary = session_summary(session, lang);
         let updated = session
             .updated_at
             .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        lines.push(format!("{index}. [{updated}] {summary}"));
+            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        lines.push(
+            t!(
+                "commands.import.row",
+                index = index,
+                updated = updated,
+                summary = summary,
+                locale = lang
+            )
+            .into_owned(),
+        );
         view_ids.push(session.id.clone());
     }
-    lines.push("\n使用 `/import <编号|会话ID>` 导入会话。".to_string());
+    lines.push(String::new());
+    lines.push(t!("commands.import.page_footer", locale = lang).into_owned());
     (lines.join("\n"), view_ids)
 }
 
-fn session_summary(session: &DiskSessionMeta) -> String {
+fn session_summary(session: &DiskSessionMeta, lang: &str) -> String {
+    let fallback = t!("commands.sessions.no_summary", locale = lang);
     let raw = session
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("无摘要");
+        .unwrap_or_else(|| fallback.as_ref());
     single_line(raw, 72)
 }
 
@@ -1266,12 +1808,16 @@ fn encode_project_key(scope: SessionListScope, path: &str) -> String {
 
 fn decode_project_key(key: &str) -> Result<(SessionListScope, String)> {
     if let Some((scope_raw, path)) = key.split_once(PROJECT_KEY_SEP) {
-        return Ok((parse_scope(scope_raw)?, path.to_string()));
+        return Ok((parse_scope(scope_raw, "en")?, path.to_string()));
     }
     Ok((SessionListScope::All, key.to_string()))
 }
 
-fn resolve_project_selector(selector: &str, last_projects_view: &[String]) -> Result<String> {
+fn resolve_project_selector(
+    selector: &str,
+    last_projects_view: &[String],
+    lang: &str,
+) -> Result<String> {
     if let Ok(index) = selector.parse::<usize>()
         && index >= 1
         && index <= last_projects_view.len()
@@ -1280,7 +1826,9 @@ fn resolve_project_selector(selector: &str, last_projects_view: &[String]) -> Re
     }
     let normalized = selector.trim();
     if normalized.is_empty() {
-        return Err(anyhow!("项目选择不能为空"));
+        return Err(anyhow!(
+            t!("commands.sessions.project_selector_empty", locale = lang).into_owned()
+        ));
     }
     let matched = last_projects_view
         .iter()
@@ -1294,9 +1842,16 @@ fn resolve_project_selector(selector: &str, last_projects_view: &[String]) -> Re
     match matched.as_slice() {
         [single] => Ok(single.clone()),
         [] => Err(anyhow!(
-            "未找到项目：{selector}（先用 `/sessions` 查看项目列表）"
+            t!(
+                "commands.sessions.project_not_found",
+                selector = selector,
+                locale = lang
+            )
+            .into_owned()
         )),
-        _ => Err(anyhow!("项目前缀不唯一，请使用完整路径或编号")),
+        _ => Err(anyhow!(
+            t!("commands.sessions.project_ambiguous", locale = lang).into_owned()
+        )),
     }
 }
 
@@ -1304,6 +1859,7 @@ fn resolve_selector(
     selector: &str,
     sessions: &[DiskSessionMeta],
     last_view: &[String],
+    lang: &str,
 ) -> Result<DiskSessionMeta> {
     if let Ok(index) = selector.parse::<usize>()
         && index >= 1
@@ -1324,38 +1880,128 @@ fn resolve_selector(
         .collect::<Vec<_>>();
     match matched.as_slice() {
         [single] => Ok(single.clone()),
-        [] => Err(anyhow!("未找到会话：{selector}")),
-        _ => Err(anyhow!("会话前缀不唯一，请使用完整ID")),
+        [] => Err(anyhow!(
+            t!(
+                "commands.sessions.session_not_found",
+                selector = selector,
+                locale = lang
+            )
+            .into_owned()
+        )),
+        _ => Err(anyhow!(
+            t!("commands.sessions.session_ambiguous", locale = lang).into_owned()
+        )),
     }
 }
 
-fn help_text() -> String {
-    [
-        "可用命令：",
-        "/status",
-        "/sessions [all]",
-        "/sessions <项目编号> [page]",
-        "/import",
-        "/import <项目编号> [page]",
-        "/import <编号|会话ID>",
-        "/resume <编号|会话ID>",
-        "/loadbg <编号|会话ID> [alias]",
-        "/bg [alias]",
-        "/fg <alias>",
-        "/rename <old_alias> <new_alias>",
-        "/save",
-        "/new [workspace]",
-        "/stop",
-        "/interrupt",
-        "/self-update",
-        "/model <name|inherit|status>",
-        "/fast [on|off|inherit|status]",
-        "/context [1m|standard|inherit|status]",
-        "/reasoning [none|minimal|low|medium|high|xhigh|inherit|status]",
-        "/verbose [on|off|status]",
-        "/plan [on|off|status]",
-    ]
-    .join("\n")
+fn normalize_command_alias_name(input: &str) -> Result<String> {
+    let raw = input.trim();
+    let normalized = raw.to_ascii_lowercase();
+    let is_valid = !raw.starts_with('/')
+        && !normalized.is_empty()
+        && normalized.chars().count() <= 20
+        && !normalized.contains('|');
+    anyhow::ensure!(is_valid, "invalid alias");
+    Ok(normalized)
+}
+
+pub(crate) fn canonicalize_core_command(command: &str) -> &str {
+    match command {
+        "/帮助" => "/help",
+        "/状态" | "/会话" | "/session" => "/status",
+        "/模型" => "/model",
+        "/快速" => "/fast",
+        "/上下文" => "/context",
+        "/思考" => "/reasoning",
+        "/别名" => "/alias",
+        "/语言" => "/lang",
+        other => other,
+    }
+}
+
+async fn handle_lang(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let current_lang = session
+        .snapshot_for_user(openid)
+        .await?
+        .settings
+        .language
+        .clone();
+    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: t!(
+                "commands.lang.status",
+                lang = current_lang.as_str(),
+                locale = current_lang.as_str()
+            )
+            .into_owned(),
+        }));
+    }
+    let requested = args[0];
+    let normalized = normalize_lang(requested);
+    let is_known = matches!(
+        requested.trim().to_ascii_lowercase().as_str(),
+        "en" | "zh" | "zh-cn" | "zh_cn" | "cn" | "chinese"
+    ) || requested.trim() == "中文";
+    if !is_known {
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: t!(
+                "commands.lang.unsupported",
+                lang = requested,
+                locale = current_lang.as_str()
+            )
+            .into_owned(),
+        }));
+    }
+    session
+        .update_settings_for_user(openid, |state| {
+            state.language = normalized.to_string();
+        })
+        .await?;
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: t!(
+            "commands.lang.updated",
+            lang = normalized,
+            locale = normalized
+        )
+        .into_owned(),
+    }))
+}
+
+fn help_text(lang: &str) -> String {
+    let lang = normalize_lang(lang);
+    let lines = vec![
+        t!("commands.help.header", locale = lang).into_owned(),
+        String::new(),
+        t!("commands.help.section_basic", locale = lang).into_owned(),
+        t!("commands.help.entry_help", locale = lang).into_owned(),
+        t!("commands.help.entry_status", locale = lang).into_owned(),
+        t!("commands.help.entry_new", locale = lang).into_owned(),
+        t!("commands.help.entry_stop", locale = lang).into_owned(),
+        t!("commands.help.entry_interrupt", locale = lang).into_owned(),
+        t!("commands.help.entry_lang", locale = lang).into_owned(),
+        String::new(),
+        t!("commands.help.section_advanced", locale = lang).into_owned(),
+        t!("commands.help.entry_sessions", locale = lang).into_owned(),
+        t!("commands.help.entry_import", locale = lang).into_owned(),
+        t!("commands.help.entry_resume", locale = lang).into_owned(),
+        t!("commands.help.entry_loadbg", locale = lang).into_owned(),
+        t!("commands.help.entry_bg", locale = lang).into_owned(),
+        t!("commands.help.entry_fg", locale = lang).into_owned(),
+        t!("commands.help.entry_rename", locale = lang).into_owned(),
+        t!("commands.help.entry_save", locale = lang).into_owned(),
+        t!("commands.help.entry_model", locale = lang).into_owned(),
+        t!("commands.help.entry_fast", locale = lang).into_owned(),
+        t!("commands.help.entry_context", locale = lang).into_owned(),
+        t!("commands.help.entry_reasoning", locale = lang).into_owned(),
+        t!("commands.help.entry_verbose", locale = lang).into_owned(),
+        t!("commands.help.entry_alias", locale = lang).into_owned(),
+        t!("commands.help.entry_self_update", locale = lang).into_owned(),
+    ];
+    lines.join("\n")
 }
 
 fn resolve_new_workspace(
@@ -1417,7 +2063,7 @@ mod tests {
         session
             .update_settings_for_user("u1", |state| {
                 state.model_override = Some("gpt-x".into());
-                state.plan_mode = true;
+                state.verbose = true;
             })
             .await
             .unwrap();
@@ -1435,7 +2081,7 @@ mod tests {
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(snapshot.foreground.session_id.is_none());
         assert_eq!(snapshot.settings.model_override.as_deref(), Some("gpt-x"));
-        assert!(snapshot.settings.plan_mode);
+        assert!(snapshot.settings.verbose);
     }
 
     #[tokio::test]
@@ -1469,7 +2115,7 @@ mod tests {
         let expected =
             std::fs::canonicalize(data.path().join("session/workspace/custom folder")).unwrap();
         assert_eq!(snapshot.foreground.workspace_dir, expected);
-        assert!(reply.text.contains("工作目录"));
+        assert!(reply.text.to_lowercase().contains("workdir"));
         assert!(reply.text.contains("custom folder"));
     }
 
@@ -1510,7 +2156,7 @@ mod tests {
         let CommandOutcome::Reply(reply) = outcome else {
             panic!("expected reply");
         };
-        assert!(reply.text.contains("模型: gpt-global high 1M fast"));
+        assert!(reply.text.contains("gpt-global high 1M fast"));
     }
 
     #[tokio::test]
@@ -1553,8 +2199,8 @@ mod tests {
         let CommandOutcome::Reply(reply) = outcome else {
             panic!("expected reply");
         };
-        assert!(reply.text.contains("最近用户消息: 请帮我处理发布失败"));
-        assert!(reply.text.contains("模型: gpt-5.4 high 1M"));
+        assert!(reply.text.contains("请帮我处理发布失败"));
+        assert!(reply.text.contains("gpt-5.4 high 1M"));
     }
 
     #[tokio::test]
@@ -1623,8 +2269,8 @@ mod tests {
         let CommandOutcome::StopCurrent(reply) = outcome else {
             panic!("expected stop current");
         };
-        assert!(reply.contains("已自动切回最近的后台会话 `newer`"));
-        assert!(reply.contains("模型: gpt-newer high 1M"));
+        assert!(reply.contains("`newer`"));
+        assert!(reply.contains("gpt-newer high 1M"));
     }
 
     #[tokio::test]
@@ -1731,7 +2377,7 @@ mod tests {
         let CommandOutcome::Reply(project_reply) = project_list else {
             panic!("expected /sessions to reply with project list");
         };
-        assert!(project_reply.text.contains("项目列表"));
+        assert!(project_reply.text.to_lowercase().contains("projects"));
 
         let session_list = maybe_handle_command(
             "/sessions 1",
@@ -1746,7 +2392,293 @@ mod tests {
         let CommandOutcome::Reply(session_reply) = session_list else {
             panic!("expected /sessions 1 to reply with session list");
         };
-        assert!(session_reply.text.contains("无摘要"));
+        assert!(session_reply.text.to_lowercase().contains("no summary"));
         assert!(!session_reply.text.contains("thread-a"));
+    }
+
+    #[tokio::test]
+    async fn lang_switch_affects_help_output() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        // Default (en) help
+        let outcome = maybe_handle_command(
+            "/help",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /help to reply");
+        };
+        assert!(reply.text.starts_with("# Command Guide"));
+        assert!(reply.text.contains("## Basic Commands"));
+
+        // Switch to zh, verify Chinese
+        let outcome = maybe_handle_command(
+            "/lang zh",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /lang zh to reply");
+        };
+        assert!(reply.text.contains("zh"));
+
+        // Chinese command alias: /帮助
+        let outcome = maybe_handle_command(
+            "/帮助",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /帮助 to reply");
+        };
+        assert!(reply.text.starts_with("# 命令指南"));
+        assert!(reply.text.contains("## 基础命令"));
+    }
+
+    #[tokio::test]
+    async fn alias_add_and_expand_executes_each_step() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let add_out = maybe_handle_command(
+            "/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = add_out else {
+            panic!("expected /alias add to reply");
+        };
+        assert!(reply.text.contains("expert"));
+
+        let aliases = session.list_command_aliases("u1").await.unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].commands.len(), 3);
+
+        let invoke = maybe_handle_command(
+            "/expert",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = invoke else {
+            panic!("expected /expert to reply");
+        };
+        // verbose step should have flipped user state
+        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        assert!(snapshot.settings.verbose);
+        assert_eq!(
+            snapshot.settings.reasoning_effort,
+            Some(ReasoningEffort::Xhigh)
+        );
+        assert!(reply.text.contains("expert"));
+
+        // Protected name rejected
+        let protected = maybe_handle_command(
+            "/alias add help /status",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = protected else {
+            panic!("expected /alias add help to reply");
+        };
+        assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
+    }
+
+    #[tokio::test]
+    async fn alias_names_are_normalized_to_lowercase() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let add_out = maybe_handle_command(
+            "/alias add Expert /verbose on",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = add_out else {
+            panic!("expected /alias add to reply");
+        };
+        assert!(reply.text.contains("/expert"));
+
+        let invoke = maybe_handle_command(
+            "/EXPERT",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(invoke, CommandOutcome::Reply(_)));
+        assert!(
+            session
+                .snapshot_for_user("u1")
+                .await
+                .unwrap()
+                .settings
+                .verbose
+        );
+    }
+
+    #[tokio::test]
+    async fn lang_switch_affects_foreground_switch_messages() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .set_foreground_session_id("u1", Some("thread".into()))
+            .await
+            .unwrap();
+        let _ = maybe_handle_command(
+            "/bg focus",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let _ = maybe_handle_command(
+            "/lang en",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/fg focus",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /fg to reply");
+        };
+        assert!(reply.text.contains("Switched to background session"));
+    }
+
+    #[tokio::test]
+    async fn alias_recursion_capped_at_max_depth() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        // Three-step recursion chain: a -> b -> c -> a (cycle)
+        for (name, step) in [("a", "/b"), ("b", "/c"), ("c", "/a")] {
+            let add = format!("/alias add {name} {step}");
+            let _ = maybe_handle_command(
+                &add,
+                "u1",
+                &session,
+                "default",
+                &CodexRuntimeProfile::default(),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        let outcome = maybe_handle_command(
+            "/a",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected alias cycle to terminate with reply");
+        };
+        // Must have produced some text and terminated (no panic / stack overflow)
+        assert!(!reply.text.is_empty());
     }
 }
