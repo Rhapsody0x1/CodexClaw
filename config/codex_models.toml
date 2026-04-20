@@ -1,0 +1,20 @@
+# Canonical Codex model list, maintained alongside upstream OpenAI docs.
+# Source: https://developers.openai.com/codex/models
+#
+# This file is embedded at compile time by codex/runtime.rs. Bump this list
+# whenever OpenAI ships new Codex models so /model pickers see them without
+# recompilation of the pickers themselves (just rebuild the binary).
+#
+# The runtime merges this canonical list with:
+#   - ~/.codex/config.toml top-level `model`
+#   - ~/.codex/config.toml [profiles.*] `model` values
+#   - the current user's session `model_override`
+# De-duplication preserves first-seen order.
+
+canonical = [
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex",
+  "gpt-5.3-codex-spark",
+  "gpt-5.2",
+]

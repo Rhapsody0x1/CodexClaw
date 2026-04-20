@@ -4,26 +4,26 @@ commands:
     section_basic: "## Basic Commands"
     section_advanced: "## Advanced Commands"
     entry_help: "- 💡 `/help` - show this help"
-    entry_status: "- 📌 `/status` - show the current session status"
-    entry_sessions: "- 🗂️ `/sessions [all]` or `/sessions <project> [page]` - list projects and sessions"
-    entry_import: "- 📥 `/import` - import native Codex sessions from the current workspace"
-    entry_resume: "- ♻️ `/resume <session-id|index>` - resume a session into the foreground"
-    entry_loadbg: "- 📚 `/loadbg <session-id|index> [alias]` - load a session into the background"
-    entry_bg: "- 🌙 `/bg <alias>` - move the foreground session to the background"
-    entry_fg: "- ☀️ `/fg <alias>` - bring a background session to the foreground"
-    entry_rename: "- 🏷️ `/rename <old> <new>` - rename a background alias"
-    entry_save: "- 💾 `/save` - save the current foreground session"
-    entry_new: "- ✨ `/new [dir]` - start a new foreground session, optionally in a workspace"
-    entry_stop: "- 🛑 `/stop` - end the current foreground session"
-    entry_interrupt: "- ⏹️ `/interrupt` - interrupt the currently running task"
-    entry_self_update: "- 🚀 `/self-update` - trigger codex-claw self-update deployment"
-    entry_model: "- 🤖 `/model [name|status|inherit]` - switch model or show status"
-    entry_fast: "- ⚡ `/fast [on|off|inherit|status]` - toggle fast mode"
-    entry_context: "- 🧠 `/context [1m|standard|inherit|status]` - set the context window"
-    entry_reasoning: "- 🔍 `/reasoning [none|minimal|low|medium|high|xhigh|inherit|status]` - set reasoning depth"
-    entry_verbose: "- 🪄 `/verbose [on|off|status]` - toggle verbose output"
-    entry_alias: "- 🧩 `/alias add <name> <cmd1>|<cmd2>... | list | remove <name>` - manage command aliases"
-    entry_lang: "- 🌐 `/lang [en|zh|status]` - switch UI language"
+    entry_status: "- 📌 `/status` - show session status"
+    entry_sessions: "- 🗂️ `/sessions` - list projects and sessions"
+    entry_import: "- 📥 `/import` - import native Codex sessions"
+    entry_resume: "- ♻️ `/resume` - resume a saved session"
+    entry_loadbg: "- 📚 `/loadbg` - load a session into the background"
+    entry_bg: "- 🌙 `/bg` - send foreground to background"
+    entry_fg: "- ☀️ `/fg` - bring a background session to the front"
+    entry_rename: "- 🏷️ `/rename` - rename a background alias"
+    entry_save: "- 💾 `/save` - keep the current session"
+    entry_new: "- ✨ `/new` - start a new session"
+    entry_stop: "- 🛑 `/stop` - end the current session"
+    entry_interrupt: "- ⏹️ `/interrupt` - interrupt the running task"
+    entry_self_update: "- 🚀 `/self-update` - deploy the latest build"
+    entry_model: "- 🤖 `/model` - choose a model"
+    entry_fast: "- ⚡ `/fast` - toggle fast mode"
+    entry_context: "- 🧠 `/context` - choose context window"
+    entry_reasoning: "- 🔍 `/reasoning` - choose reasoning depth"
+    entry_verbose: "- 🪄 `/verbose` - toggle verbose output"
+    entry_alias: "- 🧩 `/alias` - manage command aliases"
+    entry_lang: "- 🌐 `/lang` - switch UI language"
 
   runtime:
     last_user_message: "last user message: %{preview}"
@@ -50,12 +50,12 @@ commands:
     empty: "No sessions. Start a conversation then use `/save` or `/bg` to keep one."
     project_header: "Projects (total=%{count}):"
     project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
-    projects_footer: "Use `/sessions <index> [page]` to view sessions in a project."
+    projects_footer: "Type a project number (e.g. `1`) to drill in, or `/back` to exit."
     project_empty: "Project `%{path}` has no sessions."
     page_out_of_range: "Page out of range: project `%{path}` has %{total} sessions, page size %{size}, current page %{page}."
     page_header: "Project sessions project=%{path} page=%{page}/%{total_pages} (total=%{total})"
     row: "%{index}. %{updated} | %{summary}"
-    page_footer: "Use `/resume <index|session-id>` to restore, or `/loadbg <index|session-id> [alias]` to load to background."
+    page_footer: "Use `/resume` or `/loadbg` to act on a session. `/back` to exit."
     no_summary: "(no summary)"
     scope_invalid: "only the `all` scope is supported"
     project_selector_empty: "project selector cannot be empty"
@@ -73,33 +73,38 @@ commands:
     bg_none: "background sessions: none"
     fg_busy: "foreground: running"
     fg_idle: "foreground: idle"
-    context_usage: "context: %{percent}%% (%{used}/%{total} tokens)"
-    context_unknown: "context: — (no usage data yet)"
+    context_usage: "context window: %{percent}% left (%{used} used / %{total})"
+    context_unknown: "context window: — (no usage data yet)"
     lang: "language: %{lang}"
 
   model:
     updated: "model updated to: %{model}"
-    status: "model: %{effective}    override: %{override_value}\nHint: use `/status` for full session state"
+    status: "model: %{effective}    override: %{override_value}"
     invalid: "invalid model name"
-    usage: "usage: /model <name> | inherit | status"
+    prompt_current: "Current model: %{current}"
+    prompt_header: "Available models:"
+    prompt_item: "  • %{name}"
 
   fast:
     updated: "fast mode updated to: %{value}"
     status: "fast: %{value}"
-    invalid: "invalid value. Try: on | off | inherit | status"
-    usage: "usage: /fast [on|off|inherit|status]"
+    invalid: "invalid value. Try: on | off | inherit"
+    prompt_current: "Current fast mode: %{current}"
+    prompt_header: "Options: on / off / inherit"
 
   context:
     updated: "context mode updated to: %{value}"
     status: "context: %{value}"
-    invalid: "invalid value. Try: 1m | standard | inherit | status"
-    usage: "usage: /context [1m|standard|inherit|status]"
+    invalid: "invalid value. Try: 1m | standard | inherit"
+    prompt_current: "Current context: %{current}"
+    prompt_header: "Options: standard / 1m / inherit"
 
   reasoning:
     updated: "reasoning depth updated to: %{value}"
     status: "reasoning: %{value}"
-    invalid: "invalid depth. choices: none | minimal | low | medium | high | xhigh | inherit | status"
-    usage: "usage: /reasoning [none|minimal|low|medium|high|xhigh|inherit|status]"
+    invalid: "invalid depth. choices: none | minimal | low | medium | high | xhigh | inherit"
+    prompt_current: "Current reasoning: %{current}"
+    prompt_header: "Options: none / minimal / low / medium / high / xhigh / inherit"
 
   shared:
     inherit_default: "inherit default"
@@ -110,7 +115,9 @@ commands:
     updated_off: "verbose output disabled"
     status_on: "verbose: on"
     status_off: "verbose: off"
-    invalid: "invalid value. Try: on | off | status"
+    invalid: "invalid value. Try: on | off"
+    prompt_current: "Current verbose: %{current}"
+    prompt_header: "Options: on / off"
 
   alias:
     added: "alias `/%{name}` registered with %{count} steps"
@@ -130,14 +137,18 @@ commands:
   bg:
     moved: "Foreground moved to background: `%{alias}`."
     reset_empty: "The foreground was an empty temporary session, so it was reset to a new temporary session."
+    usage: "usage: `/bg <alias>`"
 
   fg:
     usage: "usage: `/fg <alias>`"
     parked: "Previous foreground moved to background: `%{alias}`.\n"
     switched: "%{parked}Switched to background session `%{alias}`.\n%{runtime}"
+    prompt_header: "Background sessions:"
+    prompt_item: "  • `%{alias}`"
+    prompt_empty: "No background sessions."
 
   resume:
-    usage: "usage: `/resume <index|session-id>` (run `/sessions`, then `/sessions <project> [page]`)"
+    usage: "usage: `/resume <index|session-id>`"
     parked: "Previous foreground moved to background: `%{alias}`.\n"
     restored: "%{parked}Resumed session: %{summary} (workspace: `%{workspace}`).\n%{runtime}"
 
@@ -160,18 +171,29 @@ commands:
     empty: "No importable sessions were found in `~/.codex/sessions`."
     project_header: "Importable projects (total=%{count})"
     project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
-    projects_footer: "Use `/import <index> [page]` to view sessions in that project."
+    projects_footer: "Type a project number to drill in, or `/back` to exit."
     project_empty: "Project `%{path}` has no importable sessions."
     page_out_of_range: "Page out of range: project `%{path}` has %{total} sessions, page size %{size}, current page %{page}."
     page_header: "Importable sessions project=%{path} page=%{page}/%{total_pages} (total=%{total})"
     row: "%{index}. [%{updated}] %{summary}"
-    page_footer: "Use `/import <index|session-id>` to import a session."
+    page_footer: "Type a session number to import, or `/back` to exit."
 
   lang:
     updated: "language updated to: %{lang}"
     status: "current language: %{lang}"
     unsupported: "unsupported language `%{lang}`. Supported: en, zh"
-    usage: "usage: /lang [en|zh|status]"
+    prompt_current: "Current language: %{current}"
+    prompt_header: "Options: en / zh"
+
+  interactive:
+    hint: "Type a value (fuzzy match ok), or `/back` to cancel."
+    ambiguous: "`%{input}` matched multiple: %{matches}. Please be more specific."
+    no_match: "`%{input}` didn't match anything. Try again or `/back`."
+    applied: "Applied to %{cmd}: %{value}."
+
+  back:
+    exited: "Exited `%{cmd}` setting."
+    idle: "Not currently in an interactive setting."
 
 errors:
   busy: "A task is already running. Please wait or use /interrupt first."
@@ -180,4 +202,4 @@ errors:
   interrupt_requested: "Interrupt requested for current task."
 
 warnings:
-  context_near_limit: "⚠️ Context usage is at %{percent}%% (%{used}/%{total} tokens). Consider `/new` to start a fresh session."
+  context_near_limit: "⚠️ Context window is %{percent}% used (%{used} used / %{total}). Consider `/new` to start a fresh session."

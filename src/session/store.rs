@@ -12,8 +12,8 @@ use tokio::sync::RwLock;
 
 use crate::session::state::{
     CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
-    PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings, SessionState,
-    TokenUsageSnapshot, UserSessionState,
+    PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
+    SessionState, TokenUsageSnapshot, UserSessionState,
 };
 
 const ALIAS_WORDS: &[&str] = &[
@@ -287,6 +287,19 @@ impl SessionStore {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             user.foreground.last_usage = Some(usage);
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_pending_setting(
+        &self,
+        openid: &str,
+        pending: Option<PendingSetting>,
+    ) -> Result<()> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.pending_setting = pending;
             Ok(())
         })
         .await
@@ -848,6 +861,7 @@ fn load_legacy_state(
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
+            pending_setting: None,
         },
     );
     Ok(PersistedSessionState {
@@ -880,6 +894,7 @@ fn ensure_user_mut<'a>(
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
+            pending_setting: None,
         },
     );
     Ok(state.users.get_mut(openid).expect("user entry must exist"))

@@ -275,17 +275,20 @@ impl App {
                         .set_foreground_session_id(&message.sender_openid, None)
                         .await?;
                 }
-                let usage_snapshot = if let Some(usage) = output.last_usage {
-                    let window = output
-                        .context_window
+                let usage_snapshot = if let Some(info) = output.token_usage_info {
+                    let window = info
+                        .model_context_window
+                        .or(output.context_window)
                         .or_else(|| context_mode.map(context_mode_window))
                         .unwrap_or(ContextMode::STANDARD_CONTEXT_WINDOW);
+                    let context_usage = info.last_token_usage;
+                    let total_usage = info.total_token_usage;
                     let snapshot = TokenUsageSnapshot {
-                        total_tokens: usage.total(),
+                        total_tokens: context_usage.tokens_in_context_window(),
                         window,
-                        input_tokens: usage.input_tokens,
-                        cached_input_tokens: usage.cached_input_tokens,
-                        output_tokens: usage.output_tokens,
+                        input_tokens: total_usage.input_tokens,
+                        cached_input_tokens: total_usage.cached_input_tokens,
+                        output_tokens: total_usage.output_tokens,
                         updated_at: chrono::Utc::now(),
                     };
                     let _ = self
@@ -602,14 +605,10 @@ fn format_tokens_compact(value: u64) -> String {
 }
 
 fn build_context_warning(snapshot: &TokenUsageSnapshot, lang: &str) -> Option<String> {
-    if snapshot.window == 0 {
+    let percent = snapshot.percent_used()?;
+    if (percent as f64 / 100.0) < CONTEXT_WARNING_THRESHOLD {
         return None;
     }
-    let ratio = snapshot.total_tokens as f64 / snapshot.window as f64;
-    if ratio < CONTEXT_WARNING_THRESHOLD {
-        return None;
-    }
-    let percent = (ratio * 100.0).round() as u64;
     let lang = normalize_lang(lang);
     Some(
         t!(
@@ -675,8 +674,9 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 #[cfg(test)]
 mod tests {
     use crate::qq::types::{EventAuthor, MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
+    use crate::session::state::TokenUsageSnapshot;
 
-    use super::extract_quote;
+    use super::{build_context_warning, extract_quote};
 
     #[test]
     fn extracts_quote_from_msg_elements() {
@@ -700,5 +700,26 @@ mod tests {
         let _ = EventAuthor {
             user_openid: "u".into(),
         };
+    }
+
+    #[test]
+    fn context_warning_uses_context_window_percentage() {
+        let warning = build_context_warning(
+            &TokenUsageSnapshot {
+                total_tokens: 220_000,
+                window: 272_000,
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                updated_at: chrono::Utc::now(),
+            },
+            "en",
+        )
+        .expect("warning");
+        assert!(
+            warning.contains("80% used"),
+            "unexpected warning: {warning}"
+        );
+        assert!(warning.contains("220K used / 272K"));
     }
 }

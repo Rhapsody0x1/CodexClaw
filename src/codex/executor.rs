@@ -15,7 +15,8 @@ use tokio::{
 
 use crate::{
     codex::events::{
-        CodexEvent, CodexItem, PatchChangeKind, ResponseItemPayload, TokenUsage, WebSearchAction,
+        CodexEvent, CodexItem, EventMsgPayload, PatchChangeKind, ResponseItemPayload, TokenUsage,
+        TokenUsageInfo, WebSearchAction,
     },
     session::state::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
 };
@@ -48,7 +49,7 @@ pub struct ExecutionResult {
     pub session_id: Option<String>,
     pub text: String,
     pub changed_files: Vec<PathBuf>,
-    pub last_usage: Option<TokenUsage>,
+    pub token_usage_info: Option<TokenUsageInfo>,
     pub context_window: Option<u64>,
 }
 
@@ -167,7 +168,8 @@ impl CodexExecutor {
         let mut text_parts = Vec::new();
         let mut changed_files = Vec::new();
         let mut last_usage: Option<TokenUsage> = None;
-        let context_window = request.context_mode.map(|mode| match mode {
+        let mut token_usage_info: Option<TokenUsageInfo> = None;
+        let mut context_window = request.context_mode.map(|mode| match mode {
             ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
             ContextMode::OneM => 1_000_000u64,
         });
@@ -262,6 +264,20 @@ impl CodexExecutor {
                         payload: ResponseItemPayload::Unknown,
                     } => {}
                     CodexEvent::ResponseItem { .. } => {}
+                    CodexEvent::EventMsg {
+                        payload: EventMsgPayload::TokenCount { info },
+                    } => {
+                        token_usage_info = info;
+                        if let Some(window) = token_usage_info
+                            .as_ref()
+                            .and_then(|info| info.model_context_window)
+                        {
+                            context_window = Some(window);
+                        }
+                    }
+                    CodexEvent::EventMsg {
+                        payload: EventMsgPayload::Unknown,
+                    } => {}
                     CodexEvent::TurnCompleted { usage: Some(usage) } => last_usage = Some(usage),
                     CodexEvent::TurnCompleted { usage: None } => {}
                     CodexEvent::TurnFailed { error } => {
@@ -288,7 +304,13 @@ impl CodexExecutor {
             session_id: current_session_id,
             text: text_parts.join("\n\n").trim().to_string(),
             changed_files,
-            last_usage,
+            token_usage_info: token_usage_info.or_else(|| {
+                last_usage.map(|usage| TokenUsageInfo {
+                    total_token_usage: usage.clone(),
+                    last_token_usage: usage,
+                    model_context_window: context_window,
+                })
+            }),
             context_window,
         })
     }

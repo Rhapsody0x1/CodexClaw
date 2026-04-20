@@ -250,6 +250,33 @@ pub struct TokenUsageSnapshot {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl TokenUsageSnapshot {
+    pub fn percent_remaining(&self) -> Option<u64> {
+        if self.window == 0 {
+            return None;
+        }
+
+        const BASELINE_TOKENS: u64 = 12_000;
+        if self.window <= BASELINE_TOKENS {
+            return Some(0);
+        }
+
+        let effective_window = self.window - BASELINE_TOKENS;
+        let used = self.total_tokens.saturating_sub(BASELINE_TOKENS);
+        let remaining = effective_window.saturating_sub(used);
+        Some(
+            ((remaining as f64 / effective_window as f64) * 100.0)
+                .clamp(0.0, 100.0)
+                .round() as u64,
+        )
+    }
+
+    pub fn percent_used(&self) -> Option<u64> {
+        self.percent_remaining()
+            .map(|value| 100_u64.saturating_sub(value))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DialogState {
     pub session_id: Option<String>,
@@ -289,6 +316,59 @@ pub struct CommandAlias {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingSetting {
+    Model,
+    Reasoning,
+    Fast,
+    Context,
+    Verbose,
+    Lang,
+    SessionsProjects,
+    SessionsSessions {
+        project_key: String,
+        page: usize,
+    },
+    ImportProjects,
+    ImportSessions {
+        project_key: String,
+        page: usize,
+    },
+    Fg,
+    ResumeProjects,
+    ResumeSessions {
+        project_key: String,
+        page: usize,
+    },
+    LoadbgProjects,
+    LoadbgSessions {
+        project_key: String,
+        page: usize,
+        #[serde(default)]
+        alias: Option<String>,
+    },
+}
+
+impl PendingSetting {
+    pub fn command_name(&self) -> &'static str {
+        use PendingSetting::*;
+        match self {
+            Model => "/model",
+            Reasoning => "/reasoning",
+            Fast => "/fast",
+            Context => "/context",
+            Verbose => "/verbose",
+            Lang => "/lang",
+            SessionsProjects | SessionsSessions { .. } => "/sessions",
+            ImportProjects | ImportSessions { .. } => "/import",
+            Fg => "/fg",
+            ResumeProjects | ResumeSessions { .. } => "/resume",
+            LoadbgProjects | LoadbgSessions { .. } => "/loadbg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserSessionState {
     pub foreground: DialogState,
     #[serde(default)]
@@ -311,6 +391,8 @@ pub struct UserSessionState {
     pub saved_local_session_ids: Vec<String>,
     #[serde(default)]
     pub command_aliases: BTreeMap<String, CommandAlias>,
+    #[serde(default)]
+    pub pending_setting: Option<PendingSetting>,
 }
 
 impl UserSessionState {
@@ -327,6 +409,7 @@ impl UserSessionState {
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
+            pending_setting: None,
         }
     }
 }

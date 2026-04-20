@@ -23,6 +23,8 @@ pub enum CodexEvent {
     TurnFailed { error: serde_json::Value },
     #[serde(rename = "response_item")]
     ResponseItem { payload: ResponseItemPayload },
+    #[serde(rename = "event_msg")]
+    EventMsg { payload: EventMsgPayload },
     #[serde(other)]
     Unknown,
 }
@@ -34,6 +36,17 @@ pub enum ResponseItemPayload {
         #[serde(default)]
         status: Option<String>,
         action: WebSearchAction,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventMsgPayload {
+    TokenCount {
+        #[serde(default)]
+        info: Option<TokenUsageInfo>,
     },
     #[serde(other)]
     Unknown,
@@ -139,7 +152,7 @@ pub struct TodoEntry {
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
     pub input_tokens: u64,
@@ -147,17 +160,56 @@ pub struct TokenUsage {
     pub cached_input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 impl TokenUsage {
     pub fn total(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
+
+    pub fn tokens_in_context_window(&self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.total()
+        }
+    }
+
+    pub fn percent_of_context_window_remaining(&self, context_window: u64) -> u64 {
+        const BASELINE_TOKENS: u64 = 12_000;
+
+        if context_window <= BASELINE_TOKENS {
+            return 0;
+        }
+
+        let effective_window = context_window - BASELINE_TOKENS;
+        let used = self
+            .tokens_in_context_window()
+            .saturating_sub(BASELINE_TOKENS);
+        let remaining = effective_window.saturating_sub(used);
+        ((remaining as f64 / effective_window as f64) * 100.0)
+            .clamp(0.0, 100.0)
+            .round() as u64
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TokenUsageInfo {
+    #[serde(default)]
+    pub total_token_usage: TokenUsage,
+    #[serde(default)]
+    pub last_token_usage: TokenUsage,
+    #[serde(default)]
+    pub model_context_window: Option<u64>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexEvent, ResponseItemPayload, WebSearchAction};
+    use super::{CodexEvent, EventMsgPayload, ResponseItemPayload, WebSearchAction};
 
     #[test]
     fn parses_command_execution_started_event() {
@@ -196,5 +248,35 @@ mod tests {
             },
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_token_count_event_msg() {
+        let event: CodexEvent = serde_json::from_str(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":230},"last_token_usage":{"input_tokens":90,"cached_input_tokens":30,"output_tokens":40,"reasoning_output_tokens":12,"total_tokens":130},"model_context_window":200000}}}"#,
+        )
+        .unwrap();
+        match event {
+            CodexEvent::EventMsg { payload } => match payload {
+                EventMsgPayload::TokenCount { info } => {
+                    let info = info.expect("token usage info");
+                    assert_eq!(info.total_token_usage.total_tokens, 230);
+                    assert_eq!(info.last_token_usage.total_tokens, 130);
+                    assert_eq!(info.model_context_window, Some(200_000));
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn computes_context_remaining_like_codex_tui() {
+        let usage = super::TokenUsage {
+            total_tokens: 13_700,
+            ..Default::default()
+        };
+        assert_eq!(usage.tokens_in_context_window(), 13_700);
+        assert_eq!(usage.percent_of_context_window_remaining(272_000), 99);
     }
 }
