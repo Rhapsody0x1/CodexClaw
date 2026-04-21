@@ -17,6 +17,31 @@ pub struct CodexRuntimeProfile {
     pub model_provider: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModelEntry {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub description: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
+}
+
+impl CodexModelEntry {
+    pub fn description_for_locale(&self, locale: &str) -> Option<&str> {
+        if locale.eq_ignore_ascii_case("zh") {
+            self.description_zh
+                .as_deref()
+                .or(self.description.as_deref())
+                .or(self.description_en.as_deref())
+        } else {
+            self.description_en
+                .as_deref()
+                .or(self.description.as_deref())
+                .or(self.description_zh.as_deref())
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     model: Option<String>,
@@ -37,6 +62,18 @@ struct RawProfile {
 struct RawModelList {
     #[serde(default)]
     canonical: Vec<String>,
+    #[serde(default)]
+    models: Vec<RawModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModelEntry {
+    name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    description: Option<String>,
+    description_zh: Option<String>,
+    description_en: Option<String>,
 }
 
 const CODEX_MODELS_TOML: &str = include_str!("../../config/codex_models.toml");
@@ -75,33 +112,109 @@ pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeP
 ///   4. An optional `extra` slice for per-session overrides the caller wants
 ///      surfaced (e.g. the user's `model_override`).
 pub fn list_codex_models(runtime_profile: &CodexRuntimeProfile, extra: &[String]) -> Vec<String> {
-    list_codex_models_with_path(runtime_profile, extra, &codex_config_path())
+    list_codex_model_entries(runtime_profile, extra)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
 }
 
-pub fn list_codex_models_with_path(
+pub fn list_codex_model_entries(
+    runtime_profile: &CodexRuntimeProfile,
+    extra: &[String],
+) -> Vec<CodexModelEntry> {
+    list_codex_model_entries_with_path(runtime_profile, extra, &codex_config_path())
+}
+
+pub fn list_codex_model_entries_with_path(
     runtime_profile: &CodexRuntimeProfile,
     extra: &[String],
     config_path: &Path,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |name: &str| {
-        let trimmed = name.trim();
+) -> Vec<CodexModelEntry> {
+    let mut out: Vec<CodexModelEntry> = Vec::new();
+    let mut push = |entry: RawCodexModelEntry<'_>| {
+        let trimmed = entry.name.trim();
         if trimmed.is_empty() {
             return;
         }
-        if !out.iter().any(|existing| existing == trimmed) {
-            out.push(trimmed.to_string());
+        let normalized_aliases = entry
+            .aliases
+            .iter()
+            .filter_map(|alias| {
+                let trimmed_alias = alias.trim();
+                if trimmed_alias.is_empty() || trimmed_alias.eq_ignore_ascii_case(trimmed) {
+                    None
+                } else {
+                    Some(trimmed_alias.to_string())
+                }
+            })
+            .fold(Vec::<String>::new(), |mut acc, alias| {
+                if !acc
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&alias))
+                {
+                    acc.push(alias);
+                }
+                acc
+            });
+        if let Some(existing) = out.iter_mut().find(|existing| existing.name == trimmed) {
+            for alias in normalized_aliases {
+                if !existing
+                    .aliases
+                    .iter()
+                    .any(|current| current.eq_ignore_ascii_case(&alias))
+                {
+                    existing.aliases.push(alias);
+                }
+            }
+            if existing.description.is_none() {
+                existing.description = entry.description.map(str::to_string);
+            }
+            if existing.description_zh.is_none() {
+                existing.description_zh = entry.description_zh.map(str::to_string);
+            }
+            if existing.description_en.is_none() {
+                existing.description_en = entry.description_en.map(str::to_string);
+            }
+        } else {
+            out.push(CodexModelEntry {
+                name: trimmed.to_string(),
+                aliases: normalized_aliases,
+                description: entry.description.map(str::to_string),
+                description_zh: entry.description_zh.map(str::to_string),
+                description_en: entry.description_en.map(str::to_string),
+            });
         }
     };
 
     if let Ok(list) = toml::from_str::<RawModelList>(CODEX_MODELS_TOML) {
         for model in list.canonical {
-            push(&model);
+            push(RawCodexModelEntry {
+                name: &model,
+                aliases: &[],
+                description: None,
+                description_zh: None,
+                description_en: None,
+            });
+        }
+        for model in list.models {
+            push(RawCodexModelEntry {
+                name: &model.name,
+                aliases: &model.aliases,
+                description: model.description.as_deref(),
+                description_zh: model.description_zh.as_deref(),
+                description_en: model.description_en.as_deref(),
+            });
         }
     }
 
     if let Some(model) = runtime_profile.configured_model.as_deref() {
-        push(model);
+        push(RawCodexModelEntry {
+            name: model,
+            aliases: &[],
+            description: None,
+            description_zh: None,
+            description_en: None,
+        });
     }
 
     if let Ok(raw) = std::fs::read_to_string(config_path)
@@ -110,16 +223,39 @@ pub fn list_codex_models_with_path(
     {
         for profile in profiles.values() {
             if let Some(model) = profile.model.as_deref() {
-                push(model);
+                push(RawCodexModelEntry {
+                    name: model,
+                    aliases: &[],
+                    description: None,
+                    description_zh: None,
+                    description_en: None,
+                });
             }
         }
     }
 
     for value in extra {
-        push(value);
+        push(RawCodexModelEntry {
+            name: value,
+            aliases: &[],
+            description: None,
+            description_zh: None,
+            description_en: None,
+        });
     }
 
     out
+}
+
+pub fn list_codex_models_with_path(
+    runtime_profile: &CodexRuntimeProfile,
+    extra: &[String],
+    config_path: &Path,
+) -> Vec<String> {
+    list_codex_model_entries_with_path(runtime_profile, extra, config_path)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
 }
 
 fn codex_config_path() -> PathBuf {
@@ -134,6 +270,14 @@ fn codex_config_path() -> PathBuf {
     codex_home.join("config.toml")
 }
 
+struct RawCodexModelEntry<'a> {
+    name: &'a str,
+    aliases: &'a [String],
+    description: Option<&'a str>,
+    description_zh: Option<&'a str>,
+    description_en: Option<&'a str>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,13 +285,13 @@ mod tests {
 
     #[test]
     fn canonical_list_is_non_empty() {
-        let list = list_codex_models_with_path(
+        let list = list_codex_model_entries_with_path(
             &CodexRuntimeProfile::default(),
             &[],
             Path::new("/dev/null"),
         );
         assert!(!list.is_empty(), "canonical list must not be empty");
-        assert!(list.iter().any(|m| m.starts_with("gpt-")));
+        assert!(list.iter().any(|m| m.name.starts_with("gpt-")));
     }
 
     #[test]
@@ -179,5 +323,23 @@ model = "gpt-5.4"   # already canonical, must dedupe
         assert!(list.contains(&"gpt-configured".to_string()));
         assert!(list.contains(&"gpt-team".to_string()));
         assert!(list.contains(&"gpt-user-override".to_string()));
+    }
+
+    #[test]
+    fn canonical_models_expose_aliases() {
+        let list = list_codex_model_entries_with_path(
+            &CodexRuntimeProfile::default(),
+            &[],
+            Path::new("/dev/null"),
+        );
+        let mini = list
+            .iter()
+            .find(|entry| entry.name == "gpt-5.4-mini")
+            .unwrap();
+        assert!(mini.aliases.iter().any(|alias| alias == "mini"));
+        assert_eq!(
+            mini.description_for_locale("zh"),
+            Some("小巧快速的通用模型")
+        );
     }
 }

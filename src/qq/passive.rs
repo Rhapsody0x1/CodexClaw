@@ -134,13 +134,19 @@ impl PassiveTurnEmitter {
     async fn send_directive(&mut self, directive: Directive) -> Result<()> {
         match directive {
             Directive::Image { path } => {
-                let info = self.qq_client.upload_file(&self.openid, &path, 1).await?;
+                let info = self
+                    .qq_client
+                    .upload_file(&self.openid, &path, 1, None)
+                    .await?;
                 self.qq_client
                     .send_media(&self.openid, &self.message_id, &info)
                     .await?;
             }
-            Directive::File { path, .. } => {
-                let info = self.qq_client.upload_file(&self.openid, &path, 4).await?;
+            Directive::File { path, name } => {
+                let info = self
+                    .qq_client
+                    .upload_file(&self.openid, &path, 4, name.as_deref())
+                    .await?;
                 self.qq_client
                     .send_media(&self.openid, &self.message_id, &info)
                     .await?;

@@ -2,6 +2,8 @@ commands:
   help:
     header: "# Command Guide"
     section_basic: "## Basic Commands"
+    section_model_settings: "## Model Settings"
+    section_session_management: "## Session Management"
     section_advanced: "## Advanced Commands"
     entry_help: "- 💡 `/help` - show this help"
     entry_status: "- 📌 `/status` - show session status"
@@ -24,6 +26,16 @@ commands:
     entry_verbose: "- 🪄 `/verbose` - toggle verbose output"
     entry_alias: "- 🧩 `/alias` - manage command aliases"
     entry_lang: "- 🌐 `/lang` - switch UI language"
+    entry_compact: "- 🗜️ `/compact` - compact the current session context"
+
+  compact:
+    busy: "A task is still running. Wait for it to finish before using `/compact`."
+    missing_session: "There is no active Codex session to compact yet. Start a conversation first, then run `/compact`."
+    missing_rollout: "The current session rollout file was not found, so `/compact` cannot run right now."
+    start: "Starting session compaction now. I'll send another update when it finishes."
+    failed: "Manual session compaction failed"
+    success: "Compacted the current session context. Future turns will continue from the compact summary."
+    warning: "Heads up: long threads and repeated compactions can reduce model accuracy. When possible, start a fresh `/new` session for a narrower task."
 
   runtime:
     last_user_message: "last user message: %{preview}"
@@ -81,30 +93,32 @@ commands:
     updated: "model updated to: %{model}"
     status: "model: %{effective}    override: %{override_value}"
     invalid: "invalid model name"
-    prompt_current: "Current model: %{current}"
-    prompt_header: "Available models:"
-    prompt_item: "  • %{name}"
+    prompt_current: "**Current model:** %{current}"
+    prompt_header: "**Available models:**"
+    prompt_item_name: "- `%{name}`"
+    prompt_item_description: "  - %{description}"
+    prompt_item_aliases: "  - aliases: %{aliases}"
 
   fast:
     updated: "fast mode updated to: %{value}"
     status: "fast: %{value}"
-    invalid: "invalid value. Try: on | off | inherit"
+    invalid: "invalid value. Try: on (开) | off (关) | inherit (default)"
     prompt_current: "Current fast mode: %{current}"
-    prompt_header: "Options: on / off / inherit"
+    prompt_header: "Options: on (开), off (关), inherit (default)"
 
   context:
     updated: "context mode updated to: %{value}"
     status: "context: %{value}"
-    invalid: "invalid value. Try: 1m | standard | inherit"
+    invalid: "invalid value. Try: standard (标准) | 1M (长) | inherit (default)"
     prompt_current: "Current context: %{current}"
-    prompt_header: "Options: standard / 1m / inherit"
+    prompt_header: "Options: standard (标准), 1M (长), inherit (default)"
 
   reasoning:
     updated: "reasoning depth updated to: %{value}"
     status: "reasoning: %{value}"
-    invalid: "invalid depth. choices: none | minimal | low | medium | high | xhigh | inherit"
+    invalid: "invalid depth. choices: low (低) | medium (中) | high (高) | xhigh (超高) | inherit (default)"
     prompt_current: "Current reasoning: %{current}"
-    prompt_header: "Options: none / minimal / low / medium / high / xhigh / inherit"
+    prompt_header: "Options: low (低), medium (中), high (高), xhigh (超高), inherit (default)"
 
   shared:
     inherit_default: "inherit default"
@@ -186,7 +200,7 @@ commands:
     prompt_header: "Options: en / zh"
 
   interactive:
-    hint: "Type a value (fuzzy match ok), or `/back` to cancel."
+    hint: "Type a value, or `/back` to cancel."
     ambiguous: "`%{input}` matched multiple: %{matches}. Please be more specific."
     no_match: "`%{input}` didn't match anything. Try again or `/back`."
     applied: "Applied to %{cmd}: %{value}."
@@ -202,4 +216,4 @@ errors:
   interrupt_requested: "Interrupt requested for current task."
 
 warnings:
-  context_near_limit: "⚠️ Context window is %{percent}% used (%{used} used / %{total}). Consider `/new` to start a fresh session."
+  context_near_limit: "⚠️ Estimated remaining context may be low (%{used} used / %{total}, about %{percent}% used). If anything looks off, try `/compact` to compress the session context."

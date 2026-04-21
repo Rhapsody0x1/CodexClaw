@@ -626,9 +626,6 @@ fn append_runtime_overrides(
     match context_mode {
         Some(ContextMode::OneM) => {
             command.arg("-c").arg("model_context_window=1000000");
-            command
-                .arg("-c")
-                .arg("model_auto_compact_token_limit=900000");
         }
         Some(ContextMode::Standard) => {
             command.arg("-c").arg("model_context_window=272000");
@@ -642,16 +639,18 @@ mod tests {
     use std::{env, ffi::OsString};
 
     use tempfile::tempdir;
+    use tokio::process::Command;
 
     use crate::codex::{
         events::{CodexItem, PatchChangeKind, TodoEntry, WebSearchAction},
         executor::{
-            ExecutionUpdate, ToolEventPhase, build_codex_path_env, format_todo_items,
-            humanize_tool_label, parse_update_from_raw_json, tool_display_for_item,
-            web_search_action_detail, web_search_display_from_action,
+            ExecutionUpdate, ToolEventPhase, append_runtime_overrides, build_codex_path_env,
+            format_todo_items, humanize_tool_label, parse_update_from_raw_json,
+            tool_display_for_item, web_search_action_detail, web_search_display_from_action,
             web_search_display_from_detail,
         },
     };
+    use crate::session::state::ContextMode;
 
     #[test]
     fn formats_bash_tool_display() {
@@ -860,5 +859,27 @@ mod tests {
         let paths = env::split_paths(&joined).collect::<Vec<_>>();
         assert!(paths.contains(&home.path().join(".cargo").join("bin")));
         assert!(paths.contains(&home.path().join(".local").join("bin")));
+    }
+
+    #[test]
+    fn one_m_context_does_not_enable_auto_compact_override() {
+        let mut command = Command::new("codex");
+        append_runtime_overrides(&mut command, None, Some(ContextMode::OneM));
+
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.iter()
+                .any(|value| value == "model_context_window=1000000")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|value| value == "model_auto_compact_token_limit=900000")
+        );
     }
 }

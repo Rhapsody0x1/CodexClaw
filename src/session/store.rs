@@ -802,6 +802,16 @@ impl SessionStore {
         &self.default_workspace_dir
     }
 
+    pub fn rollout_path_for_session(&self, session_id: &str) -> Result<Option<PathBuf>> {
+        let mut files = Vec::new();
+        collect_rollout_files(&self.global_codex_home.join("sessions"), &mut files)?;
+        Ok(files.into_iter().find(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.contains(session_id))
+        }))
+    }
+
     async fn mutate_state<T, F>(&self, mutator: F) -> Result<T>
     where
         F: FnOnce(&mut PersistedSessionState) -> Result<T>,

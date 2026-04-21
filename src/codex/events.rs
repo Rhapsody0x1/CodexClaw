@@ -207,6 +207,18 @@ pub struct TokenUsageInfo {
     pub model_context_window: Option<u64>,
 }
 
+impl TokenUsageInfo {
+    pub fn context_window_usage(&self) -> &TokenUsage {
+        if self.last_token_usage.tokens_in_context_window() > 0
+            || self.total_token_usage.tokens_in_context_window() == 0
+        {
+            &self.last_token_usage
+        } else {
+            &self.total_token_usage
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CodexEvent, EventMsgPayload, ResponseItemPayload, WebSearchAction};
@@ -278,5 +290,22 @@ mod tests {
         };
         assert_eq!(usage.tokens_in_context_window(), 13_700);
         assert_eq!(usage.percent_of_context_window_remaining(272_000), 99);
+    }
+
+    #[test]
+    fn prefers_last_usage_for_context_window_tracking() {
+        let info = super::TokenUsageInfo {
+            total_token_usage: super::TokenUsage {
+                total_tokens: 1_234_567,
+                ..Default::default()
+            },
+            last_token_usage: super::TokenUsage {
+                total_tokens: 98_765,
+                ..Default::default()
+            },
+            model_context_window: Some(272_000),
+        };
+
+        assert_eq!(info.context_window_usage().total_tokens, 98_765);
     }
 }

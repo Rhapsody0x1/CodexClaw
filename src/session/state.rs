@@ -27,14 +27,30 @@ impl ReasoningEffort {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub fn parse_supported(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            _ => None,
+        }
+    }
+
+    pub fn normalized(self) -> Self {
         match self {
-            Self::None => "none",
-            Self::Minimal => "minimal",
+            Self::None | Self::Minimal => Self::Low,
+            other => other,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self.normalized() {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::None | Self::Minimal => "low",
         }
     }
 }
@@ -251,6 +267,13 @@ pub struct TokenUsageSnapshot {
 }
 
 impl TokenUsageSnapshot {
+    pub fn context_tokens(&self) -> Option<u64> {
+        if self.window > 0 && self.total_tokens > self.window {
+            return None;
+        }
+        Some(self.total_tokens)
+    }
+
     pub fn percent_remaining(&self) -> Option<u64> {
         if self.window == 0 {
             return None;
@@ -262,7 +285,7 @@ impl TokenUsageSnapshot {
         }
 
         let effective_window = self.window - BASELINE_TOKENS;
-        let used = self.total_tokens.saturating_sub(BASELINE_TOKENS);
+        let used = self.context_tokens()?.saturating_sub(BASELINE_TOKENS);
         let remaining = effective_window.saturating_sub(used);
         Some(
             ((remaining as f64 / effective_window as f64) * 100.0)
@@ -350,20 +373,87 @@ pub enum PendingSetting {
 }
 
 impl PendingSetting {
-    pub fn command_name(&self) -> &'static str {
+    pub fn command_name(&self, locale: &str) -> &'static str {
         use PendingSetting::*;
+        let zh = locale.eq_ignore_ascii_case("zh");
         match self {
-            Model => "/model",
-            Reasoning => "/reasoning",
-            Fast => "/fast",
-            Context => "/context",
-            Verbose => "/verbose",
-            Lang => "/lang",
-            SessionsProjects | SessionsSessions { .. } => "/sessions",
-            ImportProjects | ImportSessions { .. } => "/import",
-            Fg => "/fg",
-            ResumeProjects | ResumeSessions { .. } => "/resume",
-            LoadbgProjects | LoadbgSessions { .. } => "/loadbg",
+            Model => {
+                if zh {
+                    "/模型"
+                } else {
+                    "/model"
+                }
+            }
+            Reasoning => {
+                if zh {
+                    "/思考"
+                } else {
+                    "/reasoning"
+                }
+            }
+            Fast => {
+                if zh {
+                    "/快速"
+                } else {
+                    "/fast"
+                }
+            }
+            Context => {
+                if zh {
+                    "/上下文"
+                } else {
+                    "/context"
+                }
+            }
+            Verbose => {
+                if zh {
+                    "/详细"
+                } else {
+                    "/verbose"
+                }
+            }
+            Lang => {
+                if zh {
+                    "/语言"
+                } else {
+                    "/lang"
+                }
+            }
+            SessionsProjects | SessionsSessions { .. } => {
+                if zh {
+                    "/会话"
+                } else {
+                    "/sessions"
+                }
+            }
+            ImportProjects | ImportSessions { .. } => {
+                if zh {
+                    "/导入"
+                } else {
+                    "/import"
+                }
+            }
+            Fg => {
+                if zh {
+                    "/前台"
+                } else {
+                    "/fg"
+                }
+            }
+            ResumeProjects | ResumeSessions { .. } => {
+                if zh {
+                    "/恢复"
+                } else {
+                    "/resume"
+                }
+            }
+            LoadbgProjects | LoadbgSessions { .. } => {
+                if zh {
+                    "/载入后台"
+                } else {
+                    "/loadbg"
+                }
+            }
         }
     }
 }
@@ -420,4 +510,25 @@ pub struct PersistedSessionState {
     pub users: BTreeMap<String, UserSessionState>,
     #[serde(default)]
     pub imported_profiles: BTreeMap<String, ImportedSessionProfile>,
+}
+
+#[cfg(test)]
+mod token_usage_tests {
+    use super::TokenUsageSnapshot;
+
+    #[test]
+    fn percent_remaining_returns_none_for_implausible_legacy_cumulative_usage() {
+        let snapshot = TokenUsageSnapshot {
+            total_tokens: 19_668_612,
+            window: 1_000_000,
+            input_tokens: 19_568_077,
+            cached_input_tokens: 18_968_448,
+            output_tokens: 100_535,
+            updated_at: chrono::Utc::now(),
+        };
+
+        assert_eq!(snapshot.context_tokens(), None);
+        assert_eq!(snapshot.percent_remaining(), None);
+        assert_eq!(snapshot.percent_used(), None);
+    }
 }

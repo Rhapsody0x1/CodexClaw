@@ -15,6 +15,7 @@ use rust_i18n::t;
 
 use crate::{
     codex::{
+        compact,
         executor::{CodexExecutor, ExecutionRequest},
         output::{Directive, parse_output},
         prompt::build_prompt,
@@ -126,6 +127,15 @@ impl App {
             CommandOutcome::SelfUpdate => {
                 self.handle_self_update_command(&normalized.sender_openid, &normalized.message_id)
                     .await?;
+                return Ok(());
+            }
+            CommandOutcome::Compact => {
+                self.handle_compact_command(
+                    &normalized.sender_openid,
+                    &normalized.message_id,
+                    &runtime_profile,
+                )
+                .await?;
                 return Ok(());
             }
             CommandOutcome::Continue => {}
@@ -279,16 +289,15 @@ impl App {
                     let window = info
                         .model_context_window
                         .or(output.context_window)
-                        .or_else(|| context_mode.map(context_mode_window))
+                        .or_else(|| context_mode.map(compact::context_mode_window))
                         .unwrap_or(ContextMode::STANDARD_CONTEXT_WINDOW);
-                    let context_usage = info.last_token_usage;
-                    let total_usage = info.total_token_usage;
+                    let context_usage = info.context_window_usage().clone();
                     let snapshot = TokenUsageSnapshot {
                         total_tokens: context_usage.tokens_in_context_window(),
                         window,
-                        input_tokens: total_usage.input_tokens,
-                        cached_input_tokens: total_usage.cached_input_tokens,
-                        output_tokens: total_usage.output_tokens,
+                        input_tokens: context_usage.input_tokens,
+                        cached_input_tokens: context_usage.cached_input_tokens,
+                        output_tokens: context_usage.output_tokens,
                         updated_at: chrono::Utc::now(),
                     };
                     let _ = self
@@ -491,6 +500,154 @@ impl App {
         Ok(())
     }
 
+    async fn handle_compact_command(
+        &self,
+        openid: &str,
+        message_id: &str,
+        runtime_profile: &crate::codex::runtime::CodexRuntimeProfile,
+    ) -> Result<()> {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            let lang = self
+                .session
+                .snapshot_for_user(openid)
+                .await
+                .map(|snapshot| snapshot.settings.language)
+                .unwrap_or_else(|_| "zh".to_string());
+            self.qq_client
+                .send_text(
+                    openid,
+                    message_id,
+                    &t!("commands.compact.busy", locale = lang.as_str()),
+                    Some(message_id),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        let result = self
+            .handle_compact_command_inner(openid, message_id, runtime_profile)
+            .await;
+        self.busy.store(false, Ordering::SeqCst);
+        result
+    }
+
+    async fn handle_compact_command_inner(
+        &self,
+        openid: &str,
+        message_id: &str,
+        runtime_profile: &crate::codex::runtime::CodexRuntimeProfile,
+    ) -> Result<()> {
+        let user_snapshot = self.session.snapshot_for_user(openid).await?;
+        let lang = user_snapshot.settings.language.clone();
+        let locale = lang.as_str();
+        let effective_settings = user_snapshot
+            .settings
+            .merged_with_profile(user_snapshot.foreground.profile.as_ref());
+        let Some(session_id) = user_snapshot.foreground.session_id.clone() else {
+            self.qq_client
+                .send_text(
+                    openid,
+                    message_id,
+                    &t!("commands.compact.missing_session", locale = locale),
+                    Some(message_id),
+                )
+                .await?;
+            return Ok(());
+        };
+        if self
+            .session
+            .rollout_path_for_session(&session_id)?
+            .is_none()
+        {
+            self.qq_client
+                .send_text(
+                    openid,
+                    message_id,
+                    &t!("commands.compact.missing_rollout", locale = locale),
+                    Some(message_id),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        let workspace_dir = user_snapshot.foreground.workspace_dir.clone();
+        let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
+        let codex_home = self.session.codex_home().to_path_buf();
+        let effective_model = effective_settings
+            .model_override
+            .clone()
+            .or_else(|| runtime_profile.configured_model.clone())
+            .unwrap_or_else(|| self.config.general.default_model.clone());
+        let reasoning = effective_settings
+            .reasoning_effort
+            .or(runtime_profile.reasoning_effort)
+            .unwrap_or(self.config.general.default_reasoning_effort);
+        let service_tier = effective_settings
+            .service_tier
+            .or(runtime_profile.service_tier);
+        let context_mode = effective_settings
+            .context_mode
+            .or(runtime_profile.context_mode);
+        let runtime_state = SessionState {
+            session_id: Some(session_id.clone()),
+            settings: effective_settings,
+        };
+        let mut add_dirs = vec![self.session.inbox_dir().to_path_buf()];
+        if workspace_dir != shared_workspace_dir {
+            add_dirs.push(shared_workspace_dir);
+        }
+        self.qq_client
+            .send_text(
+                openid,
+                message_id,
+                &t!("commands.compact.start", locale = locale),
+                Some(message_id),
+            )
+            .await?;
+
+        match self
+            .run_session_compaction(
+                openid,
+                &session_id,
+                &workspace_dir,
+                &effective_model,
+                reasoning,
+                service_tier,
+                context_mode,
+                &codex_home,
+                &add_dirs,
+                runtime_state,
+            )
+            .await
+        {
+            Ok(()) => {
+                let text = format!(
+                    "{}\n\n{}",
+                    t!("commands.compact.success", locale = locale),
+                    t!("commands.compact.warning", locale = locale),
+                );
+                self.qq_client
+                    .send_text(openid, message_id, &text, Some(message_id))
+                    .await?;
+            }
+            Err(err) => {
+                if err.to_string().contains("aborted by user") {
+                    return Ok(());
+                }
+                self.qq_client
+                    .send_text(
+                        openid,
+                        message_id,
+                        &format!("{}: {err}", t!("commands.compact.failed", locale = locale)),
+                        Some(message_id),
+                    )
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn send_command_reply(
         &self,
         openid: &str,
@@ -518,6 +675,61 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn run_session_compaction(
+        &self,
+        openid: &str,
+        session_id: &str,
+        workspace_dir: &std::path::Path,
+        effective_model: &str,
+        reasoning: crate::session::state::ReasoningEffort,
+        service_tier: Option<crate::session::state::ServiceTier>,
+        context_mode: Option<crate::session::state::ContextMode>,
+        codex_home: &std::path::Path,
+        add_dirs: &[PathBuf],
+        runtime_state: SessionState,
+    ) -> Result<()> {
+        let Some(rollout_path) = self.session.rollout_path_for_session(session_id)? else {
+            anyhow::bail!("session rollout file not found");
+        };
+        let rollout_snapshot = compact::read_rollout_snapshot(&rollout_path)?;
+        info!(
+            openid = %openid,
+            session_id,
+            rollout = %rollout_path.display(),
+            "triggering codex session compaction"
+        );
+
+        let compaction = self
+            .codex
+            .execute(
+                ExecutionRequest {
+                    prompt: compact::SUMMARIZATION_PROMPT.to_string(),
+                    workspace_dir: workspace_dir.to_path_buf(),
+                    codex_home: codex_home.to_path_buf(),
+                    config_overrides: Vec::new(),
+                    add_dirs: add_dirs.to_vec(),
+                    session_state: runtime_state,
+                    model: Some(effective_model.to_string()),
+                    service_tier,
+                    context_mode,
+                    reasoning_effort: reasoning,
+                    image_paths: Vec::new(),
+                },
+                Some(self.install_active_turn().await),
+                None,
+            )
+            .await;
+        self.clear_active_turn().await;
+        let output = compaction?;
+        let parsed = parse_output(&output.text, workspace_dir);
+        let summary_text = compact::build_summary_text(&parsed.text);
+        let replacement_history =
+            compact::build_compacted_history(&rollout_snapshot.user_messages, &summary_text);
+        compact::append_compacted_rollout(&rollout_path, &summary_text, &replacement_history)?;
+        Ok(())
+    }
+
     async fn send_directive(
         &self,
         openid: &str,
@@ -527,12 +739,15 @@ impl App {
         match directive {
             Directive::Image { path } => {
                 info!(path = %path.display(), "sending image directive to qq");
-                let info = self.qq_client.upload_file(openid, &path, 1).await?;
+                let info = self.qq_client.upload_file(openid, &path, 1, None).await?;
                 self.qq_client.send_media(openid, message_id, &info).await?;
             }
-            Directive::File { path, .. } => {
+            Directive::File { path, name } => {
                 info!(path = %path.display(), "sending file directive to qq");
-                let info = self.qq_client.upload_file(openid, &path, 4).await?;
+                let info = self
+                    .qq_client
+                    .upload_file(openid, &path, 4, name.as_deref())
+                    .await?;
                 self.qq_client.send_media(openid, message_id, &info).await?;
             }
         }
@@ -587,13 +802,6 @@ impl App {
     }
 }
 
-fn context_mode_window(mode: ContextMode) -> u64 {
-    match mode {
-        ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
-        ContextMode::OneM => 1_000_000,
-    }
-}
-
 fn format_tokens_compact(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f64 / 1_000_000.0)
@@ -609,12 +817,13 @@ fn build_context_warning(snapshot: &TokenUsageSnapshot, lang: &str) -> Option<St
     if (percent as f64 / 100.0) < CONTEXT_WARNING_THRESHOLD {
         return None;
     }
+    let used_tokens = snapshot.context_tokens()?;
     let lang = normalize_lang(lang);
     Some(
         t!(
             "warnings.context_near_limit",
             percent = percent,
-            used = format_tokens_compact(snapshot.total_tokens),
+            used = format_tokens_compact(used_tokens),
             total = format_tokens_compact(snapshot.window),
             locale = lang
         )
@@ -721,5 +930,41 @@ mod tests {
             "unexpected warning: {warning}"
         );
         assert!(warning.contains("220K used / 272K"));
+        assert!(warning.contains("`/compact`"));
+        assert!(!warning.contains("`/压缩`"));
+    }
+
+    #[test]
+    fn context_warning_localizes_compact_command_name() {
+        let warning = build_context_warning(
+            &TokenUsageSnapshot {
+                total_tokens: 220_000,
+                window: 272_000,
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                updated_at: chrono::Utc::now(),
+            },
+            "zh",
+        )
+        .expect("warning");
+        assert!(warning.contains("`/压缩`"), "unexpected warning: {warning}");
+        assert!(!warning.contains("`/compact`"));
+    }
+
+    #[test]
+    fn context_warning_skips_implausible_legacy_cumulative_usage() {
+        let warning = build_context_warning(
+            &TokenUsageSnapshot {
+                total_tokens: 19_668_612,
+                window: 1_000_000,
+                input_tokens: 19_568_077,
+                cached_input_tokens: 18_968_448,
+                output_tokens: 100_535,
+                updated_at: chrono::Utc::now(),
+            },
+            "zh",
+        );
+        assert!(warning.is_none());
     }
 }

@@ -2,6 +2,8 @@ commands:
   help:
     header: "# 命令指南"
     section_basic: "## 基础命令"
+    section_model_settings: "## 模型设置命令"
+    section_session_management: "## 会话管理命令"
     section_advanced: "## 高级命令"
     entry_help: "- 💡 `/帮助`：显示这份帮助"
     entry_status: "- 📌 `/状态`：查看会话状态"
@@ -24,6 +26,16 @@ commands:
     entry_verbose: "- 🪄 `/详细`：切换详细输出"
     entry_alias: "- 🧩 `/别名`：管理命令别名"
     entry_lang: "- 🌐 `/语言`：切换界面语言"
+    entry_compact: "- 🗜️ `/压缩`：压缩会话上下文"
+
+  compact:
+    busy: "当前有任务在运行，请先等待当前任务完成后再执行 `/压缩`。"
+    missing_session: "当前前台还没有可压缩的 Codex 会话。先发起一轮对话后再执行 `/压缩`。"
+    missing_rollout: "未找到当前会话的 Codex rollout 文件，暂时无法执行 `/压缩`。"
+    start: "开始压缩当前会话上下文，完成后我会再通知你。"
+    failed: "手动压缩当前会话上下文失败"
+    success: "已手动压缩当前会话上下文。后续对话会基于压缩摘要继续。"
+    warning: "提示：对话线程过长、反复 compact 后，模型准确性可能下降。若条件允许，建议及时 `/新建` 一个更聚焦的新会话。"
 
   runtime:
     last_user_message: "最近用户消息: %{preview}"
@@ -81,30 +93,32 @@ commands:
     updated: "模型已更新为：%{model}"
     status: "model: %{effective}    override: %{override_value}"
     invalid: "无效的模型名称"
-    prompt_current: "当前模型：%{current}"
-    prompt_header: "可选模型："
-    prompt_item: "  • %{name}"
+    prompt_current: "**当前模型：** %{current}"
+    prompt_header: "**可选模型：**"
+    prompt_item_name: "- `%{name}`"
+    prompt_item_description: "  - %{description}"
+    prompt_item_aliases: "  - 别名：%{aliases}"
 
   fast:
     updated: "fast 已更新为：%{value}"
     status: "fast: %{value}"
-    invalid: "无效的取值。可选：on | off | inherit"
+    invalid: "无效的取值。可选：on (开) | off (关) | inherit (默认)"
     prompt_current: "当前快速模式：%{current}"
-    prompt_header: "可选值：on / off / inherit"
+    prompt_header: "可选值：on (开), off (关), inherit (默认)"
 
   context:
     updated: "上下文模式已更新为：%{value}"
     status: "上下文: %{value}"
-    invalid: "无效的取值。可选：1m | standard | inherit"
+    invalid: "无效的取值。可选：standard (标准) | 1M (长) | inherit (默认)"
     prompt_current: "当前上下文：%{current}"
-    prompt_header: "可选值：standard / 1m / inherit"
+    prompt_header: "可选值：standard (标准), 1M (长), inherit (默认)"
 
   reasoning:
     updated: "思考深度已更新为：%{value}"
     status: "思考深度: %{value}"
-    invalid: "无效思考深度。可选：none | minimal | low | medium | high | xhigh | inherit"
+    invalid: "无效思考深度。可选：low (低) | medium (中) | high (高) | xhigh (超高) | inherit (默认)"
     prompt_current: "当前思考深度：%{current}"
-    prompt_header: "可选值：none / minimal / low / medium / high / xhigh / inherit"
+    prompt_header: "可选值：low (低), medium (中), high (高), xhigh (超高), inherit (默认)"
 
   shared:
     inherit_default: "继承默认"
@@ -186,7 +200,7 @@ commands:
     prompt_header: "可选值：en / zh"
 
   interactive:
-    hint: "请输入一个值（支持模糊匹配），或 `/返回` 取消。"
+    hint: "请输入一个值，或 `/返回` 取消。"
     ambiguous: "`%{input}` 匹配到多个：%{matches}。请更精确一些。"
     no_match: "`%{input}` 没有匹配项。请重试或 `/返回`。"
     applied: "已为 %{cmd} 应用：%{value}。"
@@ -202,4 +216,4 @@ errors:
   interrupt_requested: "已请求停止当前运行。"
 
 warnings:
-  context_near_limit: "⚠️ 上下文窗口已使用 %{percent}%（已用 %{used} / %{total}）。建议使用 `/新建` 开启新会话。"
+  context_near_limit: "⚠️ 估计上下文窗口可能不足（已用 %{used} / %{total}，约 %{percent}%）。出现异常时请尝试用 `/压缩` 来压缩上下文。"

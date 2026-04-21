@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rust_i18n::t;
 
 use crate::{
-    codex::runtime::{CodexRuntimeProfile, list_codex_models},
+    codex::runtime::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
     normalize_lang,
     session::{
         state::{
@@ -39,6 +39,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "rename",
     "stop",
     "interrupt",
+    "compact",
     "self-update",
     "alias",
     "back",
@@ -62,6 +63,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "新建",
     "停止",
     "中断",
+    "压缩",
     "自更新",
     "详细",
     "重命名",
@@ -79,6 +81,7 @@ pub enum CommandOutcome {
     Continue,
     CancelCurrent(String),
     StopCurrent(String),
+    Compact,
     SelfUpdate,
 }
 
@@ -156,7 +159,7 @@ fn maybe_handle_command_inner<'a>(
                 return Ok(CommandOutcome::Reply(CommandReply {
                     text: t!(
                         "commands.back.exited",
-                        cmd = pending.command_name(),
+                        cmd = pending.command_name(locale),
                         locale = locale
                     )
                     .into_owned(),
@@ -174,7 +177,7 @@ fn maybe_handle_command_inner<'a>(
             Some(
                 t!(
                     "commands.back.exited",
-                    cmd = pending.command_name(),
+                    cmd = pending.command_name(locale),
                     locale = locale
                 )
                 .into_owned(),
@@ -348,6 +351,7 @@ fn maybe_handle_command_inner<'a>(
             "/interrupt" => Ok(CommandOutcome::CancelCurrent(
                 t!("errors.interrupt_requested", locale = locale).into_owned(),
             )),
+            "/compact" => Ok(CommandOutcome::Compact),
             "/self-update" => Ok(CommandOutcome::SelfUpdate),
             "/alias" => handle_alias(&rest, openid, session).await,
             other => {
@@ -391,6 +395,7 @@ fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutco
         CommandOutcome::StopCurrent(msg) => {
             CommandOutcome::StopCurrent(format!("{prefix}\n\n{msg}"))
         }
+        CommandOutcome::Compact => CommandOutcome::Compact,
         CommandOutcome::SelfUpdate => CommandOutcome::SelfUpdate,
         CommandOutcome::Continue => CommandOutcome::Continue,
     }
@@ -461,6 +466,7 @@ async fn expand_alias(
                 parts.push(msg);
                 return Ok(CommandOutcome::StopCurrent(parts.join("\n")));
             }
+            CommandOutcome::Compact => return Ok(CommandOutcome::Compact),
             CommandOutcome::SelfUpdate => return Ok(CommandOutcome::SelfUpdate),
         }
     }
@@ -610,6 +616,8 @@ async fn handle_model(
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
+    let known_models =
+        list_codex_model_entries(runtime_profile, &interactive::model_extras(&snapshot));
     if args.is_empty() {
         return interactive::enter_model_prompt(
             &snapshot,
@@ -636,6 +644,8 @@ async fn handle_model(
     let value = args.join(" ");
     let next = if matches!(value.as_str(), "default" | "inherit") {
         None
+    } else if let Some(resolved) = interactive::resolve_model_input(&value, &known_models) {
+        Some(resolved)
     } else {
         Some(value.clone())
     };
@@ -676,13 +686,9 @@ async fn handle_fast(
             .into_owned(),
         }));
     }
-    let next = if args[0].eq_ignore_ascii_case("inherit") {
-        None
-    } else {
-        Some(ServiceTier::parse(args[0]).ok_or_else(|| {
-            anyhow!(t!("commands.fast.invalid", locale = lang.as_str()).into_owned())
-        })?)
-    };
+    let value = args.join(" ");
+    let next = interactive::resolve_fast_input(&value)
+        .ok_or_else(|| anyhow!(t!("commands.fast.invalid", locale = lang.as_str()).into_owned()))?;
     session.set_service_tier_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
@@ -719,13 +725,10 @@ async fn handle_context(
             .into_owned(),
         }));
     }
-    let next = if args[0].eq_ignore_ascii_case("inherit") {
-        None
-    } else {
-        Some(ContextMode::parse(args[0]).ok_or_else(|| {
-            anyhow!(t!("commands.context.invalid", locale = lang.as_str()).into_owned())
-        })?)
-    };
+    let value = args.join(" ");
+    let next = interactive::resolve_context_input(&value).ok_or_else(|| {
+        anyhow!(t!("commands.context.invalid", locale = lang.as_str()).into_owned())
+    })?;
     session.set_context_mode_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
@@ -762,13 +765,10 @@ async fn handle_reasoning(
             .into_owned(),
         }));
     }
-    let next = if args[0].eq_ignore_ascii_case("inherit") {
-        None
-    } else {
-        Some(ReasoningEffort::parse(args[0]).ok_or_else(|| {
-            anyhow!(t!("commands.reasoning.invalid", locale = lang.as_str()).into_owned())
-        })?)
-    };
+    let value = args.join(" ");
+    let next = interactive::resolve_reasoning_input(&value).ok_or_else(|| {
+        anyhow!(t!("commands.reasoning.invalid", locale = lang.as_str()).into_owned())
+    })?;
     session.set_reasoning_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
@@ -1403,6 +1403,9 @@ fn context_usage_line(
     let Some(usage) = state.foreground.last_usage.as_ref() else {
         return t!("commands.status.context_unknown", locale = lang).into_owned();
     };
+    let Some(used_tokens) = usage.context_tokens() else {
+        return t!("commands.status.context_unknown", locale = lang).into_owned();
+    };
     let window = if usage.window > 0 {
         usage.window
     } else {
@@ -1420,7 +1423,7 @@ fn context_usage_line(
     t!(
         "commands.status.context_usage",
         percent = percent,
-        used = format_tokens_compact(usage.total_tokens),
+        used = format_tokens_compact(used_tokens),
         total = format_tokens_compact(window),
         locale = lang
     )
@@ -2036,6 +2039,7 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/新建" => "/new",
         "/停止" => "/stop",
         "/中断" => "/interrupt",
+        "/压缩" => "/compact",
         "/自更新" => "/self-update",
         "/重命名" => "/rename",
         "/返回" => "/back",
@@ -2107,21 +2111,26 @@ fn help_text(lang: &str) -> String {
         t!("commands.help.entry_interrupt", locale = lang).into_owned(),
         t!("commands.help.entry_lang", locale = lang).into_owned(),
         String::new(),
-        t!("commands.help.section_advanced", locale = lang).into_owned(),
+        t!("commands.help.section_model_settings", locale = lang).into_owned(),
+        t!("commands.help.entry_model", locale = lang).into_owned(),
+        t!("commands.help.entry_reasoning", locale = lang).into_owned(),
+        t!("commands.help.entry_fast", locale = lang).into_owned(),
+        t!("commands.help.entry_context", locale = lang).into_owned(),
+        String::new(),
+        t!("commands.help.section_session_management", locale = lang).into_owned(),
         t!("commands.help.entry_sessions", locale = lang).into_owned(),
         t!("commands.help.entry_import", locale = lang).into_owned(),
         t!("commands.help.entry_resume", locale = lang).into_owned(),
-        t!("commands.help.entry_loadbg", locale = lang).into_owned(),
-        t!("commands.help.entry_bg", locale = lang).into_owned(),
-        t!("commands.help.entry_fg", locale = lang).into_owned(),
-        t!("commands.help.entry_rename", locale = lang).into_owned(),
         t!("commands.help.entry_save", locale = lang).into_owned(),
-        t!("commands.help.entry_model", locale = lang).into_owned(),
-        t!("commands.help.entry_fast", locale = lang).into_owned(),
-        t!("commands.help.entry_context", locale = lang).into_owned(),
-        t!("commands.help.entry_reasoning", locale = lang).into_owned(),
-        t!("commands.help.entry_verbose", locale = lang).into_owned(),
+        String::new(),
+        t!("commands.help.section_advanced", locale = lang).into_owned(),
+        t!("commands.help.entry_compact", locale = lang).into_owned(),
+        t!("commands.help.entry_fg", locale = lang).into_owned(),
+        t!("commands.help.entry_bg", locale = lang).into_owned(),
+        t!("commands.help.entry_loadbg", locale = lang).into_owned(),
+        t!("commands.help.entry_rename", locale = lang).into_owned(),
         t!("commands.help.entry_alias", locale = lang).into_owned(),
+        t!("commands.help.entry_verbose", locale = lang).into_owned(),
         t!("commands.help.entry_self_update", locale = lang).into_owned(),
     ];
     lines.join("\n")
@@ -2160,6 +2169,30 @@ mod interactive {
     //! the pending state is active (`consume_pending_input`).
     use super::*;
 
+    struct ReasoningChoice {
+        value: &'static str,
+        aliases: &'static [&'static str],
+    }
+
+    const REASONING_CHOICES: &[ReasoningChoice] = &[
+        ReasoningChoice {
+            value: "low",
+            aliases: &["低"],
+        },
+        ReasoningChoice {
+            value: "medium",
+            aliases: &["中"],
+        },
+        ReasoningChoice {
+            value: "high",
+            aliases: &["高"],
+        },
+        ReasoningChoice {
+            value: "xhigh",
+            aliases: &["超高"],
+        },
+    ];
+
     #[derive(Debug, PartialEq, Eq)]
     pub enum FuzzyOutcome {
         Exact(String),
@@ -2190,18 +2223,149 @@ mod interactive {
         }
     }
 
-    fn reasoning_options() -> &'static [&'static str] {
-        &[
-            "none", "minimal", "low", "medium", "high", "xhigh", "inherit",
-        ]
+    fn dedupe_matches(values: Vec<String>) -> Vec<String> {
+        values.into_iter().fold(Vec::new(), |mut acc, value| {
+            if !acc.iter().any(|existing| existing == &value) {
+                acc.push(value);
+            }
+            acc
+        })
     }
 
-    fn fast_options() -> &'static [&'static str] {
-        &["on", "off", "inherit"]
+    fn model_matches_exact(entry: &CodexModelEntry, needle: &str) -> bool {
+        entry.name.eq_ignore_ascii_case(needle)
+            || entry
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(needle))
     }
 
-    fn context_options() -> &'static [&'static str] {
-        &["standard", "1m", "inherit"]
+    fn model_matches_prefix(entry: &CodexModelEntry, needle: &str) -> bool {
+        let needle = needle.to_ascii_lowercase();
+        entry.name.to_ascii_lowercase().starts_with(&needle)
+            || entry
+                .aliases
+                .iter()
+                .any(|alias| alias.to_ascii_lowercase().starts_with(&needle))
+    }
+
+    fn match_model_input(input: &str, models: &[CodexModelEntry]) -> FuzzyOutcome {
+        let needle = input.trim();
+        if needle.is_empty() {
+            return FuzzyOutcome::None;
+        }
+
+        let exact = dedupe_matches(
+            models
+                .iter()
+                .filter(|entry| model_matches_exact(entry, needle))
+                .map(|entry| entry.name.clone())
+                .collect(),
+        );
+        match exact.len() {
+            1 => return FuzzyOutcome::Exact(exact.into_iter().next().unwrap()),
+            value if value > 1 => return FuzzyOutcome::Ambiguous(exact),
+            _ => {}
+        }
+
+        let prefixes = dedupe_matches(
+            models
+                .iter()
+                .filter(|entry| model_matches_prefix(entry, needle))
+                .map(|entry| entry.name.clone())
+                .collect(),
+        );
+        match prefixes.len() {
+            0 => FuzzyOutcome::None,
+            1 => FuzzyOutcome::Exact(prefixes.into_iter().next().unwrap()),
+            _ => FuzzyOutcome::Ambiguous(prefixes),
+        }
+    }
+
+    pub fn resolve_model_input(input: &str, models: &[CodexModelEntry]) -> Option<String> {
+        match match_model_input(input, models) {
+            FuzzyOutcome::Exact(choice) => Some(choice),
+            FuzzyOutcome::Ambiguous(_) | FuzzyOutcome::None => None,
+        }
+    }
+
+    fn choice_matches_exact(value: &str, aliases: &[&str], needle: &str) -> bool {
+        value.eq_ignore_ascii_case(needle)
+            || aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(needle))
+    }
+
+    fn match_reasoning_input(input: &str) -> FuzzyOutcome {
+        let needle = input.trim();
+        if needle.is_empty() {
+            return FuzzyOutcome::None;
+        }
+
+        if needle.eq_ignore_ascii_case("inherit")
+            || needle.eq_ignore_ascii_case("default")
+            || needle == "继承"
+            || needle == "默认"
+        {
+            return FuzzyOutcome::Exact("inherit".to_string());
+        }
+
+        let exact = dedupe_matches(
+            REASONING_CHOICES
+                .iter()
+                .filter(|choice| choice_matches_exact(choice.value, choice.aliases, needle))
+                .map(|choice| choice.value.to_string())
+                .collect(),
+        );
+        match exact.len() {
+            0 => FuzzyOutcome::None,
+            1 => FuzzyOutcome::Exact(exact.into_iter().next().unwrap()),
+            _ => FuzzyOutcome::Ambiguous(exact),
+        }
+    }
+
+    pub fn resolve_reasoning_input(input: &str) -> Option<Option<ReasoningEffort>> {
+        match match_reasoning_input(input) {
+            FuzzyOutcome::Exact(choice) if choice == "inherit" => Some(None),
+            FuzzyOutcome::Exact(choice) => ReasoningEffort::parse_supported(&choice).map(Some),
+            FuzzyOutcome::Ambiguous(_) | FuzzyOutcome::None => None,
+        }
+    }
+
+    pub(super) fn resolve_fast_input(input: &str) -> Option<Option<ServiceTier>> {
+        let value = input.trim();
+        if value.is_empty() {
+            return None;
+        }
+        match value.to_ascii_lowercase().as_str() {
+            "inherit" | "default" => Some(None),
+            "on" => Some(Some(ServiceTier::Fast)),
+            "off" => Some(Some(ServiceTier::Flex)),
+            _ => match value {
+                "默认" => Some(None),
+                "开" => Some(Some(ServiceTier::Fast)),
+                "关" => Some(Some(ServiceTier::Flex)),
+                _ => None,
+            },
+        }
+    }
+
+    pub(super) fn resolve_context_input(input: &str) -> Option<Option<ContextMode>> {
+        let value = input.trim();
+        if value.is_empty() {
+            return None;
+        }
+        match value.to_ascii_lowercase().as_str() {
+            "inherit" | "default" => Some(None),
+            "standard" | "272k" => Some(Some(ContextMode::Standard)),
+            "1m" => Some(Some(ContextMode::OneM)),
+            _ => match value {
+                "默认" => Some(None),
+                "标准" => Some(Some(ContextMode::Standard)),
+                "长" => Some(Some(ContextMode::OneM)),
+                _ => None,
+            },
+        }
     }
 
     fn verbose_options() -> &'static [&'static str] {
@@ -2218,6 +2382,63 @@ mod interactive {
 
     fn hint(locale: &str) -> String {
         t!("commands.interactive.hint", locale = locale).into_owned()
+    }
+
+    fn paragraph_hint_block(locale: &str) -> Vec<String> {
+        vec![String::new(), hint(locale)]
+    }
+
+    fn format_markdown_aliases(aliases: &[String], locale: &str) -> String {
+        let separator = if locale.eq_ignore_ascii_case("zh") {
+            "、"
+        } else {
+            ", "
+        };
+        aliases
+            .iter()
+            .map(|alias| format!("*{alias}*"))
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    fn format_model_prompt_item(entry: &CodexModelEntry, locale: &str) -> Vec<String> {
+        let mut lines = vec![
+            t!(
+                "commands.model.prompt_item_name",
+                name = entry.name.as_str(),
+                locale = locale
+            )
+            .into_owned(),
+        ];
+        if let Some(description) = entry.description_for_locale(locale) {
+            lines.push(
+                t!(
+                    "commands.model.prompt_item_description",
+                    description = description,
+                    locale = locale
+                )
+                .into_owned(),
+            );
+        }
+        if !entry.aliases.is_empty() {
+            lines.push(
+                t!(
+                    "commands.model.prompt_item_aliases",
+                    aliases = format_markdown_aliases(&entry.aliases, locale),
+                    locale = locale
+                )
+                .into_owned(),
+            );
+        }
+        lines
+    }
+
+    fn join_prompt_blocks(blocks: Vec<Vec<String>>) -> String {
+        blocks
+            .into_iter()
+            .map(|block| block.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn ambiguous_reply(locale: &str, input: &str, matches: &[String]) -> String {
@@ -2239,7 +2460,7 @@ mod interactive {
         .into_owned()
     }
 
-    fn model_extras(snapshot: &UserSessionState) -> Vec<String> {
+    pub(super) fn model_extras(snapshot: &UserSessionState) -> Vec<String> {
         merged_settings(snapshot)
             .model_override
             .map(|value| vec![value])
@@ -2256,33 +2477,26 @@ mod interactive {
         runtime_profile: &CodexRuntimeProfile,
         locale: &str,
     ) -> Result<CommandOutcome> {
-        let models = list_codex_models(runtime_profile, &model_extras(snapshot));
+        let models = list_codex_model_entries(runtime_profile, &model_extras(snapshot));
         let current = effective_model(snapshot, default_model, runtime_profile);
-        let mut lines = vec![
+        let mut sections = vec![vec![
             t!(
                 "commands.model.prompt_current",
-                current = current.as_str(),
+                current = format!("`{}`", current),
                 locale = locale
             )
             .into_owned(),
             t!("commands.model.prompt_header", locale = locale).into_owned(),
-        ];
-        for name in &models {
-            lines.push(
-                t!(
-                    "commands.model.prompt_item",
-                    name = name.as_str(),
-                    locale = locale
-                )
-                .into_owned(),
-            );
+        ]];
+        for entry in &models {
+            sections.push(format_model_prompt_item(entry, locale));
         }
-        lines.push(hint(locale));
+        sections.push(paragraph_hint_block(locale));
         session
             .set_pending_setting(openid, Some(PendingSetting::Model))
             .await?;
         Ok(CommandOutcome::Reply(CommandReply {
-            text: lines.join("\n"),
+            text: join_prompt_blocks(sections),
         }))
     }
 
@@ -2426,6 +2640,7 @@ mod interactive {
                 .into_owned(),
             );
         }
+        lines.push(String::new());
         lines.push(hint(locale));
         session
             .set_pending_setting(openid, Some(PendingSetting::Fg))
@@ -2719,10 +2934,13 @@ mod interactive {
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
-        let mut candidates = list_codex_models(runtime_profile, &model_extras(&snapshot));
-        candidates.push("inherit".to_string());
         let input = text.trim();
-        match fuzzy_match_unique(input, &candidates) {
+        let models = list_codex_model_entries(runtime_profile, &model_extras(&snapshot));
+        match if input.eq_ignore_ascii_case("inherit") || input.eq_ignore_ascii_case("default") {
+            FuzzyOutcome::Exact("inherit".to_string())
+        } else {
+            match_model_input(input, &models)
+        } {
             FuzzyOutcome::Exact(choice) => {
                 let next = if choice.eq_ignore_ascii_case("inherit") {
                     None
@@ -2759,14 +2977,13 @@ mod interactive {
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
-        let candidates = as_string_vec(reasoning_options());
         let input = text.trim();
-        match fuzzy_match_unique(input, &candidates) {
+        match match_reasoning_input(input) {
             FuzzyOutcome::Exact(choice) => {
                 let next = if choice == "inherit" {
                     None
                 } else {
-                    ReasoningEffort::parse(&choice)
+                    ReasoningEffort::parse_supported(&choice)
                 };
                 session.set_reasoning_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
@@ -2798,15 +3015,9 @@ mod interactive {
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
-        let candidates = as_string_vec(fast_options());
         let input = text.trim();
-        match fuzzy_match_unique(input, &candidates) {
-            FuzzyOutcome::Exact(choice) => {
-                let next = if choice == "inherit" {
-                    None
-                } else {
-                    ServiceTier::parse(&choice)
-                };
+        match resolve_fast_input(input) {
+            Some(next) => {
                 session.set_service_tier_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
@@ -2819,10 +3030,7 @@ mod interactive {
                     .into_owned(),
                 }))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
+            None => Ok(CommandOutcome::Reply(CommandReply {
                 text: no_match_reply(locale, input),
             })),
         }
@@ -2837,15 +3045,9 @@ mod interactive {
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
-        let candidates = as_string_vec(context_options());
         let input = text.trim();
-        match fuzzy_match_unique(input, &candidates) {
-            FuzzyOutcome::Exact(choice) => {
-                let next = if choice == "inherit" {
-                    None
-                } else {
-                    ContextMode::parse(&choice)
-                };
+        match resolve_context_input(input) {
+            Some(next) => {
                 session.set_context_mode_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
@@ -2858,10 +3060,7 @@ mod interactive {
                     .into_owned(),
                 }))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
+            None => Ok(CommandOutcome::Reply(CommandReply {
                 text: no_match_reply(locale, input),
             })),
         }
@@ -3304,6 +3503,79 @@ mod interactive {
             let candidates = vec!["on".to_string(), "off".to_string()];
             assert_eq!(fuzzy_match_unique("   ", &candidates), FuzzyOutcome::None);
         }
+
+        #[test]
+        fn model_alias_exact_match_prefers_canonical_name() {
+            let candidates = vec![
+                CodexModelEntry {
+                    name: "gpt-5.4".to_string(),
+                    aliases: vec!["54".to_string(), "5.4".to_string()],
+                    description: None,
+                    description_zh: None,
+                    description_en: None,
+                },
+                CodexModelEntry {
+                    name: "gpt-5.4-mini".to_string(),
+                    aliases: vec!["mini".to_string(), "54m".to_string()],
+                    description: None,
+                    description_zh: None,
+                    description_en: None,
+                },
+            ];
+            assert_eq!(
+                match_model_input("mini", &candidates),
+                FuzzyOutcome::Exact("gpt-5.4-mini".to_string())
+            );
+            assert_eq!(
+                match_model_input("54", &candidates),
+                FuzzyOutcome::Exact("gpt-5.4".to_string())
+            );
+        }
+
+        #[test]
+        fn model_match_uses_unique_prefix_not_substring() {
+            let candidates = vec![
+                CodexModelEntry {
+                    name: "gpt-5.4".to_string(),
+                    aliases: vec!["54".to_string()],
+                    description: None,
+                    description_zh: None,
+                    description_en: None,
+                },
+                CodexModelEntry {
+                    name: "gpt-5.4-mini".to_string(),
+                    aliases: vec!["mini".to_string(), "54m".to_string()],
+                    description: None,
+                    description_zh: None,
+                    description_en: None,
+                },
+            ];
+            assert_eq!(match_model_input("4-m", &candidates), FuzzyOutcome::None);
+            assert_eq!(
+                match_model_input("gpt-5.4-m", &candidates),
+                FuzzyOutcome::Exact("gpt-5.4-mini".to_string())
+            );
+        }
+
+        #[test]
+        fn reasoning_alias_exact_match_prefers_supported_values() {
+            assert_eq!(
+                match_reasoning_input("高"),
+                FuzzyOutcome::Exact("high".to_string())
+            );
+            assert_eq!(
+                match_reasoning_input("超高"),
+                FuzzyOutcome::Exact("xhigh".to_string())
+            );
+            assert_eq!(
+                match_reasoning_input("默认"),
+                FuzzyOutcome::Exact("inherit".to_string())
+            );
+            assert_eq!(
+                match_reasoning_input("继承"),
+                FuzzyOutcome::Exact("inherit".to_string())
+            );
+        }
     }
 }
 
@@ -3617,6 +3889,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_command_routes_to_manual_compaction() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/compact",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, CommandOutcome::Compact));
+
+        let zh_outcome = maybe_handle_command(
+            "/压缩",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(zh_outcome, CommandOutcome::Compact));
+    }
+
+    #[tokio::test]
     async fn sessions_command_supports_project_then_session_view() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
@@ -3705,6 +4016,8 @@ mod tests {
         };
         assert!(reply.text.starts_with("# Command Guide"));
         assert!(reply.text.contains("## Basic Commands"));
+        assert!(reply.text.contains("## Model Settings"));
+        assert!(reply.text.contains("## Session Management"));
 
         // Switch to zh, verify Chinese
         let outcome = maybe_handle_command(
@@ -3738,6 +4051,8 @@ mod tests {
         };
         assert!(reply.text.starts_with("# 命令指南"));
         assert!(reply.text.contains("## 基础命令"));
+        assert!(reply.text.contains("## 模型设置命令"));
+        assert!(reply.text.contains("## 会话管理命令"));
     }
 
     #[tokio::test]
@@ -3808,6 +4123,21 @@ mod tests {
         .unwrap();
         let CommandOutcome::Reply(reply) = protected else {
             panic!("expected /alias add help to reply");
+        };
+        assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
+
+        let protected = maybe_handle_command(
+            "/alias add compact /status",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = protected else {
+            panic!("expected /alias add compact to reply");
         };
         assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
     }
@@ -3989,11 +4319,60 @@ mod tests {
             panic!("expected /model to prompt");
         };
         assert!(reply.text.to_lowercase().contains("gpt-5.4"));
+        assert!(reply.text.contains("`gpt-5.4`"));
+        assert!(reply.text.contains("aliases") || reply.text.contains("别名"));
+        assert!(
+            reply
+                .text
+                .contains("Most capable general-purpose model currently available")
+                || reply.text.contains("目前最先进的通用型模型")
+        );
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(matches!(
             snapshot.pending_setting,
             Some(crate::session::state::PendingSetting::Model)
         ));
+    }
+
+    #[tokio::test]
+    async fn model_prompt_keeps_hint_out_of_markdown_sublist() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .update_settings_for_user("u1", |state| {
+                state.language = "zh".into();
+            })
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/model",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /model to prompt");
+        };
+
+        assert!(
+            reply.text.contains("\n\n请输入一个值，或 `/返回` 取消。"),
+            "hint should be separated from the markdown list: {}",
+            reply.text
+        );
     }
 
     #[tokio::test]
@@ -4021,9 +4400,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Ambiguous: "5.4" matches gpt-5.4 and gpt-5.4-mini
+        // Ambiguous prefix: "gpt-5." hits multiple canonical models.
         let outcome = maybe_handle_command(
-            "5.4",
+            "gpt-5.",
             "u1",
             &session,
             "gpt-5.4",
@@ -4247,6 +4626,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_hides_implausible_legacy_cumulative_usage() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .set_foreground_usage(
+                "u1",
+                TokenUsageSnapshot {
+                    total_tokens: 19_668_612,
+                    window: 1_000_000,
+                    input_tokens: 19_568_077,
+                    cached_input_tokens: 18_968_448,
+                    output_tokens: 100_535,
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/status",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected reply");
+        };
+        assert!(
+            reply.text.contains("context window: —"),
+            "unexpected status: {}",
+            reply.text
+        );
+    }
+
+    #[tokio::test]
     async fn chinese_command_aliases_route_correctly() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
@@ -4281,6 +4708,28 @@ mod tests {
             Some(crate::session::state::PendingSetting::Model)
         ));
 
+        let _ = maybe_handle_command(
+            "/语言 zh",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let _ = maybe_handle_command(
+            "/模型",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
         // /返回 clears.
         let outcome = maybe_handle_command(
             "/返回",
@@ -4292,7 +4741,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, CommandOutcome::Reply(_)));
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected reply");
+        };
+        assert!(reply.text.contains("/模型"));
+        assert!(!reply.text.contains("/model"));
         assert!(
             session
                 .snapshot_for_user("u1")
@@ -4300,6 +4753,326 @@ mod tests {
                 .unwrap()
                 .pending_setting
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_prompt_uses_supported_values_and_aliases() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .update_settings_for_user("u1", |state| {
+                state.language = "zh".into();
+            })
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/reasoning",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /reasoning to prompt");
+        };
+        assert!(reply.text.contains("当前思考深度：medium"));
+        assert!(
+            reply
+                .text
+                .contains("low (低), medium (中), high (高), xhigh (超高), inherit (默认)")
+        );
+        assert!(reply.text.contains("\n请输入一个值，或 `/返回` 取消。"));
+        assert!(!reply.text.contains("- `low`"));
+        assert!(!reply.text.contains("恢复默认"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_prompt_uses_compact_three_line_layout() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .update_settings_for_user("u1", |state| {
+                state.language = "zh".into();
+            })
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/reasoning",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /reasoning to prompt");
+        };
+        assert_eq!(
+            reply.text.lines().count(),
+            3,
+            "unexpected prompt: {}",
+            reply.text
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_reasoning_alias_applies_supported_value() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let _ = maybe_handle_command(
+            "/reasoning",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "高",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected apply reply");
+        };
+        assert!(reply.text.contains("high"));
+        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        assert_eq!(
+            snapshot.settings.reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert!(snapshot.pending_setting.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_fast_and_context_commands_accept_chinese_aliases() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let fast = maybe_handle_command(
+            "/fast 开",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(fast_reply) = fast else {
+            panic!("expected /fast 开 to reply");
+        };
+        assert!(fast_reply.text.contains("fast"));
+
+        let context = maybe_handle_command(
+            "/context 长",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(context_reply) = context else {
+            panic!("expected /context 长 to reply");
+        };
+        assert!(context_reply.text.contains("1M"));
+
+        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        assert_eq!(snapshot.settings.service_tier, Some(ServiceTier::Fast));
+        assert_eq!(snapshot.settings.context_mode, Some(ContextMode::OneM));
+    }
+
+    #[tokio::test]
+    async fn fg_prompt_keeps_hint_out_of_markdown_sublist() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .set_foreground_session_id("u1", Some("thread".into()))
+            .await
+            .unwrap();
+        let _ = maybe_handle_command(
+            "/bg focus",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        session
+            .update_settings_for_user("u1", |state| {
+                state.language = "zh".into();
+            })
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/fg",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /fg to prompt");
+        };
+        assert!(
+            reply.text.contains("\n\n请输入一个值，或 `/返回` 取消。"),
+            "hint should be separated from the markdown list: {}",
+            reply.text
+        );
+    }
+
+    #[tokio::test]
+    async fn help_groups_commands_in_requested_order() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .update_settings_for_user("u1", |state| {
+                state.language = "zh".into();
+            })
+            .await
+            .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/帮助",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected /帮助 to reply");
+        };
+
+        let model_section = reply
+            .text
+            .find("## 模型设置命令")
+            .expect("missing model settings section");
+        let session_section = reply
+            .text
+            .find("## 会话管理命令")
+            .expect("missing session management section");
+        let advanced_section = reply
+            .text
+            .find("## 高级命令")
+            .expect("missing advanced section");
+        let model_index = reply.text.find("`/模型`").expect("missing /模型");
+        let reasoning_index = reply.text.find("`/思考`").expect("missing /思考");
+        let fast_index = reply.text.find("`/快速`").expect("missing /快速");
+        let context_index = reply.text.find("`/上下文`").expect("missing /上下文");
+        let sessions_index = reply.text.find("`/会话`").expect("missing /会话");
+        let import_index = reply.text.find("`/导入`").expect("missing /导入");
+        let resume_index = reply.text.find("`/恢复`").expect("missing /恢复");
+        let save_index = reply.text.find("`/保存`").expect("missing /保存");
+        let fg_index = reply.text.find("`/前台`").expect("missing /前台");
+        let bg_index = reply.text.find("`/后台`").expect("missing /后台");
+        let loadbg_index = reply.text.find("`/载入后台`").expect("missing /载入后台");
+        let rename_index = reply.text.find("`/重命名`").expect("missing /重命名");
+        let alias_index = reply.text.find("`/别名`").expect("missing /别名");
+        let verbose_index = reply.text.find("`/详细`").expect("missing /详细");
+        let compact_index = reply.text.find("`/压缩`").expect("missing /压缩");
+        let self_update_index = reply.text.find("`/自更新`").expect("missing /自更新");
+
+        assert!(model_section < session_section && session_section < advanced_section);
+        assert!(
+            model_index < reasoning_index
+                && reasoning_index < fast_index
+                && fast_index < context_index
+        );
+        assert!(
+            sessions_index < import_index
+                && import_index < resume_index
+                && resume_index < save_index
+        );
+        assert!(
+            compact_index < fg_index
+                && fg_index < bg_index
+                && bg_index < loadbg_index
+                && loadbg_index < rename_index
+                && rename_index < alias_index
+                && alias_index < verbose_index
+                && verbose_index < self_update_index
         );
     }
 
@@ -4333,6 +5106,8 @@ mod tests {
         };
         assert!(reply.text.contains("`/model`"));
         assert!(!reply.text.contains("`/模型`"));
+        assert!(reply.text.contains("`/compact`"));
+        assert!(!reply.text.contains("`/压缩`"));
 
         // Switch to zh and the same /help should mirror the behavior.
         let _ = maybe_handle_command(
@@ -4360,5 +5135,7 @@ mod tests {
         };
         assert!(reply.text.contains("`/模型`"));
         assert!(!reply.text.contains("`/model`"));
+        assert!(reply.text.contains("`/压缩`"));
+        assert!(!reply.text.contains("`/compact`"));
     }
 }
