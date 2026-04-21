@@ -23,7 +23,6 @@ use crate::{
     },
     commands::{CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
-    launcher,
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
     normalize_lang,
     qq::{
@@ -451,35 +450,6 @@ impl App {
                 .await?;
             return Ok(());
         }
-        if self.config.general.enable_launcher || std::env::var(launcher::ENV_LAUNCHER_ADDR).is_ok()
-        {
-            let launcher_addr = std::env::var(launcher::ENV_LAUNCHER_ADDR)
-                .unwrap_or_else(|_| self.config.general.launcher_control_addr.clone());
-            match launcher::request_deploy(&launcher_addr, &build_result.binary_path).await {
-                Ok(message) => {
-                    self.qq_client
-                        .send_text(
-                            openid,
-                            message_id,
-                            &format!("部署请求已提交：{message}"),
-                            Some(message_id),
-                        )
-                        .await?;
-                }
-                Err(err) => {
-                    self.qq_client
-                        .send_text(
-                            openid,
-                            message_id,
-                            &format!("部署失败：{err}"),
-                            Some(message_id),
-                        )
-                        .await?;
-                }
-            }
-            return Ok(());
-        }
-
         let running_binary =
             std::env::current_exe().context("failed to detect current executable")?;
         self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await?;
@@ -488,7 +458,7 @@ impl App {
                 openid,
                 message_id,
                 &format!(
-                    "已覆盖运行中的二进制：`{}`\n即将退出当前进程，交由守护服务自动重启。",
+                    "已覆盖运行中的二进制：`{}`\n即将退出当前进程。若已配置外部守护服务，将自动重启；否则请手动重新启动。",
                     running_binary.display()
                 ),
                 Some(message_id),

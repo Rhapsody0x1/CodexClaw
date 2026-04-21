@@ -34,10 +34,6 @@ pub struct GeneralConfig {
     pub self_build_command: String,
     #[serde(default = "default_self_binary_path")]
     pub self_binary_path: PathBuf,
-    #[serde(default = "default_launcher_control_addr")]
-    pub launcher_control_addr: String,
-    #[serde(default = "default_enable_launcher")]
-    pub enable_launcher: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,8 +73,6 @@ impl Default for GeneralConfig {
             self_repo_dir: default_self_repo_dir(),
             self_build_command: default_self_build_command(),
             self_binary_path: default_self_binary_path(),
-            launcher_control_addr: default_launcher_control_addr(),
-            enable_launcher: default_enable_launcher(),
         }
     }
 }
@@ -113,10 +107,6 @@ impl AppConfig {
             !self.general.self_build_command.trim().is_empty(),
             "general.self_build_command must not be empty"
         );
-        anyhow::ensure!(
-            !self.general.launcher_control_addr.trim().is_empty(),
-            "general.launcher_control_addr must not be empty"
-        );
         Ok(())
     }
 }
@@ -142,7 +132,7 @@ fn default_codex_binary() -> String {
 }
 
 fn default_model() -> String {
-    "gpt-5-codex".to_string()
+    "gpt-5.4".to_string()
 }
 
 fn default_self_repo_dir() -> PathBuf {
@@ -157,16 +147,8 @@ fn default_self_binary_path() -> PathBuf {
     PathBuf::from("./target/release/codex-claw")
 }
 
-fn default_launcher_control_addr() -> String {
-    "127.0.0.1:8765".to_string()
-}
-
-fn default_enable_launcher() -> bool {
-    true
-}
-
 fn default_api_base_url() -> String {
-    "https://api.sgroup.qq.com".to_string()
+    "https://sandbox.api.sgroup.qq.com".to_string()
 }
 
 fn default_token_url() -> String {

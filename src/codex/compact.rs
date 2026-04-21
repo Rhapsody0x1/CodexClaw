@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
 
-use crate::session::state::{ContextMode, TokenUsageSnapshot};
+use crate::session::state::ContextMode;
 
 pub const SUMMARIZATION_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
 
@@ -21,7 +21,6 @@ const ONE_M_CONTEXT_WINDOW: u64 = 1_000_000;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RolloutSnapshot {
     pub user_messages: Vec<String>,
-    pub latest_usage: Option<TokenUsageSnapshot>,
 }
 
 pub fn context_mode_window(mode: ContextMode) -> u64 {
@@ -128,9 +127,6 @@ pub fn read_rollout_snapshot(rollout_path: &Path) -> Result<RolloutSnapshot> {
         if let Some(message) = parse_user_message(&value) {
             snapshot.user_messages.push(message);
         }
-        if let Some(usage) = parse_usage_snapshot(&value) {
-            snapshot.latest_usage = Some(usage);
-        }
     }
 
     Ok(snapshot)
@@ -159,60 +155,6 @@ fn parse_user_message(value: &Value) -> Option<String> {
     }
     let joined = parts.join("\n");
     (!is_summary_message(&joined)).then_some(joined)
-}
-
-fn parse_usage_snapshot(value: &Value) -> Option<TokenUsageSnapshot> {
-    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
-        return None;
-    }
-    let payload = value.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-        return None;
-    }
-    let info = payload.get("info")?;
-    let context_usage = info
-        .get("last_token_usage")
-        .or_else(|| info.get("total_token_usage"))?;
-    let total_tokens = context_usage
-        .get("total_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| {
-            context_usage
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                .saturating_add(
-                    context_usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                )
-        });
-    let window = info.get("model_context_window").and_then(Value::as_u64)?;
-    let updated_at = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
-
-    Some(TokenUsageSnapshot {
-        total_tokens,
-        window,
-        input_tokens: context_usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cached_input_tokens: context_usage
-            .get("cached_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: context_usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        updated_at,
-    })
 }
 
 fn is_summary_message(message: &str) -> bool {
@@ -388,7 +330,6 @@ mod tests {
 
         let snapshot = read_rollout_snapshot(&path).unwrap();
         assert_eq!(snapshot.user_messages, vec!["first".to_string()]);
-        assert_eq!(snapshot.latest_usage.unwrap().total_tokens, 130);
     }
 
     #[test]

@@ -9,11 +9,9 @@ default_reasoning_effort = "medium"
 self_repo_dir = "."
 self_build_command = "cargo build --release"
 self_binary_path = "./target/release/codex-claw"
-launcher_control_addr = "127.0.0.1:8765"
-enable_launcher = true
 
 [qq]
 app_id = "YOUR_APP_ID"
 app_secret = "YOUR_APP_SECRET"
-api_base_url = "https://api.sgroup.qq.com"
+api_base_url = "https://sandbox.api.sgroup.qq.com"
 token_url = "https://bots.qq.com/app/getAppAccessToken"

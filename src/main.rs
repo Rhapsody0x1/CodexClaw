@@ -5,7 +5,6 @@ use codex_claw::{
     app::App,
     codex::{config_snapshot, executor::CodexExecutor},
     config::AppConfig,
-    launcher::{self, CHILD_ARG, ENV_LAUNCHER_ADDR, LAUNCHER_ARG},
     qq::{api::QqApiClient, gateway},
     session::store::SessionStore,
 };
@@ -18,20 +17,8 @@ async fn main() -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let args = std::env::args().collect::<Vec<_>>();
     let mut config = AppConfig::load()?;
     normalize_config_paths(&mut config).await?;
-    let run_as_child = args.iter().any(|arg| arg == CHILD_ARG);
-    let run_as_launcher = args.iter().any(|arg| arg == LAUNCHER_ARG);
-
-    if run_as_child {
-        run_bot(config).await?;
-        return Ok(());
-    }
-    if run_as_launcher || config.general.enable_launcher {
-        launcher::run_launcher(&config).await?;
-        return Ok(());
-    }
     run_bot(config).await
 }
 
@@ -67,11 +54,6 @@ async fn run_bot(config: AppConfig) -> Result<()> {
         config.general.data_dir.clone(),
     ));
     let app = Arc::new(App::new(config, session, qq_client, codex));
-    if let Ok(addr) = std::env::var(ENV_LAUNCHER_ADDR)
-        && let Err(err) = launcher::notify_ready(&addr).await
-    {
-        tracing::warn!("failed to notify launcher ready: {err:#}");
-    }
     gateway::spawn_gateway(app.clone());
     pending::<()>().await;
     Ok(())
