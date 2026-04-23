@@ -10,6 +10,59 @@ pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
     pub qq: QqConfig,
+    #[serde(default)]
+    pub shadow: ShadowSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowSection {
+    #[serde(default = "default_shadow_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_shadow_min_user_chars")]
+    pub memory_min_user_chars: usize,
+    #[serde(default = "default_shadow_reasoning")]
+    pub memory_reasoning: String,
+    #[serde(default)]
+    pub memory_model: String,
+    #[serde(default = "default_shadow_deadline_secs")]
+    pub memory_deadline_secs: u64,
+    #[serde(default = "default_shadow_files_threshold")]
+    pub skill_files_threshold: usize,
+    #[serde(default = "default_shadow_tool_threshold")]
+    pub skill_tool_threshold: usize,
+}
+
+impl Default for ShadowSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_shadow_enabled(),
+            memory_min_user_chars: default_shadow_min_user_chars(),
+            memory_reasoning: default_shadow_reasoning(),
+            memory_model: String::new(),
+            memory_deadline_secs: default_shadow_deadline_secs(),
+            skill_files_threshold: default_shadow_files_threshold(),
+            skill_tool_threshold: default_shadow_tool_threshold(),
+        }
+    }
+}
+
+fn default_shadow_enabled() -> bool {
+    true
+}
+fn default_shadow_min_user_chars() -> usize {
+    40
+}
+fn default_shadow_reasoning() -> String {
+    "low".to_string()
+}
+fn default_shadow_deadline_secs() -> u64 {
+    120
+}
+fn default_shadow_files_threshold() -> usize {
+    2
+}
+fn default_shadow_tool_threshold() -> usize {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +109,7 @@ impl Default for AppConfig {
                 api_base_url: default_api_base_url(),
                 token_url: default_token_url(),
             },
+            shadow: ShadowSection::default(),
         }
     }
 }

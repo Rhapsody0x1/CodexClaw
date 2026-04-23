@@ -9,6 +9,7 @@ pub fn build_prompt(
     workspace_dir: &Path,
     shared_workspace_dir: &Path,
     self_repo_dir: &Path,
+    memory_block: Option<&str>,
 ) -> String {
     let mut sections = Vec::new();
     sections.push(
@@ -18,6 +19,12 @@ pub fn build_prompt(
         "Current effective model: {}",
         settings.model_override.as_deref().unwrap_or(default_model)
     ));
+    if let Some(block) = memory_block {
+        let trimmed = block.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
+        }
+    }
     sections.push(
         "If you want QQ to send attachments, append one trailing fenced block named qqbot. Supported lines: `image path=REL_OR_ABS_PATH` and `file path=REL_OR_ABS_PATH name=DOWNLOAD_NAME`."
             .to_string(),
@@ -85,4 +92,80 @@ pub fn build_prompt(
     };
     sections.push(format!("User message:\n{user_text}"));
     sections.join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::message::IncomingMessage;
+    use crate::session::state::SessionSettings;
+
+    fn test_message(text: &str) -> IncomingMessage {
+        IncomingMessage {
+            sender_openid: "u".to_string(),
+            message_id: "m".to_string(),
+            text: text.to_string(),
+            quote: None,
+            images: vec![],
+            files: vec![],
+            mentions: vec![],
+        }
+    }
+
+    #[test]
+    fn build_prompt_without_memory_block_has_no_persistent_memory_section() {
+        let msg = test_message("hi");
+        let settings = SessionSettings::default();
+        let ws = PathBuf::from("/ws");
+        let prompt = build_prompt(
+            &msg,
+            &settings,
+            "gpt-5.4",
+            &ws,
+            &ws,
+            &PathBuf::from("/repo"),
+            None,
+        );
+        assert!(!prompt.contains("<persistent-memory>"));
+    }
+
+    #[test]
+    fn build_prompt_with_memory_block_includes_it_verbatim() {
+        let msg = test_message("hi");
+        let settings = SessionSettings::default();
+        let ws = PathBuf::from("/ws");
+        let memory = "<persistent-memory>\n## User\n- name: X\n</persistent-memory>";
+        let prompt = build_prompt(
+            &msg,
+            &settings,
+            "gpt-5.4",
+            &ws,
+            &ws,
+            &PathBuf::from("/repo"),
+            Some(memory),
+        );
+        assert!(prompt.contains(memory), "prompt missing memory:\n{prompt}");
+    }
+
+    #[test]
+    fn build_prompt_memory_block_appears_before_user_message() {
+        let msg = test_message("please do X");
+        let settings = SessionSettings::default();
+        let ws = PathBuf::from("/ws");
+        let memory = "<persistent-memory>\nmarker\n</persistent-memory>";
+        let prompt = build_prompt(
+            &msg,
+            &settings,
+            "gpt-5.4",
+            &ws,
+            &ws,
+            &PathBuf::from("/repo"),
+            Some(memory),
+        );
+        let mem_pos = prompt.find("marker").expect("memory block missing");
+        let msg_pos = prompt.find("please do X").expect("user message missing");
+        assert!(mem_pos < msg_pos, "memory should precede user message");
+    }
 }

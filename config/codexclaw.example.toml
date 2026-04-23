@@ -15,3 +15,14 @@ app_id = "YOUR_APP_ID"
 app_secret = "YOUR_APP_SECRET"
 api_base_url = "https://sandbox.api.sgroup.qq.com"
 token_url = "https://bots.qq.com/app/getAppAccessToken"
+
+[shadow]
+# Hermes-style background distillation of memory (~/.codex-claw/data/memory/<openid>/*.md)
+# and Skill (~/.codex-claw/.codex/skills/claw-*/SKILL.md). Runs silently after each turn.
+enabled = true
+memory_min_user_chars = 40
+memory_reasoning = "low"
+memory_model = ""              # empty = follow session model
+memory_deadline_secs = 120
+skill_files_threshold = 2
+skill_tool_threshold = 5

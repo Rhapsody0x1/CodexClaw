@@ -250,7 +250,10 @@ async fn build_app(config: AppConfig, data_dir: PathBuf) -> Arc<App> {
         codex_binary,
         config.general.data_dir.clone(),
     ));
-    Arc::new(App::new(config, session, qq_client, codex))
+    let memory = Arc::new(codex_claw::memory::store::MemoryStore::new(
+        config.general.data_dir.join("memory"),
+    ));
+    Arc::new(App::new(config, session, qq_client, codex, memory, None))
 }
 
 async fn mock_access_token(server: &MockServer) {
@@ -292,5 +295,6 @@ fn test_config(data_dir: PathBuf, base_url: String) -> AppConfig {
             api_base_url: base_url.clone(),
             token_url: format!("{base_url}/app/getAppAccessToken"),
         },
+        shadow: Default::default(),
     }
 }

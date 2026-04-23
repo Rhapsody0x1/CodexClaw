@@ -23,6 +23,7 @@ use crate::{
     },
     commands::{CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
+    memory::{inject as memory_inject, store::MemoryStore},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
     normalize_lang,
     qq::{
@@ -35,6 +36,7 @@ use crate::{
         state::{ContextMode, DialogProfile, SessionState, TokenUsageSnapshot},
         store::SessionStore,
     },
+    shadow::{ShadowContext, ShadowWorker},
 };
 
 const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
@@ -44,6 +46,8 @@ pub struct App {
     pub session: Arc<SessionStore>,
     pub qq_client: Arc<QqApiClient>,
     pub codex: Arc<CodexExecutor>,
+    pub memory: Arc<MemoryStore>,
+    pub shadow: Option<Arc<ShadowWorker>>,
     busy: AtomicBool,
     active_turn: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -54,12 +58,16 @@ impl App {
         session: Arc<SessionStore>,
         qq_client: Arc<QqApiClient>,
         codex: Arc<CodexExecutor>,
+        memory: Arc<MemoryStore>,
+        shadow: Option<Arc<ShadowWorker>>,
     ) -> Self {
         Self {
             config,
             session,
             qq_client,
             codex,
+            memory,
+            shadow,
             busy: AtomicBool::new(false),
             active_turn: Mutex::new(None),
         }
@@ -196,6 +204,17 @@ impl App {
         let context_mode = effective_settings
             .context_mode
             .or(runtime_profile.context_mode);
+        let memory_block = match self.memory.snapshot_for(&message.sender_openid) {
+            Ok(snap) => memory_inject::render(&snap),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    openid = %message.sender_openid,
+                    "failed to load memory snapshot; continuing without it",
+                );
+                None
+            }
+        };
         let prompt = build_prompt(
             &message,
             &runtime_state.settings,
@@ -203,6 +222,7 @@ impl App {
             &workspace_dir,
             &shared_workspace_dir,
             &self.config.general.self_repo_dir,
+            memory_block.as_deref(),
         );
         let mut add_dirs = vec![self.session.inbox_dir().to_path_buf()];
         if workspace_dir != shared_workspace_dir {
@@ -351,6 +371,17 @@ impl App {
                         .await?;
                 }
 
+                if let Some(worker) = self.shadow.as_ref() {
+                    let ctx = ShadowContext {
+                        openid: message.sender_openid.clone(),
+                        last_user_text: message.text.clone(),
+                        last_assistant_text: output.text.clone(),
+                        tool_call_count: 0,
+                        modified_file_count: output.changed_files.len(),
+                    };
+                    worker.spawn_memory(ctx.clone());
+                    worker.spawn_skill(ctx);
+                }
                 if self_update::changed_self_repo(
                     &workspace_dir,
                     &output.changed_files,
