@@ -3,6 +3,7 @@ commands:
     header: "# 命令指南"
     section_basic: "## 基础命令"
     section_model_settings: "## 模型设置命令"
+    section_approval_settings: "## 审批设置命令"
     section_session_management: "## 会话管理命令"
     section_advanced: "## 高级命令"
     entry_help: "- 💡 `/帮助`：显示这份帮助"
@@ -27,6 +28,15 @@ commands:
     entry_alias: "- 🧩 `/别名`：管理命令别名"
     entry_lang: "- 🌐 `/语言`：切换界面语言"
     entry_compact: "- 🗜️ `/压缩`：压缩会话上下文"
+    entry_approvals: "- 🛂 `/审批`：切换执行审批策略"
+    entry_plan: "- 🗺️ `/计划`：开关计划模式"
+    entry_execute_plan: "- ✅ `/实施`：开始执行计划"
+    entry_keep_planning: "- 📝 `/继续规划`：继续打磨计划"
+    entry_cancel_plan: "- 🗑️ `/取消计划`：丢弃当前待执行计划"
+    entry_approve: "- 👍 `/同意`：放行当前的审批请求"
+    entry_approve_session: "- 🔓 `/同意本会话`：在本次会话中放行同类命令"
+    entry_deny: "- 👎 `/拒绝`：拒绝当前的审批请求"
+    entry_cancel: "- ✋ `/取消`：拒绝并终止当前回合"
 
   compact:
     busy: "当前有任务在运行，请先等待当前任务完成后再执行 `/压缩`。"

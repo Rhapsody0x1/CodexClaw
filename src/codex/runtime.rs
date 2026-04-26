@@ -1,9 +1,11 @@
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::session::state::{ContextMode, ReasoningEffort, ServiceTier};
@@ -100,6 +102,50 @@ pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeP
             .model_provider
             .filter(|value| !value.trim().is_empty()),
     }
+}
+
+pub fn write_service_tier_to_config_path(
+    config_path: &Path,
+    service_tier: Option<ServiceTier>,
+) -> Result<()> {
+    write_top_level_config_value(
+        config_path,
+        "service_tier",
+        service_tier.map(|value| format!("\"{}\"", value.as_str())),
+    )
+}
+
+pub fn write_model_to_config_path(config_path: &Path, model: Option<&str>) -> Result<()> {
+    write_top_level_config_value(
+        config_path,
+        "model",
+        model.map(|value| format!("\"{value}\"")),
+    )
+}
+
+pub fn write_reasoning_effort_to_config_path(
+    config_path: &Path,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<()> {
+    write_top_level_config_value(
+        config_path,
+        "model_reasoning_effort",
+        reasoning_effort.map(|value| format!("\"{}\"", value.as_str())),
+    )
+}
+
+pub fn write_context_mode_to_config_path(
+    config_path: &Path,
+    context_mode: Option<ContextMode>,
+) -> Result<()> {
+    write_top_level_config_value(
+        config_path,
+        "model_context_window",
+        context_mode.map(|value| match value {
+            ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW.to_string(),
+            ContextMode::OneM => "1000000".to_string(),
+        }),
+    )
 }
 
 /// Return the deduplicated list of model names available to the user.
@@ -270,6 +316,127 @@ fn codex_config_path() -> PathBuf {
     codex_home.join("config.toml")
 }
 
+fn write_top_level_config_value(
+    config_path: &Path,
+    key: &str,
+    value: Option<String>,
+) -> Result<()> {
+    let raw = match fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let updated = rewrite_top_level_key(&raw, key, value.as_deref());
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    atomic_write(config_path, &updated)
+}
+
+fn rewrite_top_level_key(raw: &str, key: &str, value: Option<&str>) -> String {
+    let replacement = value.map(|value| format!("{key} = {value}\n"));
+    let mut lines = split_lines_preserve_newlines(raw);
+    let table_start = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let first_match = lines
+        .iter()
+        .enumerate()
+        .take(table_start)
+        .find_map(|(idx, line)| is_top_level_key_line(line, key).then_some(idx));
+
+    if let Some(idx) = first_match {
+        if let Some(value) = replacement {
+            lines[idx] = value;
+            let mut out = String::new();
+            for (line_idx, line) in lines.into_iter().enumerate() {
+                if line_idx != idx && line_idx < table_start && is_top_level_key_line(&line, key) {
+                    continue;
+                }
+                out.push_str(&line);
+            }
+            return out;
+        }
+
+        let mut out = String::new();
+        for (line_idx, line) in lines.into_iter().enumerate() {
+            if line_idx < table_start && is_top_level_key_line(&line, key) {
+                continue;
+            }
+            out.push_str(&line);
+        }
+        return out;
+    }
+
+    let Some(value) = replacement else {
+        return raw.to_string();
+    };
+    if table_start < lines.len() {
+        lines.insert(table_start, value);
+        return lines.concat();
+    }
+    if raw.is_empty() {
+        return value;
+    }
+    if raw.ends_with('\n') {
+        format!("{raw}{value}")
+    } else {
+        format!("{raw}\n{value}")
+    }
+}
+
+fn split_lines_preserve_newlines(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '\n' {
+            out.push(raw[start..=idx].to_string());
+            start = idx + 1;
+        }
+    }
+    if start < raw.len() {
+        out.push(raw[start..].to_string());
+    }
+    out
+}
+
+fn is_top_level_key_line(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    let Some(rest) = trimmed.strip_prefix(key) else {
+        return false;
+    };
+    matches!(rest.chars().next(), Some(' ') | Some('\t') | Some('='))
+}
+
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        std::process::id(),
+        nonce
+    ));
+    fs::write(&tmp, contents).with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
 struct RawCodexModelEntry<'a> {
     name: &'a str,
     aliases: &'a [String],
@@ -341,5 +508,77 @@ model = "gpt-5.4"   # already canonical, must dedupe
             mini.description_for_locale("zh"),
             Some("小巧快速的通用模型")
         );
+    }
+
+    #[test]
+    fn write_service_tier_updates_top_level_key_without_touching_tables() {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            concat!(
+                "model = \"gpt-5.4\"\n",
+                "service_tier = \"flex\"\n",
+                "\n",
+                "[profiles.default]\n",
+                "model = \"gpt-5.4-mini\"\n",
+            ),
+        )
+        .unwrap();
+
+        write_service_tier_to_config_path(tmp.path(), Some(ServiceTier::Fast)).unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(raw.contains("service_tier = \"fast\"\n"));
+        assert!(raw.contains("[profiles.default]\n"));
+
+        let profile = read_codex_runtime_profile_from_path(tmp.path());
+        assert_eq!(profile.service_tier, Some(ServiceTier::Fast));
+    }
+
+    #[test]
+    fn write_service_tier_removes_key_for_inherit() {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            concat!(
+                "model = \"gpt-5.4\"\n",
+                "service_tier = \"fast\"\n",
+                "\n",
+                "[profiles.default]\n",
+                "model = \"gpt-5.4-mini\"\n",
+            ),
+        )
+        .unwrap();
+
+        write_service_tier_to_config_path(tmp.path(), None).unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(!raw.contains("service_tier ="));
+
+        let profile = read_codex_runtime_profile_from_path(tmp.path());
+        assert_eq!(profile.service_tier, None);
+    }
+
+    #[test]
+    fn write_model_and_context_updates_top_level_runtime_fields() {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            concat!(
+                "model = \"gpt-5.4\"\n",
+                "model_context_window = 272000\n",
+                "\n",
+                "[profiles.default]\n",
+                "model = \"gpt-5.4-mini\"\n",
+            ),
+        )
+        .unwrap();
+
+        write_model_to_config_path(tmp.path(), Some("gpt-5.5")).unwrap();
+        write_context_mode_to_config_path(tmp.path(), Some(ContextMode::OneM)).unwrap();
+
+        let profile = read_codex_runtime_profile_from_path(tmp.path());
+        assert_eq!(profile.configured_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.context_mode, Some(ContextMode::OneM));
     }
 }

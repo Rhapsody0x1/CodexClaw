@@ -3,6 +3,7 @@ commands:
     header: "# Command Guide"
     section_basic: "## Basic Commands"
     section_model_settings: "## Model Settings"
+    section_approval_settings: "## Approval Settings"
     section_session_management: "## Session Management"
     section_advanced: "## Advanced Commands"
     entry_help: "- 💡 `/help` - show this help"
@@ -27,6 +28,15 @@ commands:
     entry_alias: "- 🧩 `/alias` - manage command aliases"
     entry_lang: "- 🌐 `/lang` - switch UI language"
     entry_compact: "- 🗜️ `/compact` - compact the current session context"
+    entry_approvals: "- 🛂 `/approvals` - toggle approval policy (off / on-request / strict)"
+    entry_plan: "- 🗺️ `/plan` - enter/leave Plan mode (read-only planning first)"
+    entry_execute_plan: "- ✅ `/execute-plan` - approve the pending plan and start executing"
+    entry_keep_planning: "- 📝 `/keep-planning` - stay in Plan mode and refine the plan"
+    entry_cancel_plan: "- 🗑️ `/cancel-plan` - discard the pending plan"
+    entry_approve: "- 👍 `/approve` - approve the current pending approval (once)"
+    entry_approve_session: "- 🔓 `/approve-session` - auto-approve similar commands for this session"
+    entry_deny: "- 👎 `/deny` - decline the current approval request"
+    entry_cancel: "- ✋ `/cancel` - decline and abort the current turn"
 
   compact:
     busy: "A task is still running. Wait for it to finish before using `/compact`."

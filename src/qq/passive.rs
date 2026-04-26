@@ -22,6 +22,7 @@ struct ToolSummary {
 pub struct PassiveDispatchReport {
     pub sent_replies: usize,
     pub saw_agent_message: bool,
+    pub tool_call_count: usize,
 }
 
 pub struct PassiveTurnEmitter {
@@ -32,6 +33,7 @@ pub struct PassiveTurnEmitter {
     verbose: bool,
     sent_replies: usize,
     saw_agent_message: bool,
+    tool_call_count: usize,
     pending_tools: Vec<ToolSummary>,
 }
 
@@ -51,6 +53,7 @@ impl PassiveTurnEmitter {
             verbose,
             sent_replies: 0,
             saw_agent_message: false,
+            tool_call_count: 0,
             pending_tools: Vec::new(),
         }
     }
@@ -69,10 +72,12 @@ impl PassiveTurnEmitter {
         Ok(PassiveDispatchReport {
             sent_replies: self.sent_replies,
             saw_agent_message: self.saw_agent_message,
+            tool_call_count: self.tool_call_count,
         })
     }
 
     fn record_tool(&mut self, display: String) {
+        self.tool_call_count += 1;
         let display = if self.verbose {
             display
         } else {
@@ -189,7 +194,10 @@ fn compact_tool_display(display: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
     use super::{ToolSummary, compact_tool_display, format_tool_block};
+    use crate::{config::QqConfig, qq::api::QqApiClient};
 
     #[test]
     fn formats_repeated_tool_runs() {
@@ -223,5 +231,29 @@ mod tests {
             compact_tool_display("[Thinking]\n检查日志中断点"),
             "[Thinking]"
         );
+    }
+
+    #[test]
+    fn record_tool_tracks_total_tool_call_count() {
+        let client = Arc::new(
+            QqApiClient::new(QqConfig {
+                app_id: String::new(),
+                app_secret: String::new(),
+                api_base_url: "https://example.com".to_string(),
+                token_url: "https://example.com/token".to_string(),
+            })
+            .unwrap(),
+        );
+        let mut emitter = super::PassiveTurnEmitter::new(
+            client,
+            "u".to_string(),
+            "m".to_string(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        emitter.record_tool("[Tool: Bash]\n```shell\npwd\n```".to_string());
+        emitter.record_tool("[Tool: Bash]\n```shell\nls\n```".to_string());
+
+        assert_eq!(emitter.tool_call_count, 2);
     }
 }

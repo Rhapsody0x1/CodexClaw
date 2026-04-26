@@ -3,7 +3,11 @@ use std::{future::pending, path::PathBuf, sync::Arc};
 use anyhow::Result;
 use codex_claw::{
     app::App,
-    codex::{config_snapshot, executor::CodexExecutor},
+    codex::{
+        app_server::{AppServerHandle, ClientInfo},
+        config_snapshot,
+        executor::{CodexExecutor, build_codex_path_env},
+    },
     config::AppConfig,
     memory::store::MemoryStore,
     qq::{api::QqApiClient, gateway},
@@ -52,9 +56,36 @@ async fn run_bot(config: AppConfig) -> Result<()> {
         "auto-imported self repo sessions from system codex home"
     );
     let qq_client = Arc::new(QqApiClient::new(config.qq.clone())?);
+
+    // Launch the shared `codex app-server` child process. All QQ users' turns
+    // are dispatched as independent threads over this single connection.
+    let path_env = build_codex_path_env(
+        std::env::var_os("PATH").as_ref(),
+        std::env::var_os("HOME")
+            .as_deref()
+            .map(std::path::Path::new),
+    );
+    let client_info = ClientInfo {
+        name: "codex-claw".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        title: None,
+    };
+    let codex_sqlite_home = config.general.codex_home_global.join("sqlite");
+    tokio::fs::create_dir_all(&codex_sqlite_home).await?;
+    let app_server = Arc::new(
+        AppServerHandle::start(
+            PathBuf::from(config.general.codex_binary.clone()),
+            config.general.codex_home_global.clone(),
+            codex_sqlite_home,
+            path_env,
+            client_info,
+        )
+        .await?,
+    );
     let codex = Arc::new(CodexExecutor::new(
         config.general.codex_binary.clone(),
         config.general.data_dir.clone(),
+        app_server,
     ));
     let memory = Arc::new(MemoryStore::new(config.general.data_dir.join("memory")));
     let skills_root = config.general.codex_home_global.join("skills");
@@ -91,7 +122,7 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     } else {
         None
     };
-    let app = Arc::new(App::new(config, session, qq_client, codex, memory, shadow));
+    let app = App::new(config, session, qq_client, codex, memory, shadow);
     gateway::spawn_gateway(app.clone());
     pending::<()>().await;
     Ok(())

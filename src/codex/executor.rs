@@ -2,31 +2,27 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
+    sync::Arc,
 };
 
-use anyhow::{Context, Result, anyhow};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    sync::{mpsc, oneshot},
-};
+use anyhow::Result;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    codex::events::{
-        CodexEvent, CodexItem, EventMsgPayload, PatchChangeKind, ResponseItemPayload, TokenUsage,
-        TokenUsageInfo, WebSearchAction,
+    codex::{
+        app_server::{AppServerHandle, TurnPolicy, protocol::ApprovalPolicy},
+        events::{CodexItem, PatchChangeKind, TokenUsageInfo, WebSearchAction},
     },
-    session::state::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
+    session::state::{
+        ApprovalPolicySetting, ContextMode, ReasoningEffort, ServiceTier, SessionState,
+    },
 };
 
-const OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexExecutor {
     pub binary: PathBuf,
     pub sqlite_home: PathBuf,
+    handle: Arc<AppServerHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +41,17 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompactRequest {
+    pub session_id: String,
+    pub workspace_dir: PathBuf,
+    pub config_overrides: Vec<String>,
+    pub model: Option<String>,
+    pub service_tier: Option<ServiceTier>,
+    pub context_mode: Option<ContextMode>,
+    pub reasoning_effort: ReasoningEffort,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub session_id: Option<String>,
     pub text: String,
@@ -60,263 +67,72 @@ pub enum ExecutionUpdate {
 }
 
 impl CodexExecutor {
-    pub fn new(binary: String, data_dir: PathBuf) -> Self {
+    pub fn new(binary: String, data_dir: PathBuf, handle: Arc<AppServerHandle>) -> Self {
         Self {
             binary: PathBuf::from(binary),
             sqlite_home: data_dir.join("codex-sqlite"),
+            handle,
         }
     }
 
+    pub fn handle(&self) -> Arc<AppServerHandle> {
+        self.handle.clone()
+    }
+
+    /// Execute one turn against the shared app-server. Chooses a per-turn
+    /// [`TurnPolicy`] from the current session settings (plan mode + approval
+    /// policy override).
     pub async fn execute(
         &self,
         request: ExecutionRequest,
         cancel_rx: Option<oneshot::Receiver<()>>,
         update_tx: Option<mpsc::UnboundedSender<ExecutionUpdate>>,
     ) -> Result<ExecutionResult> {
-        let sqlite_home = request.codex_home.join("sqlite");
-        if tokio::fs::create_dir_all(&sqlite_home).await.is_err() {
-            tokio::fs::create_dir_all(&self.sqlite_home).await?;
-        }
-        let sqlite_home_env = if sqlite_home.exists() {
-            sqlite_home.clone()
-        } else {
-            self.sqlite_home.clone()
-        };
-        let mut command = Command::new(&self.binary);
-        command.arg("exec");
-        if let Some(session_id) = request.session_state.session_id.clone() {
-            command.arg("-C").arg(&request.workspace_dir);
-            for add_dir in &request.add_dirs {
-                command.arg("--add-dir").arg(add_dir);
-            }
-            command
-                .arg("resume")
-                .arg("--json")
-                .arg("--full-auto")
-                .arg("--skip-git-repo-check")
-                .arg("-c")
-                .arg(format!(
-                    "model_reasoning_effort=\"{}\"",
-                    request.reasoning_effort.as_str()
-                ));
-            for override_arg in &request.config_overrides {
-                command.arg("-c").arg(override_arg);
-            }
-            if let Some(model) = &request.model {
-                command.arg("--model").arg(model);
-            }
-            append_runtime_overrides(&mut command, request.service_tier, request.context_mode);
-            for image in &request.image_paths {
-                command.arg("--image").arg(image);
-            }
-            command.arg(session_id).arg("--").arg(&request.prompt);
-        } else {
-            command
-                .arg("--json")
-                .arg("--full-auto")
-                .arg("--skip-git-repo-check")
-                .arg("-C")
-                .arg(&request.workspace_dir)
-                .arg("-c")
-                .arg(format!(
-                    "model_reasoning_effort=\"{}\"",
-                    request.reasoning_effort.as_str()
-                ));
-            for override_arg in &request.config_overrides {
-                command.arg("-c").arg(override_arg);
-            }
-            if let Some(model) = &request.model {
-                command.arg("--model").arg(model);
-            }
-            append_runtime_overrides(&mut command, request.service_tier, request.context_mode);
-            for image in &request.image_paths {
-                command.arg("--image").arg(image);
-            }
-            for add_dir in &request.add_dirs {
-                command.arg("--add-dir").arg(add_dir);
-            }
-            command.arg("--").arg(&request.prompt);
-        }
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("CODEX_HOME", &request.codex_home)
-            .env("CODEX_SQLITE_HOME", sqlite_home_env)
-            .current_dir(&request.workspace_dir);
-        if let Some(path_env) = build_codex_path_env(
-            env::var_os("PATH").as_ref(),
-            env::var_os("HOME").as_deref().map(Path::new),
-        ) {
-            command.env("PATH", path_env);
-        }
+        let policy = build_turn_policy(&request);
+        self.handle
+            .execute(request, policy, cancel_rx, update_tx)
+            .await
+    }
 
-        let mut child = command.spawn().context("failed to spawn codex process")?;
-        let stdout = child.stdout.take().context("missing codex stdout")?;
-        let stderr = child.stderr.take().context("missing codex stderr")?;
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            let mut lines = Vec::new();
-            while let Ok(Some(line)) = reader.next_line().await {
-                lines.push(line);
-            }
-            lines
-        });
-
-        let mut reader = BufReader::new(stdout).lines();
-        let mut current_session_id = request.session_state.session_id.clone();
-        let mut text_parts = Vec::new();
-        let mut changed_files = Vec::new();
-        let mut last_usage: Option<TokenUsage> = None;
-        let mut token_usage_info: Option<TokenUsageInfo> = None;
-        let mut context_window = request.context_mode.map(|mode| match mode {
-            ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
-            ContextMode::OneM => 1_000_000u64,
-        });
-        let mut cancel_rx = cancel_rx;
-        loop {
-            let line = if let Some(cancel) = cancel_rx.as_mut() {
-                tokio::select! {
-                    line = tokio::time::timeout(OUTPUT_IDLE_TIMEOUT, reader.next_line()) => {
-                        match line {
-                            Ok(result) => result?,
-                            Err(_) => {
-                                let _ = child.kill().await;
-                                let _ = child.wait().await;
-                                return Err(anyhow!(
-                                    "codex 输出超时（{} 秒无新事件）",
-                                    OUTPUT_IDLE_TIMEOUT.as_secs()
-                                ));
-                            }
-                        }
-                    }
-                    _ = cancel => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        return Err(anyhow!("codex turn aborted by user"));
-                    }
-                }
-            } else {
-                match tokio::time::timeout(OUTPUT_IDLE_TIMEOUT, reader.next_line()).await {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        return Err(anyhow!(
-                            "codex 输出超时（{} 秒无新事件）",
-                            OUTPUT_IDLE_TIMEOUT.as_secs()
-                        ));
-                    }
-                }
-            };
-            let Some(line) = line else {
-                break;
-            };
-            if let Some(tx) = update_tx.as_ref()
-                && let Some(update) = parse_update_from_raw_json(&line)
-            {
-                let _ = tx.send(update);
-            }
-            if let Ok(event) = serde_json::from_str::<CodexEvent>(&line) {
-                match event {
-                    CodexEvent::ThreadStarted { thread_id } => current_session_id = Some(thread_id),
-                    CodexEvent::ItemStarted { item } => {
-                        if let Some(display) = tool_display_for_item(&item, ToolEventPhase::Started)
-                        {
-                            if let Some(tx) = update_tx.as_ref() {
-                                let _ = tx.send(ExecutionUpdate::ToolCall { display });
-                            }
-                        }
-                    }
-                    CodexEvent::ItemUpdated { item } => {
-                        if let Some(display) = tool_display_for_item(&item, ToolEventPhase::Updated)
-                        {
-                            if let Some(tx) = update_tx.as_ref() {
-                                let _ = tx.send(ExecutionUpdate::ToolCall { display });
-                            }
-                        }
-                    }
-                    CodexEvent::ItemCompleted { item } => {
-                        if item.item_type == "file_change" {
-                            for change in &item.changes {
-                                changed_files.push(PathBuf::from(change.path.clone()));
-                            }
-                        }
-                        if item.item_type == "agent_message" {
-                            if let Some(text) = item.text {
-                                if let Some(tx) = update_tx.as_ref() {
-                                    let _ = tx
-                                        .send(ExecutionUpdate::AgentMessage { text: text.clone() });
-                                }
-                                text_parts.push(text);
-                            }
-                            continue;
-                        }
-                        if let Some(display) =
-                            tool_display_for_item(&item, ToolEventPhase::Completed)
-                        {
-                            if let Some(tx) = update_tx.as_ref() {
-                                let _ = tx.send(ExecutionUpdate::ToolCall { display });
-                            }
-                        }
-                    }
-                    CodexEvent::ResponseItem {
-                        payload: ResponseItemPayload::Unknown,
-                    } => {}
-                    CodexEvent::ResponseItem { .. } => {}
-                    CodexEvent::EventMsg {
-                        payload: EventMsgPayload::TokenCount { info },
-                    } => {
-                        token_usage_info = info;
-                        if let Some(window) = token_usage_info
-                            .as_ref()
-                            .and_then(|info| info.model_context_window)
-                        {
-                            context_window = Some(window);
-                        }
-                    }
-                    CodexEvent::EventMsg {
-                        payload: EventMsgPayload::Unknown,
-                    } => {}
-                    CodexEvent::TurnCompleted { usage: Some(usage) } => last_usage = Some(usage),
-                    CodexEvent::TurnCompleted { usage: None } => {}
-                    CodexEvent::TurnFailed { error } => {
-                        return Err(anyhow!("codex turn failed: {error}"));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let status = child.wait().await?;
-        let stderr_lines = stderr_handle.await.unwrap_or_default();
-        anyhow::ensure!(
-            status.success(),
-            "codex exited with status {}{}",
-            status,
-            if stderr_lines.is_empty() {
-                String::new()
-            } else {
-                format!(", stderr: {}", stderr_lines.join("\n"))
-            }
-        );
-        Ok(ExecutionResult {
-            session_id: current_session_id,
-            text: text_parts.join("\n\n").trim().to_string(),
-            changed_files,
-            token_usage_info: token_usage_info.or_else(|| {
-                last_usage.map(|usage| TokenUsageInfo {
-                    total_token_usage: usage.clone(),
-                    last_token_usage: usage,
-                    model_context_window: context_window,
-                })
-            }),
-            context_window,
-        })
+    pub async fn compact_session(
+        &self,
+        request: CompactRequest,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<()> {
+        self.handle.compact_thread(request, cancel_rx).await
     }
 }
 
-fn build_codex_path_env(current: Option<&OsString>, home: Option<&Path>) -> Option<OsString> {
+/// Given an [`ExecutionRequest`], pick the appropriate turn policy.
+///
+/// We avoid overriding anything we don't need to: approval_policy and
+/// sandbox_policy default to `None` which means the app-server uses whatever
+/// is in `~/.codex-claw/.codex/config.toml` (`sandbox_mode`, `approval_policy`,
+/// and the `sandbox_workspace_write.*` knobs like `network_access`,
+/// `exclude_slash_tmp`, `writable_roots`, etc.).
+///
+/// We only override when:
+/// - plan mode is active → force `ReadOnly` + `Never` approvals + Plan collab;
+/// - the user explicitly set an approval override via `/approvals`.
+pub fn build_turn_policy(request: &ExecutionRequest) -> TurnPolicy {
+    if request.session_state.settings.plan_mode {
+        return TurnPolicy::plan_mode();
+    }
+    if let Some(setting) = request.session_state.settings.approval_policy_override {
+        return TurnPolicy::with_approval_policy(approval_setting_to_protocol(setting));
+    }
+    TurnPolicy::inherit_from_config()
+}
+
+fn approval_setting_to_protocol(setting: ApprovalPolicySetting) -> ApprovalPolicy {
+    match setting {
+        ApprovalPolicySetting::UnlessTrusted => ApprovalPolicy::UnlessTrusted,
+        ApprovalPolicySetting::OnRequest => ApprovalPolicy::OnRequest,
+        ApprovalPolicySetting::Never => ApprovalPolicy::Never,
+    }
+}
+
+pub fn build_codex_path_env(current: Option<&OsString>, home: Option<&Path>) -> Option<OsString> {
     let mut dirs = Vec::new();
     if let Some(current) = current {
         for dir in env::split_paths(current) {
@@ -356,6 +172,57 @@ enum ToolEventPhase {
     Started,
     Updated,
     Completed,
+}
+
+/// Public mirror of `ToolEventPhase` for cross-module callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEventPhasePublic {
+    Started,
+    Updated,
+    Completed,
+}
+
+impl From<ToolEventPhasePublic> for ToolEventPhase {
+    fn from(v: ToolEventPhasePublic) -> Self {
+        match v {
+            ToolEventPhasePublic::Started => ToolEventPhase::Started,
+            ToolEventPhasePublic::Updated => ToolEventPhase::Updated,
+            ToolEventPhasePublic::Completed => ToolEventPhase::Completed,
+        }
+    }
+}
+
+/// Public wrapper around the internal formatter — used by
+/// `src/codex/app_server/events.rs` for QQ parity.
+pub fn tool_display_for_item_public(
+    item: &CodexItem,
+    phase: ToolEventPhasePublic,
+) -> Option<String> {
+    tool_display_for_item(item, phase.into())
+}
+
+pub fn format_todo_items_public(items: &[crate::codex::events::TodoEntry]) -> String {
+    format_todo_items(items)
+}
+
+pub fn humanize_tool_label_public(value: &str) -> String {
+    humanize_tool_label(value)
+}
+
+pub fn short_json_public(value: &serde_json::Value) -> String {
+    short_json(value)
+}
+
+pub fn truncate_public(value: &str, max_chars: usize) -> String {
+    truncate(value, max_chars)
+}
+
+pub fn web_search_display_from_action_public(action: &WebSearchAction) -> String {
+    web_search_display_from_action(action)
+}
+
+pub fn web_search_display_from_detail_public(detail: &str) -> String {
+    web_search_display_from_detail(detail)
 }
 
 fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<String> {
@@ -575,82 +442,20 @@ fn humanize_tool_label(value: &str) -> String {
         .join(" ")
 }
 
-fn parse_update_from_raw_json(line: &str) -> Option<ExecutionUpdate> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    match value.get("type")?.as_str()? {
-        "response_item" => {
-            let payload = value.get("payload")?;
-            if payload.get("type")?.as_str()? != "web_search_call" {
-                return None;
-            }
-            if payload.get("status").and_then(|value| value.as_str()) != Some("completed") {
-                return None;
-            }
-            let action =
-                serde_json::from_value::<WebSearchAction>(payload.get("action")?.clone()).ok()?;
-            Some(ExecutionUpdate::ToolCall {
-                display: web_search_display_from_action(&action),
-            })
-        }
-        "item.completed" => {
-            let item = value.get("item")?;
-            if item.get("type")?.as_str()? != "web_search" {
-                return None;
-            }
-            let action =
-                serde_json::from_value::<WebSearchAction>(item.get("action")?.clone()).ok()?;
-            let query = item
-                .get("query")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let display = match action {
-                WebSearchAction::Other => web_search_display_from_detail(query),
-                _ => web_search_display_from_action(&action),
-            };
-            Some(ExecutionUpdate::ToolCall { display })
-        }
-        _ => None,
-    }
-}
-
-fn append_runtime_overrides(
-    command: &mut Command,
-    service_tier: Option<ServiceTier>,
-    context_mode: Option<ContextMode>,
-) {
-    if let Some(service_tier) = service_tier {
-        command
-            .arg("-c")
-            .arg(format!("service_tier=\"{}\"", service_tier.as_str()));
-    }
-    match context_mode {
-        Some(ContextMode::OneM) => {
-            command.arg("-c").arg("model_context_window=1000000");
-        }
-        Some(ContextMode::Standard) => {
-            command.arg("-c").arg("model_context_window=272000");
-        }
-        None => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{env, ffi::OsString};
 
     use tempfile::tempdir;
-    use tokio::process::Command;
 
     use crate::codex::{
         events::{CodexItem, PatchChangeKind, TodoEntry, WebSearchAction},
         executor::{
-            ExecutionUpdate, ToolEventPhase, append_runtime_overrides, build_codex_path_env,
-            format_todo_items, humanize_tool_label, parse_update_from_raw_json,
+            ToolEventPhase, build_codex_path_env, format_todo_items, humanize_tool_label,
             tool_display_for_item, web_search_action_detail, web_search_display_from_action,
             web_search_display_from_detail,
         },
     };
-    use crate::session::state::ContextMode;
 
     #[test]
     fn formats_bash_tool_display() {
@@ -729,47 +534,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_raw_web_search_response_item() {
-        let update = parse_update_from_raw_json(
-            r#"{"type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"Anthropic Claude Code official repository GitHub","queries":["Anthropic Claude Code official repository GitHub"]}}}"#,
-        );
-        assert_eq!(
-            update,
-            Some(ExecutionUpdate::ToolCall {
-                display: "[Tool: Web Search] Anthropic Claude Code official repository GitHub"
-                    .to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn parses_raw_item_completed_web_search() {
-        let update = parse_update_from_raw_json(
-            r#"{"type":"item.completed","item":{"id":"item_1","type":"web_search","id":"ws_abc","query":"Claude Code official repository Anthropic GitHub","action":{"type":"search","query":"Claude Code official repository Anthropic GitHub","queries":["Claude Code official repository Anthropic GitHub"]}}}"#,
-        );
-        assert_eq!(
-            update,
-            Some(ExecutionUpdate::ToolCall {
-                display: "[Tool: Web Search] Claude Code official repository Anthropic GitHub"
-                    .to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn infers_web_open_from_url_query_when_action_is_other() {
+    fn infers_web_open_from_url_query() {
         assert_eq!(
             web_search_display_from_detail("https://rhapsody0x1.github.io/"),
             "[Tool: Web Open] https://rhapsody0x1.github.io/"
-        );
-        let update = parse_update_from_raw_json(
-            r#"{"type":"item.completed","item":{"id":"item_1","type":"web_search","id":"ws_abc","query":"https://rhapsody0x1.github.io/","action":{"type":"other"}}}"#,
-        );
-        assert_eq!(
-            update,
-            Some(ExecutionUpdate::ToolCall {
-                display: "[Tool: Web Open] https://rhapsody0x1.github.io/".to_string()
-            })
         );
     }
 
@@ -859,27 +627,5 @@ mod tests {
         let paths = env::split_paths(&joined).collect::<Vec<_>>();
         assert!(paths.contains(&home.path().join(".cargo").join("bin")));
         assert!(paths.contains(&home.path().join(".local").join("bin")));
-    }
-
-    #[test]
-    fn one_m_context_does_not_enable_auto_compact_override() {
-        let mut command = Command::new("codex");
-        append_runtime_overrides(&mut command, None, Some(ContextMode::OneM));
-
-        let args = command
-            .as_std()
-            .get_args()
-            .map(|value| value.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(
-            args.iter()
-                .any(|value| value == "model_context_window=1000000")
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|value| value == "model_auto_compact_token_limit=900000")
-        );
     }
 }

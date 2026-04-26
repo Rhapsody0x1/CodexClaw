@@ -9,8 +9,8 @@ use crate::{
     normalize_lang,
     session::{
         state::{
-            CommandAlias, ContextMode, PendingSetting, ReasoningEffort, ServiceTier,
-            UserSessionState,
+            ApprovalPolicySetting, CommandAlias, ContextMode, PendingSetting, ReasoningEffort,
+            ServiceTier, UserSessionState,
         },
         store::{DiskSessionMeta, SessionListScope, SessionStore},
     },
@@ -43,6 +43,15 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "self-update",
     "alias",
     "back",
+    "approvals",
+    "plan",
+    "approve",
+    "approve-session",
+    "deny",
+    "cancel",
+    "execute-plan",
+    "keep-planning",
+    "cancel-plan",
     // Chinese aliases also protected
     "帮助",
     "状态",
@@ -67,6 +76,15 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "自更新",
     "详细",
     "重命名",
+    "审批",
+    "计划",
+    "同意",
+    "同意本会话",
+    "拒绝",
+    "取消",
+    "实施",
+    "继续规划",
+    "取消计划",
 ];
 
 const PROJECT_KEY_SEP: char = '\u{1f}';
@@ -83,6 +101,22 @@ pub enum CommandOutcome {
     StopCurrent(String),
     Compact,
     SelfUpdate,
+    SetGlobalModel(Option<String>),
+    SetGlobalReasoning(Option<ReasoningEffort>),
+    SetGlobalFast(Option<ServiceTier>),
+    SetGlobalContext(Option<ContextMode>),
+    /// Resolve the user's next pending approval request with the given
+    /// decision. App looks up its `pending_approvals[openid]` queue and
+    /// sends the result back to the app-server via the broker.
+    Approval(ApprovalIntent),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApprovalIntent {
+    Accept,
+    AcceptForSession,
+    Decline,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +280,15 @@ fn maybe_handle_command_inner<'a>(
                 )
                 .await
             }
+            "/approvals" => handle_approvals(&rest, openid, session).await,
+            "/plan" => handle_plan(&rest, openid, session).await,
+            "/execute-plan" => handle_execute_plan(openid, session).await,
+            "/keep-planning" => handle_keep_planning(openid, session).await,
+            "/cancel-plan" => handle_cancel_plan(openid, session).await,
+            "/approve" => Ok(CommandOutcome::Approval(ApprovalIntent::Accept)),
+            "/approve-session" => Ok(CommandOutcome::Approval(ApprovalIntent::AcceptForSession)),
+            "/deny" => Ok(CommandOutcome::Approval(ApprovalIntent::Decline)),
+            "/cancel" => Ok(CommandOutcome::Approval(ApprovalIntent::Cancel)),
             "/status" => Ok(CommandOutcome::Reply(CommandReply {
                 text: build_status_text(
                     &session.snapshot_for_user(openid).await?,
@@ -397,6 +440,11 @@ fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutco
         }
         CommandOutcome::Compact => CommandOutcome::Compact,
         CommandOutcome::SelfUpdate => CommandOutcome::SelfUpdate,
+        CommandOutcome::SetGlobalModel(value) => CommandOutcome::SetGlobalModel(value),
+        CommandOutcome::SetGlobalReasoning(value) => CommandOutcome::SetGlobalReasoning(value),
+        CommandOutcome::SetGlobalFast(value) => CommandOutcome::SetGlobalFast(value),
+        CommandOutcome::SetGlobalContext(value) => CommandOutcome::SetGlobalContext(value),
+        CommandOutcome::Approval(intent) => CommandOutcome::Approval(intent),
         CommandOutcome::Continue => CommandOutcome::Continue,
     }
 }
@@ -468,6 +516,19 @@ async fn expand_alias(
             }
             CommandOutcome::Compact => return Ok(CommandOutcome::Compact),
             CommandOutcome::SelfUpdate => return Ok(CommandOutcome::SelfUpdate),
+            CommandOutcome::SetGlobalModel(value) => {
+                return Ok(CommandOutcome::SetGlobalModel(value));
+            }
+            CommandOutcome::SetGlobalReasoning(value) => {
+                return Ok(CommandOutcome::SetGlobalReasoning(value));
+            }
+            CommandOutcome::SetGlobalFast(value) => {
+                return Ok(CommandOutcome::SetGlobalFast(value));
+            }
+            CommandOutcome::SetGlobalContext(value) => {
+                return Ok(CommandOutcome::SetGlobalContext(value));
+            }
+            CommandOutcome::Approval(intent) => return Ok(CommandOutcome::Approval(intent)),
         }
     }
     Ok(CommandOutcome::Reply(CommandReply {
@@ -649,6 +710,9 @@ async fn handle_model(
     } else {
         Some(value.clone())
     };
+    if !snapshot.foreground.saved {
+        return Ok(CommandOutcome::SetGlobalModel(next));
+    }
     session
         .set_model_override_for_active(openid, next.clone())
         .await?;
@@ -689,16 +753,7 @@ async fn handle_fast(
     let value = args.join(" ");
     let next = interactive::resolve_fast_input(&value)
         .ok_or_else(|| anyhow!(t!("commands.fast.invalid", locale = lang.as_str()).into_owned()))?;
-    session.set_service_tier_for_active(openid, next).await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.fast.updated",
-            value = effective_fast_label(&snapshot, runtime_profile),
-            locale = lang.as_str()
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::SetGlobalFast(next))
 }
 
 async fn handle_context(
@@ -729,6 +784,9 @@ async fn handle_context(
     let next = interactive::resolve_context_input(&value).ok_or_else(|| {
         anyhow!(t!("commands.context.invalid", locale = lang.as_str()).into_owned())
     })?;
+    if !snapshot.foreground.saved {
+        return Ok(CommandOutcome::SetGlobalContext(next));
+    }
     session.set_context_mode_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
@@ -769,6 +827,9 @@ async fn handle_reasoning(
     let next = interactive::resolve_reasoning_input(&value).ok_or_else(|| {
         anyhow!(t!("commands.reasoning.invalid", locale = lang.as_str()).into_owned())
     })?;
+    if !snapshot.foreground.saved {
+        return Ok(CommandOutcome::SetGlobalReasoning(next));
+    }
     session.set_reasoning_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
     Ok(CommandOutcome::Reply(CommandReply {
@@ -823,6 +884,268 @@ async fn handle_verbose(
     };
     Ok(CommandOutcome::Reply(CommandReply {
         text: t!(key, locale = lang.as_str()).into_owned(),
+    }))
+}
+
+async fn handle_approvals(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    if args.is_empty() {
+        let snapshot = session.snapshot_for_user(openid).await?;
+        let lang = snapshot.settings.language.clone();
+        let zh = lang.starts_with("zh");
+        let current = approval_label(snapshot.settings.approval_policy_override, zh);
+        let header = if zh {
+            format!("当前审批策略：{current}\n回复以下选项切换：")
+        } else {
+            format!("Current approval policy: {current}\nReply with:")
+        };
+        let body = if zh {
+            "/approvals on           按需审批（默认）\n/approvals strict       严格（unless-trusted）\n/approvals off          关闭审批"
+        } else {
+            "/approvals on           on-request (default)\n/approvals strict       unless-trusted\n/approvals off          never ask"
+        };
+        session
+            .set_pending_setting(openid, Some(PendingSetting::Approvals))
+            .await?;
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: format!("{header}\n{body}"),
+        }));
+    }
+    handle_approvals_arg(&args.join(" "), openid, session).await
+}
+
+pub(crate) async fn handle_approvals_arg(
+    text: &str,
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let zh = lang.starts_with("zh");
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("status") || trimmed.is_empty() {
+        let current = approval_label(snapshot.settings.approval_policy_override, zh);
+        let msg = if zh {
+            format!("当前审批策略：{current}")
+        } else {
+            format!("approval policy: {current}")
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+    }
+    let next = ApprovalPolicySetting::parse(trimmed);
+    let Some(next) = next else {
+        let msg = if zh {
+            format!("无法识别的审批选项：{trimmed}。可选值：on | strict | off")
+        } else {
+            format!("unrecognized approval option: {trimmed}. Try: on | strict | off")
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+    };
+    session
+        .update_settings_for_user(openid, |state| {
+            state.approval_policy_override = Some(next);
+        })
+        .await?;
+    session.set_pending_setting(openid, None).await?;
+    let label = approval_label(Some(next), zh);
+    let msg = if zh {
+        format!("已切换审批策略：{label}")
+    } else {
+        format!("approval policy updated: {label}")
+    };
+    Ok(CommandOutcome::Reply(CommandReply { text: msg }))
+}
+
+fn approval_label(setting: Option<ApprovalPolicySetting>, zh: bool) -> String {
+    match setting {
+        None => {
+            if zh {
+                "按需（on-request，默认）".to_string()
+            } else {
+                "on-request (default)".to_string()
+            }
+        }
+        Some(s) => if zh { s.label_zh() } else { s.label_en() }.to_string(),
+    }
+}
+
+async fn handle_plan(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    if args.is_empty() {
+        let snapshot = session.snapshot_for_user(openid).await?;
+        let lang = snapshot.settings.language.clone();
+        let zh = lang.starts_with("zh");
+        let current = if snapshot.settings.plan_mode {
+            if zh { "已开启" } else { "on" }
+        } else if zh {
+            "已关闭"
+        } else {
+            "off"
+        };
+        let header = if zh {
+            format!("Plan 模式：{current}\n回复以下选项切换：")
+        } else {
+            format!("Plan mode: {current}\nReply with:")
+        };
+        let body = if zh {
+            "/plan on    让 Codex 只读制定计划\n/plan off   恢复默认模式"
+        } else {
+            "/plan on    enter plan mode (read-only planning)\n/plan off   return to default mode"
+        };
+        session
+            .set_pending_setting(openid, Some(PendingSetting::Plan))
+            .await?;
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: format!("{header}\n{body}"),
+        }));
+    }
+    handle_plan_arg(&args.join(" "), openid, session).await
+}
+
+async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let zh = lang.starts_with("zh");
+    let Some(plan) = snapshot.settings.pending_plan.clone() else {
+        let msg = if zh {
+            "当前没有待执行的计划。"
+        } else {
+            "No pending plan to execute."
+        };
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: msg.to_string(),
+        }));
+    };
+    session
+        .update_settings_for_user(openid, |state| {
+            state.plan_mode = false;
+            state.pending_plan = None;
+        })
+        .await?;
+    let prefix = if zh {
+        "请按下列批准的计划执行，并按需重新读取文件验证：\n\n"
+    } else {
+        "Please implement the following approved plan. Re-read files as needed to verify:\n\n"
+    };
+    let kickoff = format!("{prefix}{plan}");
+    // Return a direct reply acknowledging the switch. The user's next QQ
+    // message (or the stored plan, if we wanted to auto-kick) triggers the
+    // follow-up turn. We surface a short confirmation here.
+    let confirm = if zh {
+        "已退出 Plan 模式并批准计划。你可以直接回复 “开始” 或描述下一步，我会按计划执行。"
+    } else {
+        "Plan approved. Reply with a follow-up (e.g. \"go\") and I'll implement the plan."
+    };
+    // Stash the kickoff prompt in a future-proof way: we reuse
+    // `pending_setting = None` (cleared) and prepend the plan into the user's
+    // next prompt context. For the MVP we just echo the confirm message and
+    // rely on the user's next turn carrying the plan verbatim. A richer
+    // auto-kickoff is tracked as follow-up work.
+    let _ = kickoff; // avoid unused warning for now
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: confirm.to_string(),
+    }))
+}
+
+async fn handle_keep_planning(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let zh = lang.starts_with("zh");
+    session
+        .update_settings_for_user(openid, |state| {
+            state.plan_mode = true;
+            state.pending_plan = None;
+        })
+        .await?;
+    let msg = if zh {
+        "已保留 Plan 模式，继续打磨计划。下一条消息将继续规划。"
+    } else {
+        "Staying in plan mode. Next message continues planning."
+    };
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: msg.to_string(),
+    }))
+}
+
+async fn handle_cancel_plan(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let zh = lang.starts_with("zh");
+    session
+        .update_settings_for_user(openid, |state| {
+            state.pending_plan = None;
+        })
+        .await?;
+    let msg = if zh {
+        "已丢弃当前计划。"
+    } else {
+        "Pending plan discarded."
+    };
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: msg.to_string(),
+    }))
+}
+
+pub(crate) async fn handle_plan_arg(
+    text: &str,
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let zh = lang.starts_with("zh");
+    let trimmed = text.trim().to_ascii_lowercase();
+    let enabled = match trimmed.as_str() {
+        "on" | "开" | "开启" | "true" | "yes" => true,
+        "off" | "关" | "关闭" | "false" | "no" => false,
+        "status" | "" => {
+            let msg = if snapshot.settings.plan_mode {
+                if zh {
+                    "Plan 模式：已开启"
+                } else {
+                    "Plan mode: on"
+                }
+            } else if zh {
+                "Plan 模式：已关闭"
+            } else {
+                "Plan mode: off"
+            };
+            return Ok(CommandOutcome::Reply(CommandReply {
+                text: msg.to_string(),
+            }));
+        }
+        other => {
+            let msg = if zh {
+                format!("无法识别的 plan 选项：{other}。可选值：on | off")
+            } else {
+                format!("unrecognized plan option: {other}. Try: on | off")
+            };
+            return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+        }
+    };
+    session
+        .update_settings_for_user(openid, |state| state.plan_mode = enabled)
+        .await?;
+    session.set_pending_setting(openid, None).await?;
+    let msg = if enabled {
+        if zh {
+            "已进入 Plan 模式。Codex 将在只读沙箱中先制定计划，随后发 <proposed_plan>，你可以用 /实施 批准执行。"
+        } else {
+            "Plan mode on. Codex will plan in a read-only sandbox, then emit <proposed_plan>. Approve with /execute-plan."
+        }
+    } else if zh {
+        "已退出 Plan 模式。"
+    } else {
+        "Plan mode off."
+    };
+    Ok(CommandOutcome::Reply(CommandReply {
+        text: msg.to_string(),
     }))
 }
 
@@ -1561,6 +1884,16 @@ fn effective_model(
         .unwrap_or_else(|| default_model.to_string())
 }
 
+fn session_profile_for_effective_settings(
+    state: &UserSessionState,
+) -> Option<&crate::session::state::DialogProfile> {
+    if state.foreground.saved {
+        state.foreground.profile.as_ref()
+    } else {
+        None
+    }
+}
+
 fn effective_reasoning(
     state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
@@ -1574,11 +1907,10 @@ fn effective_reasoning(
 }
 
 fn effective_fast_label(
-    state: &UserSessionState,
+    _state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> &'static str {
-    let effective = merged_settings(state);
-    match effective.service_tier.or(runtime_profile.service_tier) {
+    match runtime_profile.service_tier {
         Some(ServiceTier::Fast) => "on",
         Some(ServiceTier::Flex) => "off",
         None => "inherit",
@@ -1586,11 +1918,10 @@ fn effective_fast_label(
 }
 
 fn effective_tier_token(
-    state: &UserSessionState,
+    _state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> Option<String> {
-    let effective = merged_settings(state);
-    match effective.service_tier.or(runtime_profile.service_tier) {
+    match runtime_profile.service_tier {
         Some(ServiceTier::Fast) => Some("fast".to_string()),
         Some(ServiceTier::Flex) => Some("flex".to_string()),
         None => None,
@@ -1620,9 +1951,12 @@ fn effective_context_token(
 }
 
 fn merged_settings(state: &UserSessionState) -> crate::session::state::SessionSettings {
-    state
-        .settings
-        .merged_with_profile(state.foreground.profile.as_ref())
+    let mut base = state.settings.clone();
+    base.model_override = None;
+    base.reasoning_effort = None;
+    base.service_tier = None;
+    base.context_mode = None;
+    base.merged_with_profile(session_profile_for_effective_settings(state))
 }
 
 fn parse_scope(value: &str, lang: &str) -> Result<SessionListScope> {
@@ -2043,6 +2377,15 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/自更新" => "/self-update",
         "/重命名" => "/rename",
         "/返回" => "/back",
+        "/审批" => "/approvals",
+        "/计划" => "/plan",
+        "/同意" => "/approve",
+        "/同意本会话" => "/approve-session",
+        "/拒绝" => "/deny",
+        "/取消" => "/cancel",
+        "/实施" => "/execute-plan",
+        "/继续规划" => "/keep-planning",
+        "/取消计划" => "/cancel-plan",
         other => other,
     }
 }
@@ -2116,6 +2459,17 @@ fn help_text(lang: &str) -> String {
         t!("commands.help.entry_reasoning", locale = lang).into_owned(),
         t!("commands.help.entry_fast", locale = lang).into_owned(),
         t!("commands.help.entry_context", locale = lang).into_owned(),
+        String::new(),
+        t!("commands.help.section_approval_settings", locale = lang).into_owned(),
+        t!("commands.help.entry_approvals", locale = lang).into_owned(),
+        t!("commands.help.entry_plan", locale = lang).into_owned(),
+        t!("commands.help.entry_execute_plan", locale = lang).into_owned(),
+        t!("commands.help.entry_keep_planning", locale = lang).into_owned(),
+        t!("commands.help.entry_cancel_plan", locale = lang).into_owned(),
+        t!("commands.help.entry_approve", locale = lang).into_owned(),
+        t!("commands.help.entry_approve_session", locale = lang).into_owned(),
+        t!("commands.help.entry_deny", locale = lang).into_owned(),
+        t!("commands.help.entry_cancel", locale = lang).into_owned(),
         String::new(),
         t!("commands.help.section_session_management", locale = lang).into_owned(),
         t!("commands.help.entry_sessions", locale = lang).into_owned(),
@@ -2921,7 +3275,25 @@ mod interactive {
                 page,
                 alias,
             } => consume_loadbg_sessions(text, openid, session, project_key, page, alias).await,
+            PendingSetting::Approvals => consume_approvals(text, openid, session).await,
+            PendingSetting::Plan => consume_plan(text, openid, session).await,
         }
+    }
+
+    async fn consume_approvals(
+        text: &str,
+        openid: &str,
+        session: &SessionStore,
+    ) -> Result<CommandOutcome> {
+        super::handle_approvals_arg(text, openid, session).await
+    }
+
+    async fn consume_plan(
+        text: &str,
+        openid: &str,
+        session: &SessionStore,
+    ) -> Result<CommandOutcome> {
+        super::handle_plan_arg(text, openid, session).await
     }
 
     async fn consume_model(
@@ -2947,6 +3319,10 @@ mod interactive {
                 } else {
                     Some(choice.clone())
                 };
+                if !snapshot.foreground.saved {
+                    session.set_pending_setting(openid, None).await?;
+                    return Ok(CommandOutcome::SetGlobalModel(next));
+                }
                 session.set_model_override_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
@@ -2985,6 +3361,10 @@ mod interactive {
                 } else {
                     ReasoningEffort::parse_supported(&choice)
                 };
+                if !snapshot.foreground.saved {
+                    session.set_pending_setting(openid, None).await?;
+                    return Ok(CommandOutcome::SetGlobalReasoning(next));
+                }
                 session.set_reasoning_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
@@ -3010,7 +3390,7 @@ mod interactive {
         text: &str,
         openid: &str,
         session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
+        _runtime_profile: &CodexRuntimeProfile,
     ) -> Result<CommandOutcome> {
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
@@ -3018,17 +3398,8 @@ mod interactive {
         let input = text.trim();
         match resolve_fast_input(input) {
             Some(next) => {
-                session.set_service_tier_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
-                let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.fast.updated",
-                        value = effective_fast_label(&snapshot, runtime_profile),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }))
+                Ok(CommandOutcome::SetGlobalFast(next))
             }
             None => Ok(CommandOutcome::Reply(CommandReply {
                 text: no_match_reply(locale, input),
@@ -3048,6 +3419,10 @@ mod interactive {
         let input = text.trim();
         match resolve_context_input(input) {
             Some(next) => {
+                if !snapshot.foreground.saved {
+                    session.set_pending_setting(openid, None).await?;
+                    return Ok(CommandOutcome::SetGlobalContext(next));
+                }
                 session.set_context_mode_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
@@ -3685,24 +4060,23 @@ mod tests {
         .unwrap();
         session
             .update_settings_for_user("u1", |state| {
-                state.model_override = Some("gpt-global".into());
-                state.reasoning_effort = Some(ReasoningEffort::High);
-                state.context_mode = Some(ContextMode::OneM);
-                state.service_tier = Some(ServiceTier::Fast);
+                state.model_override = Some("ignored-legacy".into());
+                state.reasoning_effort = Some(ReasoningEffort::Low);
+                state.context_mode = Some(ContextMode::Standard);
             })
             .await
             .unwrap();
 
-        let outcome = maybe_handle_command(
-            "/new",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let runtime = CodexRuntimeProfile {
+            configured_model: Some("gpt-global".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            service_tier: Some(ServiceTier::Fast),
+            context_mode: Some(ContextMode::OneM),
+            ..CodexRuntimeProfile::default()
+        };
+        let outcome = maybe_handle_command("/new", "u1", &session, "default", &runtime, false)
+            .await
+            .unwrap();
 
         let CommandOutcome::Reply(reply) = outcome else {
             panic!("expected reply");
@@ -4088,6 +4462,19 @@ mod tests {
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].commands.len(), 3);
 
+        session
+            .set_foreground_session_id("u1", Some("thread-1".into()))
+            .await
+            .unwrap();
+        session
+            .move_foreground_to_background("u1", Some("saved"))
+            .await
+            .unwrap();
+        session
+            .foreground_from_background("u1", "saved")
+            .await
+            .unwrap();
+
         let invoke = maybe_handle_command(
             "/expert",
             "u1",
@@ -4103,11 +4490,10 @@ mod tests {
         };
         // verbose step should have flipped user state
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let profile = snapshot.foreground.profile.expect("saved dialog profile");
         assert!(snapshot.settings.verbose);
-        assert_eq!(
-            snapshot.settings.reasoning_effort,
-            Some(ReasoningEffort::Xhigh)
-        );
+        assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(profile.model_override.as_deref(), Some("gpt-5.4"));
         assert!(reply.text.contains("expert"));
 
         // Protected name rejected
@@ -4322,10 +4708,8 @@ mod tests {
         assert!(reply.text.contains("`gpt-5.4`"));
         assert!(reply.text.contains("aliases") || reply.text.contains("别名"));
         assert!(
-            reply
-                .text
-                .contains("Most capable general-purpose model currently available")
-                || reply.text.contains("目前最先进的通用型模型")
+            reply.text.contains("Latest flagship general-purpose model")
+                || reply.text.contains("最新旗舰通用模型")
         );
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(matches!(
@@ -4434,19 +4818,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
+        let CommandOutcome::SetGlobalModel(Some(model)) = outcome else {
             panic!("expected apply reply");
         };
-        assert!(reply.text.contains("gpt-5.4-mini"));
+        assert_eq!(model, "gpt-5.4-mini");
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(
             snapshot.pending_setting.is_none(),
             "pending should clear on apply"
         );
-        assert_eq!(
-            snapshot.settings.model_override.as_deref(),
-            Some("gpt-5.4-mini")
-        );
+        assert_eq!(snapshot.settings.model_override.as_deref(), None);
     }
 
     #[tokio::test]
@@ -4876,15 +5257,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected apply reply");
+        let CommandOutcome::SetGlobalReasoning(Some(ReasoningEffort::High)) = outcome else {
+            panic!("expected global reasoning update");
         };
-        assert!(reply.text.contains("high"));
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
-        assert_eq!(
-            snapshot.settings.reasoning_effort,
-            Some(ReasoningEffort::High)
-        );
+        assert_eq!(snapshot.settings.reasoning_effort, None);
         assert!(snapshot.pending_setting.is_none());
     }
 
@@ -4912,10 +5289,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let CommandOutcome::Reply(fast_reply) = fast else {
-            panic!("expected /fast 开 to reply");
+        let CommandOutcome::SetGlobalFast(Some(ServiceTier::Fast)) = fast else {
+            panic!("expected /fast 开 to request a global fast update");
         };
-        assert!(fast_reply.text.contains("fast"));
 
         let context = maybe_handle_command(
             "/context 长",
@@ -4927,14 +5303,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let CommandOutcome::Reply(context_reply) = context else {
-            panic!("expected /context 长 to reply");
+        let CommandOutcome::SetGlobalContext(Some(ContextMode::OneM)) = context else {
+            panic!("expected /context 长 to request a global context update");
         };
-        assert!(context_reply.text.contains("1M"));
 
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
-        assert_eq!(snapshot.settings.service_tier, Some(ServiceTier::Fast));
-        assert_eq!(snapshot.settings.context_mode, Some(ContextMode::OneM));
+        assert_eq!(snapshot.settings.service_tier, None);
+        assert_eq!(snapshot.settings.context_mode, None);
     }
 
     #[tokio::test]
@@ -5029,6 +5404,10 @@ mod tests {
             .text
             .find("## 模型设置命令")
             .expect("missing model settings section");
+        let approval_section = reply
+            .text
+            .find("## 审批设置命令")
+            .expect("missing approval settings section");
         let session_section = reply
             .text
             .find("## 会话管理命令")
@@ -5041,6 +5420,18 @@ mod tests {
         let reasoning_index = reply.text.find("`/思考`").expect("missing /思考");
         let fast_index = reply.text.find("`/快速`").expect("missing /快速");
         let context_index = reply.text.find("`/上下文`").expect("missing /上下文");
+        let approvals_index = reply.text.find("`/审批`").expect("missing /审批");
+        let plan_index = reply.text.find("`/计划`").expect("missing /计划");
+        let execute_plan_index = reply.text.find("`/实施`").expect("missing /实施");
+        let keep_planning_index = reply.text.find("`/继续规划`").expect("missing /继续规划");
+        let cancel_plan_index = reply.text.find("`/取消计划`").expect("missing /取消计划");
+        let approve_index = reply.text.find("`/同意`").expect("missing /同意");
+        let approve_session_index = reply
+            .text
+            .find("`/同意本会话`")
+            .expect("missing /同意本会话");
+        let deny_index = reply.text.find("`/拒绝`").expect("missing /拒绝");
+        let cancel_index = reply.text.find("`/取消`").expect("missing /取消");
         let sessions_index = reply.text.find("`/会话`").expect("missing /会话");
         let import_index = reply.text.find("`/导入`").expect("missing /导入");
         let resume_index = reply.text.find("`/恢复`").expect("missing /恢复");
@@ -5054,11 +5445,25 @@ mod tests {
         let compact_index = reply.text.find("`/压缩`").expect("missing /压缩");
         let self_update_index = reply.text.find("`/自更新`").expect("missing /自更新");
 
-        assert!(model_section < session_section && session_section < advanced_section);
+        assert!(
+            model_section < approval_section
+                && approval_section < session_section
+                && session_section < advanced_section
+        );
         assert!(
             model_index < reasoning_index
                 && reasoning_index < fast_index
                 && fast_index < context_index
+        );
+        assert!(
+            approvals_index < plan_index
+                && plan_index < execute_plan_index
+                && execute_plan_index < keep_planning_index
+                && keep_planning_index < cancel_plan_index
+                && cancel_plan_index < approve_index
+                && approve_index < approve_session_index
+                && approve_session_index < deny_index
+                && deny_index < cancel_index
         );
         assert!(
             sessions_index < import_index

@@ -183,9 +183,23 @@ impl SessionStore {
         value: Option<ServiceTier>,
     ) -> Result<UserSessionState> {
         self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.settings.service_tier = value;
-            Ok(user.clone())
+            let (snapshot, cached_profile) = {
+                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                if user.foreground.is_temporary() {
+                    user.settings.service_tier = value;
+                } else {
+                    let profile = user
+                        .foreground
+                        .profile
+                        .get_or_insert_with(DialogProfile::default);
+                    profile.service_tier = value;
+                }
+                let snapshot = user.clone();
+                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
+                (snapshot, cached_profile)
+            };
+            persist_cached_profile(state, cached_profile);
+            Ok(snapshot)
         })
         .await
     }
@@ -1846,9 +1860,13 @@ mod tests {
             Some("low")
         );
         assert_eq!(snapshot.settings.context_mode, Some(ContextMode::Standard));
-        assert_eq!(snapshot.settings.service_tier, Some(ServiceTier::Fast));
+        // The user-level service_tier stays at Flex because the foreground
+        // dialog is saved → `/fast` writes into the per-session profile,
+        // not the user-wide default.
+        assert_eq!(snapshot.settings.service_tier, Some(ServiceTier::Flex));
         assert_eq!(profile.model_override.as_deref(), Some("gpt-dialog"));
         assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(profile.service_tier, Some(ServiceTier::Fast));
         assert_eq!(profile.context_mode, Some(ContextMode::OneM));
 
         let cached = store

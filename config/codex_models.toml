@@ -17,10 +17,16 @@
 # convenient without broad substring matching that often becomes ambiguous.
 
 [[models]]
+name = "gpt-5.5"
+aliases = ["5.5", "55"]
+description_zh = "最新旗舰通用模型，整体能力优先"
+description_en = "Latest flagship general-purpose model, optimized for overall capability"
+
+[[models]]
 name = "gpt-5.4"
 aliases = ["5.4", "54"]
-description_zh = "目前最先进的通用型模型"
-description_en = "Most capable general-purpose model currently available"
+description_zh = "上一代旗舰通用模型，稳定可靠"
+description_en = "Previous flagship general-purpose model with strong reliability"
 
 [[models]]
 name = "gpt-5.4-mini"

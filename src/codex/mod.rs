@@ -1,3 +1,4 @@
+pub mod app_server;
 pub mod compact;
 pub mod config_snapshot;
 pub mod events;

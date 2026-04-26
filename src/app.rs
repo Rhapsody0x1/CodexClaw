@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -9,19 +10,27 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use rust_i18n::t;
 
 use crate::{
     codex::{
+        app_server::{
+            ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, FileChangeApprovalEvent,
+            PermissionsApprovalEvent,
+        },
         compact,
-        executor::{CodexExecutor, ExecutionRequest},
+        executor::{CodexExecutor, CompactRequest, ExecutionRequest},
         output::{Directive, parse_output},
         prompt::build_prompt,
-        runtime::read_codex_runtime_profile_from_path,
+        runtime::{
+            read_codex_runtime_profile_from_path, write_context_mode_to_config_path,
+            write_model_to_config_path, write_reasoning_effort_to_config_path,
+            write_service_tier_to_config_path,
+        },
     },
-    commands::{CommandOutcome, CommandReply, maybe_handle_command},
+    commands::{ApprovalIntent, CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
     memory::{inject as memory_inject, store::MemoryStore},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
@@ -33,7 +42,10 @@ use crate::{
     },
     self_update,
     session::{
-        state::{ContextMode, DialogProfile, SessionState, TokenUsageSnapshot},
+        state::{
+            ContextMode, DialogProfile, ServiceTier, SessionState, TokenUsageSnapshot,
+            UserSessionState,
+        },
         store::SessionStore,
     },
     shadow::{ShadowContext, ShadowWorker},
@@ -50,6 +62,21 @@ pub struct App {
     pub shadow: Option<Arc<ShadowWorker>>,
     busy: AtomicBool,
     active_turn: Mutex<Option<oneshot::Sender<()>>>,
+    /// The QQ openid whose turn currently holds `busy`. Used to route
+    /// server-initiated approval requests to the right user.
+    active_openid: Mutex<Option<ActiveTurnContext>>,
+    /// Queued approval decisions awaiting user reply. FIFO per openid.
+    pending_approvals: Mutex<HashMap<String, VecDeque<PendingApprovalEntry>>>,
+}
+
+#[derive(Clone)]
+struct ActiveTurnContext {
+    openid: String,
+    reply_message_id: String,
+}
+
+enum PendingApprovalEntry {
+    Outcome(oneshot::Sender<ApprovalOutcome>),
 }
 
 impl App {
@@ -60,8 +87,8 @@ impl App {
         codex: Arc<CodexExecutor>,
         memory: Arc<MemoryStore>,
         shadow: Option<Arc<ShadowWorker>>,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        let app = Arc::new(Self {
             config,
             session,
             qq_client,
@@ -70,7 +97,106 @@ impl App {
             shadow,
             busy: AtomicBool::new(false),
             active_turn: Mutex::new(None),
+            active_openid: Mutex::new(None),
+            pending_approvals: Mutex::new(HashMap::new()),
+        });
+        app.clone().install_approval_handler();
+        app
+    }
+
+    /// Wire the approval broker to forward requests into our QQ prompt +
+    /// pending-approval queue.
+    fn install_approval_handler(self: Arc<Self>) {
+        let (tx, mut rx) = mpsc::channel::<ApprovalRequest>(32);
+        let broker = self.codex.handle().approvals.clone();
+        tokio::spawn(async move {
+            broker.install_handler(tx).await;
+        });
+        let app_for_loop = self.clone();
+        tokio::spawn(async move {
+            while let Some(request) = rx.recv().await {
+                app_for_loop.clone().route_approval_request(request).await;
+            }
+        });
+    }
+
+    async fn route_approval_request(self: Arc<Self>, request: ApprovalRequest) {
+        let Some(ctx) = self.active_openid.lock().await.clone() else {
+            // No active turn owner — decline so the server can proceed.
+            warn!("approval request arrived with no active turn owner; declining");
+            decline_approval_request(request);
+            return;
+        };
+        let openid = ctx.openid.clone();
+        let reply_id = ctx.reply_message_id.clone();
+        match request {
+            ApprovalRequest::Command { event, reply } => {
+                let prompt = format_command_approval(&event, &openid);
+                self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
+                    .await;
+            }
+            ApprovalRequest::FileChange { event, reply } => {
+                let prompt = format_file_change_approval(&event);
+                self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
+                    .await;
+            }
+            ApprovalRequest::Permissions { event, reply } => {
+                let prompt = format_permissions_approval(&event);
+                self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
+                    .await;
+            }
+            ApprovalRequest::Elicitation { event, reply } => {
+                // MCP elicitations are free-form — out of scope for MVP.
+                warn!(
+                    thread_id = %event.thread_id,
+                    server = event.server.as_deref().unwrap_or(""),
+                    "MCP elicitation received; auto-declining (not yet wired to QQ)"
+                );
+                let _ = reply.send(None);
+            }
         }
+    }
+
+    async fn enqueue_outcome(
+        self: Arc<Self>,
+        openid: String,
+        reply_message_id: String,
+        prompt: String,
+        tx: oneshot::Sender<ApprovalOutcome>,
+    ) {
+        let mut guard = self.pending_approvals.lock().await;
+        let slot = guard.entry(openid.clone()).or_default();
+        slot.push_back(PendingApprovalEntry::Outcome(tx));
+        drop(guard);
+        if let Err(err) = self
+            .qq_client
+            .send_text(&openid, &reply_message_id, &prompt, Some(&reply_message_id))
+            .await
+        {
+            warn!(error = %err, openid = %openid, "failed to deliver approval prompt to QQ");
+        }
+    }
+
+    /// Resolve the oldest pending approval for `openid` with `intent`.
+    /// Returns `true` if a pending approval was resolved; `false` if there
+    /// was none (caller should tell the user).
+    async fn resolve_pending_approval(&self, openid: &str, intent: ApprovalIntent) -> bool {
+        let mut guard = self.pending_approvals.lock().await;
+        let Some(queue) = guard.get_mut(openid) else {
+            return false;
+        };
+        let Some(entry) = queue.pop_front() else {
+            return false;
+        };
+        let PendingApprovalEntry::Outcome(tx) = entry;
+        let outcome = match intent {
+            ApprovalIntent::Accept => ApprovalOutcome::Accept,
+            ApprovalIntent::AcceptForSession => ApprovalOutcome::AcceptForSession,
+            ApprovalIntent::Decline => ApprovalOutcome::Decline,
+            ApprovalIntent::Cancel => ApprovalOutcome::Cancel,
+        };
+        let _ = tx.send(outcome);
+        true
     }
 
     pub async fn handle_c2c_event(&self, event: C2CMessageEvent) -> Result<()> {
@@ -145,6 +271,154 @@ impl App {
                 .await?;
                 return Ok(());
             }
+            CommandOutcome::SetGlobalModel(value) => {
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let profile_path = self.runtime_profile_path();
+                write_model_to_config_path(&profile_path, value.as_deref())?;
+                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
+                let effective_model = updated_profile
+                    .configured_model
+                    .unwrap_or_else(|| self.config.general.default_model.clone());
+                let msg = t!(
+                    "commands.model.updated",
+                    model = effective_model,
+                    locale = lang.as_str()
+                )
+                .into_owned();
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::SetGlobalReasoning(value) => {
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let profile_path = self.runtime_profile_path();
+                write_reasoning_effort_to_config_path(&profile_path, value)?;
+                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
+                let effective_reasoning = updated_profile
+                    .reasoning_effort
+                    .unwrap_or(self.config.general.default_reasoning_effort)
+                    .as_str();
+                let msg = t!(
+                    "commands.reasoning.updated",
+                    value = effective_reasoning,
+                    locale = lang.as_str()
+                )
+                .into_owned();
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::SetGlobalFast(value) => {
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let profile_path = self.runtime_profile_path();
+                write_service_tier_to_config_path(&profile_path, value)?;
+                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
+                let msg = t!(
+                    "commands.fast.updated",
+                    value = global_fast_label(updated_profile.service_tier),
+                    locale = lang.as_str()
+                )
+                .into_owned();
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::SetGlobalContext(value) => {
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let profile_path = self.runtime_profile_path();
+                write_context_mode_to_config_path(&profile_path, value)?;
+                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
+                let msg = t!(
+                    "commands.context.updated",
+                    value = global_context_label(updated_profile.context_mode),
+                    locale = lang.as_str()
+                )
+                .into_owned();
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            CommandOutcome::Approval(intent) => {
+                let resolved = self
+                    .resolve_pending_approval(&normalized.sender_openid, intent)
+                    .await;
+                let zh = self
+                    .session
+                    .snapshot_for_user(&normalized.sender_openid)
+                    .await
+                    .ok()
+                    .map(|snap| snap.settings.language.starts_with("zh"))
+                    .unwrap_or(true);
+                let msg = if resolved {
+                    match intent {
+                        ApprovalIntent::Accept => {
+                            if zh {
+                                "已放行本次请求。"
+                            } else {
+                                "approval granted."
+                            }
+                        }
+                        ApprovalIntent::AcceptForSession => {
+                            if zh {
+                                "已放行本次请求，后续类似命令将自动放行。"
+                            } else {
+                                "approval granted; similar commands will be auto-approved."
+                            }
+                        }
+                        ApprovalIntent::Decline => {
+                            if zh {
+                                "已拒绝本次请求。"
+                            } else {
+                                "approval declined."
+                            }
+                        }
+                        ApprovalIntent::Cancel => {
+                            if zh {
+                                "已拒绝并要求终止当前回合。"
+                            } else {
+                                "declined and asked codex to abort the turn."
+                            }
+                        }
+                    }
+                } else if zh {
+                    "当前没有待处理的审批请求。"
+                } else {
+                    "no pending approval to respond to."
+                };
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
             CommandOutcome::Continue => {}
         }
 
@@ -165,7 +439,28 @@ impl App {
             return Ok(());
         }
 
+        *self.active_openid.lock().await = Some(ActiveTurnContext {
+            openid: normalized.sender_openid.clone(),
+            reply_message_id: normalized.message_id.clone(),
+        });
+        let openid_for_cleanup = normalized.sender_openid.clone();
         let result = self.run_turn(normalized, runtime_profile).await;
+        // Clear active-turn state + drop any pending approval queue the
+        // turn left behind (so a later `/approve` doesn't resolve against
+        // a completed turn).
+        *self.active_openid.lock().await = None;
+        {
+            let mut guard = self.pending_approvals.lock().await;
+            if let Some(queue) = guard.remove(&openid_for_cleanup) {
+                if !queue.is_empty() {
+                    debug!(
+                        openid = %openid_for_cleanup,
+                        dropped = queue.len(),
+                        "dropping pending approvals after turn completion"
+                    );
+                }
+            }
+        }
         self.busy.store(false, Ordering::SeqCst);
         result
     }
@@ -179,9 +474,7 @@ impl App {
             .session
             .snapshot_for_user(&message.sender_openid)
             .await?;
-        let effective_settings = user_snapshot
-            .settings
-            .merged_with_profile(user_snapshot.foreground.profile.as_ref());
+        let effective_settings = effective_session_settings(&user_snapshot);
         let runtime_state = SessionState {
             session_id: user_snapshot.foreground.session_id.clone(),
             settings: effective_settings.clone(),
@@ -198,9 +491,7 @@ impl App {
             .reasoning_effort
             .or(runtime_profile.reasoning_effort)
             .unwrap_or(self.config.general.default_reasoning_effort);
-        let service_tier = effective_settings
-            .service_tier
-            .or(runtime_profile.service_tier);
+        let service_tier = runtime_profile.service_tier;
         let context_mode = effective_settings
             .context_mode
             .or(runtime_profile.context_mode);
@@ -371,12 +662,37 @@ impl App {
                         .await?;
                 }
 
+                // Plan-mode post-turn: if the planning turn produced a
+                // `<proposed_plan>` block, stash it + prompt the user to
+                // approve it via `/实施`.
+                if effective_settings.plan_mode {
+                    if let Some(plan) = extract_proposed_plan(&output.text) {
+                        let _ = self
+                            .session
+                            .update_settings_for_user(&message.sender_openid, |settings| {
+                                settings.pending_plan = Some(plan.clone());
+                            })
+                            .await;
+                        let lang = effective_settings.language.as_str();
+                        let prompt = build_plan_followup_prompt(lang);
+                        let _ = self
+                            .qq_client
+                            .send_text(
+                                &message.sender_openid,
+                                &message.message_id,
+                                &prompt,
+                                Some(&message.message_id),
+                            )
+                            .await;
+                    }
+                }
+
                 if let Some(worker) = self.shadow.as_ref() {
                     let ctx = ShadowContext {
                         openid: message.sender_openid.clone(),
                         last_user_text: message.text.clone(),
                         last_assistant_text: output.text.clone(),
-                        tool_call_count: 0,
+                        tool_call_count: dispatch_report.tool_call_count,
                         modified_file_count: output.changed_files.len(),
                     };
                     worker.spawn_memory(ctx.clone());
@@ -436,6 +752,15 @@ impl App {
         codex_home.join("config.toml")
     }
 
+    async fn command_locale(&self, openid: &str) -> String {
+        self.session
+            .snapshot_for_user(openid)
+            .await
+            .ok()
+            .map(|snap| snap.settings.language)
+            .unwrap_or_else(|| "zh".to_string())
+    }
+
     fn format_execution_error_message(
         &self,
         err: &anyhow::Error,
@@ -489,12 +814,19 @@ impl App {
                 openid,
                 message_id,
                 &format!(
-                    "已覆盖运行中的二进制：`{}`\n即将退出当前进程。若已配置外部守护服务，将自动重启；否则请手动重新启动。",
+                    "已覆盖运行中的二进制：`{}`\n即将退出当前进程（已通知 codex app-server 关闭）。若已配置外部守护服务，将自动重启；否则请手动重新启动。",
                     running_binary.display()
                 ),
                 Some(message_id),
             )
             .await?;
+        // Gracefully shut down the shared codex app-server child before
+        // exiting — `std::process::exit` skips Drop impls, so `kill_on_drop`
+        // won't fire and the child would otherwise be reparented to init.
+        // A lingering app-server sharing CODEX_HOME with our replacement
+        // process would corrupt SQLite / rollout files.
+        info!("shutting down app-server child before self-update exit");
+        self.codex.handle().shutdown().await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         std::process::exit(0);
         #[allow(unreachable_code)]
@@ -541,9 +873,6 @@ impl App {
         let user_snapshot = self.session.snapshot_for_user(openid).await?;
         let lang = user_snapshot.settings.language.clone();
         let locale = lang.as_str();
-        let effective_settings = user_snapshot
-            .settings
-            .merged_with_profile(user_snapshot.foreground.profile.as_ref());
         let Some(session_id) = user_snapshot.foreground.session_id.clone() else {
             self.qq_client
                 .send_text(
@@ -555,48 +884,6 @@ impl App {
                 .await?;
             return Ok(());
         };
-        if self
-            .session
-            .rollout_path_for_session(&session_id)?
-            .is_none()
-        {
-            self.qq_client
-                .send_text(
-                    openid,
-                    message_id,
-                    &t!("commands.compact.missing_rollout", locale = locale),
-                    Some(message_id),
-                )
-                .await?;
-            return Ok(());
-        }
-
-        let workspace_dir = user_snapshot.foreground.workspace_dir.clone();
-        let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
-        let codex_home = self.session.codex_home().to_path_buf();
-        let effective_model = effective_settings
-            .model_override
-            .clone()
-            .or_else(|| runtime_profile.configured_model.clone())
-            .unwrap_or_else(|| self.config.general.default_model.clone());
-        let reasoning = effective_settings
-            .reasoning_effort
-            .or(runtime_profile.reasoning_effort)
-            .unwrap_or(self.config.general.default_reasoning_effort);
-        let service_tier = effective_settings
-            .service_tier
-            .or(runtime_profile.service_tier);
-        let context_mode = effective_settings
-            .context_mode
-            .or(runtime_profile.context_mode);
-        let runtime_state = SessionState {
-            session_id: Some(session_id.clone()),
-            settings: effective_settings,
-        };
-        let mut add_dirs = vec![self.session.inbox_dir().to_path_buf()];
-        if workspace_dir != shared_workspace_dir {
-            add_dirs.push(shared_workspace_dir);
-        }
         self.qq_client
             .send_text(
                 openid,
@@ -606,21 +893,30 @@ impl App {
             )
             .await?;
 
-        match self
-            .run_session_compaction(
-                openid,
-                &session_id,
-                &workspace_dir,
-                &effective_model,
-                reasoning,
-                service_tier,
-                context_mode,
-                &codex_home,
-                &add_dirs,
-                runtime_state,
-            )
-            .await
-        {
+        let effective_settings = effective_session_settings(&user_snapshot);
+        let effective_model = effective_settings
+            .model_override
+            .clone()
+            .or_else(|| runtime_profile.configured_model.clone())
+            .unwrap_or_else(|| self.config.general.default_model.clone());
+        let reasoning = effective_settings
+            .reasoning_effort
+            .or(runtime_profile.reasoning_effort)
+            .unwrap_or(self.config.general.default_reasoning_effort);
+        let context_mode = effective_settings
+            .context_mode
+            .or(runtime_profile.context_mode);
+        let request = CompactRequest {
+            session_id: session_id.clone(),
+            workspace_dir: user_snapshot.foreground.workspace_dir.clone(),
+            config_overrides: Vec::new(),
+            model: Some(effective_model.clone()),
+            service_tier: runtime_profile.service_tier,
+            context_mode,
+            reasoning_effort: reasoning,
+        };
+
+        match self.run_session_compaction(openid, request).await {
             Ok(()) => {
                 let text = format!(
                     "{}\n\n{}",
@@ -639,7 +935,10 @@ impl App {
                     .send_text(
                         openid,
                         message_id,
-                        &format!("{}: {err}", t!("commands.compact.failed", locale = locale)),
+                        &format!(
+                            "{}: {err:#}",
+                            t!("commands.compact.failed", locale = locale)
+                        ),
                         Some(message_id),
                     )
                     .await?;
@@ -677,57 +976,23 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn run_session_compaction(
-        &self,
-        openid: &str,
-        session_id: &str,
-        workspace_dir: &std::path::Path,
-        effective_model: &str,
-        reasoning: crate::session::state::ReasoningEffort,
-        service_tier: Option<crate::session::state::ServiceTier>,
-        context_mode: Option<crate::session::state::ContextMode>,
-        codex_home: &std::path::Path,
-        add_dirs: &[PathBuf],
-        runtime_state: SessionState,
-    ) -> Result<()> {
-        let Some(rollout_path) = self.session.rollout_path_for_session(session_id)? else {
-            anyhow::bail!("session rollout file not found");
-        };
-        let rollout_snapshot = compact::read_rollout_snapshot(&rollout_path)?;
+    async fn run_session_compaction(&self, openid: &str, request: CompactRequest) -> Result<()> {
         info!(
             openid = %openid,
-            session_id,
-            rollout = %rollout_path.display(),
+            session_id = %request.session_id,
+            model = ?request.model,
+            reasoning = %request.reasoning_effort.as_str(),
+            context_mode = ?request.context_mode,
+            workspace_dir = %request.workspace_dir.display(),
             "triggering codex session compaction"
         );
 
         let compaction = self
             .codex
-            .execute(
-                ExecutionRequest {
-                    prompt: compact::SUMMARIZATION_PROMPT.to_string(),
-                    workspace_dir: workspace_dir.to_path_buf(),
-                    codex_home: codex_home.to_path_buf(),
-                    config_overrides: Vec::new(),
-                    add_dirs: add_dirs.to_vec(),
-                    session_state: runtime_state,
-                    model: Some(effective_model.to_string()),
-                    service_tier,
-                    context_mode,
-                    reasoning_effort: reasoning,
-                    image_paths: Vec::new(),
-                },
-                Some(self.install_active_turn().await),
-                None,
-            )
+            .compact_session(request, Some(self.install_active_turn().await))
             .await;
         self.clear_active_turn().await;
-        let output = compaction?;
-        let parsed = parse_output(&output.text, workspace_dir);
-        let summary_text = compact::build_summary_text(&parsed.text);
-        let replacement_history =
-            compact::build_compacted_history(&rollout_snapshot.user_messages, &summary_text);
-        compact::append_compacted_rollout(&rollout_path, &summary_text, &replacement_history)?;
+        compaction?;
         Ok(())
     }
 
@@ -810,6 +1075,189 @@ fn format_tokens_compact(value: u64) -> String {
         format!("{}K", (value + 500) / 1_000)
     } else {
         value.to_string()
+    }
+}
+
+fn effective_session_settings(
+    snapshot: &UserSessionState,
+) -> crate::session::state::SessionSettings {
+    let mut base = snapshot.settings.clone();
+    base.model_override = None;
+    base.reasoning_effort = None;
+    base.service_tier = None;
+    base.context_mode = None;
+    let profile = if snapshot.foreground.saved {
+        snapshot.foreground.profile.as_ref()
+    } else {
+        None
+    };
+    base.merged_with_profile(profile)
+}
+
+fn global_fast_label(service_tier: Option<ServiceTier>) -> &'static str {
+    match service_tier {
+        Some(ServiceTier::Fast) => "on",
+        Some(ServiceTier::Flex) => "off",
+        None => "inherit",
+    }
+}
+
+fn global_context_label(context_mode: Option<ContextMode>) -> &'static str {
+    match context_mode {
+        Some(ContextMode::Standard) => "272K",
+        Some(ContextMode::OneM) => "1M",
+        None => "inherit",
+    }
+}
+
+fn decline_approval_request(request: ApprovalRequest) {
+    match request {
+        ApprovalRequest::Command { reply, .. } => {
+            let _ = reply.send(ApprovalOutcome::Decline);
+        }
+        ApprovalRequest::FileChange { reply, .. } => {
+            let _ = reply.send(ApprovalOutcome::Decline);
+        }
+        ApprovalRequest::Permissions { reply, .. } => {
+            let _ = reply.send(ApprovalOutcome::Decline);
+        }
+        ApprovalRequest::Elicitation { reply, .. } => {
+            let _ = reply.send(None);
+        }
+    }
+}
+
+fn format_command_approval(event: &CommandApprovalEvent, _openid: &str) -> String {
+    let mut lines = vec!["[审批请求] Codex 想执行 shell 命令".to_string()];
+    if let Some(cmd) = event.command.as_deref() {
+        lines.push("命令：".to_string());
+        lines.push(format!("```shell\n{cmd}\n```"));
+    }
+    if let Some(cwd) = event.cwd.as_deref() {
+        lines.push(format!("目录：`{cwd}`"));
+    }
+    if let Some(reason) = event.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        lines.push(format!("原因：{}", reason.trim()));
+    }
+    lines.push(
+        "——\n/同意            仅本次放行\n/同意本会话      本轮后续同类命令自动放行\n/拒绝            拒绝，Codex 会尝试别的方式\n/取消            拒绝并终止当前回合"
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn format_file_change_approval(event: &FileChangeApprovalEvent) -> String {
+    let mut lines = vec!["[审批请求] Codex 想写入/修改文件".to_string()];
+    if let Some(reason) = event.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        lines.push(format!("原因：{}", reason.trim()));
+    }
+    if let Some(root) = event.grant_root.as_deref() {
+        lines.push(format!("授权目录：`{root}`"));
+    }
+    let summary = summarize_file_changes(&event.file_changes);
+    if !summary.is_empty() {
+        lines.push(format!("变更：{summary}"));
+    }
+    lines.push("——\n/同意 /同意本会话 /拒绝 /取消".to_string());
+    lines.join("\n")
+}
+
+fn format_permissions_approval(event: &PermissionsApprovalEvent) -> String {
+    let mut lines = vec!["[审批请求] Codex 请求权限升级".to_string()];
+    if let Some(reason) = event.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        lines.push(format!("原因：{}", reason.trim()));
+    }
+    let summary = serde_json::to_string(&event.permissions).unwrap_or_default();
+    if !summary.is_empty() && summary != "null" {
+        let trimmed: String = summary.chars().take(400).collect();
+        lines.push(format!("请求：{trimmed}"));
+    }
+    lines.push("——\n/同意 /拒绝 /取消".to_string());
+    lines.join("\n")
+}
+
+fn summarize_file_changes(payload: &serde_json::Value) -> String {
+    // Payload shape is a map of path -> change descriptor or an array.
+    let mut paths: Vec<String> = Vec::new();
+    match payload {
+        serde_json::Value::Object(map) => {
+            for (k, _) in map.iter().take(6) {
+                paths.push(k.clone());
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for entry in arr.iter().take(6) {
+                if let Some(p) = entry.get("path").and_then(|v| v.as_str()) {
+                    paths.push(p.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    if paths.is_empty() {
+        return String::new();
+    }
+    paths.join(", ")
+}
+
+/// Pull a `<proposed_plan>...</proposed_plan>` block out of a plan-mode turn's
+/// final output. Tolerates extra whitespace and unwrapped code fences.
+pub fn extract_proposed_plan(text: &str) -> Option<String> {
+    const OPEN: &str = "<proposed_plan>";
+    const CLOSE: &str = "</proposed_plan>";
+    let start = text.find(OPEN)? + OPEN.len();
+    let relative_end = text[start..].find(CLOSE)?;
+    let plan = text[start..start + relative_end].trim();
+    if plan.is_empty() {
+        None
+    } else {
+        Some(plan.to_string())
+    }
+}
+
+/// Follow-up QQ prompt shown after a plan-mode turn emits a `<proposed_plan>`
+/// block.
+pub fn build_plan_followup_prompt(lang: &str) -> String {
+    let zh = lang.starts_with("zh");
+    if zh {
+        "Codex 已生成执行计划。接下来请选择：\n\
+         /实施          退出 Plan 模式并按此计划执行\n\
+         /继续规划      保持 Plan 模式，继续打磨\n\
+         /取消计划      丢弃此计划"
+            .to_string()
+    } else {
+        "Codex produced an execution plan. Next step:\n\
+         /execute-plan   leave plan mode and run the plan\n\
+         /keep-planning  stay in plan mode and refine\n\
+         /cancel-plan    discard the plan"
+            .to_string()
+    }
+}
+
+#[cfg(test)]
+mod plan_followup_tests {
+    use super::extract_proposed_plan;
+
+    #[test]
+    fn extracts_plan_block() {
+        let text = "Intro text\n<proposed_plan>\n1. Do X\n2. Do Y\n</proposed_plan>\nOutro";
+        assert_eq!(
+            extract_proposed_plan(text).as_deref(),
+            Some("1. Do X\n2. Do Y")
+        );
+    }
+
+    #[test]
+    fn returns_none_without_block() {
+        assert_eq!(extract_proposed_plan("no plan here"), None);
+    }
+
+    #[test]
+    fn returns_none_for_empty_block() {
+        assert_eq!(
+            extract_proposed_plan("<proposed_plan>   \n</proposed_plan>"),
+            None
+        );
     }
 }
 

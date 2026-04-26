@@ -81,6 +81,49 @@ impl ServiceTier {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+pub enum ApprovalPolicySetting {
+    UnlessTrusted,
+    OnRequest,
+    Never,
+}
+
+impl ApprovalPolicySetting {
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "never" | "off" | "关" | "关闭" => Some(Self::Never),
+            "on-request" | "on" | "开" | "开启" | "ask" => Some(Self::OnRequest),
+            "unless-trusted" | "strict" | "严格" => Some(Self::UnlessTrusted),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnlessTrusted => "unless-trusted",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
+        }
+    }
+
+    pub fn label_zh(self) -> &'static str {
+        match self {
+            Self::UnlessTrusted => "严格（unless-trusted）",
+            Self::OnRequest => "按需（on-request）",
+            Self::Never => "关闭（never）",
+        }
+    }
+
+    pub fn label_en(self) -> &'static str {
+        match self {
+            Self::UnlessTrusted => "unless-trusted",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum ContextMode {
     Standard,
     #[serde(rename = "1m")]
@@ -131,6 +174,10 @@ pub struct SessionSettings {
     pub verbose: bool,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub approval_policy_override: Option<ApprovalPolicySetting>,
+    #[serde(default)]
+    pub pending_plan: Option<String>,
     #[serde(default = "default_language")]
     pub language: String,
 }
@@ -148,6 +195,8 @@ impl Default for SessionSettings {
             context_mode: None,
             verbose: false,
             plan_mode: false,
+            approval_policy_override: None,
+            pending_plan: None,
             language: default_language(),
         }
     }
@@ -164,6 +213,9 @@ impl SessionSettings {
         }
         if profile.reasoning_effort.is_some() {
             merged.reasoning_effort = profile.reasoning_effort;
+        }
+        if profile.service_tier.is_some() {
+            merged.service_tier = profile.service_tier;
         }
         if profile.context_mode.is_some() {
             merged.context_mode = profile.context_mode;
@@ -370,6 +422,8 @@ pub enum PendingSetting {
         #[serde(default)]
         alias: Option<String>,
     },
+    Approvals,
+    Plan,
 }
 
 impl PendingSetting {
@@ -452,6 +506,20 @@ impl PendingSetting {
                     "/载入后台"
                 } else {
                     "/loadbg"
+                }
+            }
+            Approvals => {
+                if zh {
+                    "/审批"
+                } else {
+                    "/approvals"
+                }
+            }
+            Plan => {
+                if zh {
+                    "/计划"
+                } else {
+                    "/plan"
                 }
             }
         }
