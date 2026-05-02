@@ -321,13 +321,15 @@ mod tests {
     fn resolve_program_falls_back_to_home_cargo_bin() {
         let home = tempdir().unwrap();
         let cargo_dir = home.path().join(".cargo/bin");
+        let path_dir = home.path().join("empty-path");
         std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
         let cargo_path = cargo_dir.join("cargo");
         std::fs::write(&cargo_path, "#!/bin/sh\n").unwrap();
 
         let resolved = resolve_program_from_env(
             "cargo",
-            Some(&OsString::from("/usr/bin")),
+            Some(&path_dir.into_os_string()),
             Some(home.path()),
         );
 

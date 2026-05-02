@@ -7,7 +7,9 @@ pub mod config;
 pub mod message;
 pub mod qq;
 pub mod self_update;
+pub mod scheduler;
 pub mod session;
+pub mod time;
 
 pub fn normalize_lang(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
