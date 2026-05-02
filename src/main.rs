@@ -6,6 +6,7 @@ use codex_claw::{
     codex::{config_snapshot, executor::CodexExecutor},
     config::AppConfig,
     qq::{api::QqApiClient, gateway},
+    scheduler,
     session::store::SessionStore,
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -55,6 +56,8 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     ));
     let app = Arc::new(App::new(config, session, qq_client, codex));
     gateway::spawn_gateway(app.clone());
+    scheduler::spawn_daily_408_scheduler(app.clone());
+    scheduler::spawn_one_shot_push_scheduler(app.clone());
     pending::<()>().await;
     Ok(())
 }

@@ -483,6 +483,10 @@ pub struct UserSessionState {
     pub command_aliases: BTreeMap<String, CommandAlias>,
     #[serde(default)]
     pub pending_setting: Option<PendingSetting>,
+    #[serde(default)]
+    pub daily_408: Daily408Config,
+    #[serde(default)]
+    pub one_shot_push: Option<OneShotPushConfig>,
 }
 
 impl UserSessionState {
@@ -500,8 +504,48 @@ impl UserSessionState {
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
             pending_setting: None,
+            daily_408: Daily408Config::default(),
+            one_shot_push: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OneShotPushConfig {
+    pub trigger_at: chrono::DateTime<chrono::Utc>,
+    pub expires_on: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Daily408Config {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_daily_408_hour")]
+    pub hour: u8,
+    #[serde(default = "default_daily_408_note_dir")]
+    pub note_dir: PathBuf,
+    #[serde(default)]
+    pub last_pushed_on: Option<String>,
+}
+
+impl Default for Daily408Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hour: default_daily_408_hour(),
+            note_dir: default_daily_408_note_dir(),
+            last_pushed_on: None,
+        }
+    }
+}
+
+fn default_daily_408_hour() -> u8 {
+    8
+}
+
+fn default_daily_408_note_dir() -> PathBuf {
+    PathBuf::from("/root/note408")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

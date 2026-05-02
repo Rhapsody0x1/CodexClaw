@@ -1,7 +1,8 @@
-use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
+use std::{collections::BTreeMap, future::Future, path::Path, path::PathBuf, pin::Pin};
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
+use rand::seq::SliceRandom;
 use rust_i18n::t;
 
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
         },
         store::{DiskSessionMeta, SessionListScope, SessionStore},
     },
+    time::{beijing_tz, now_in_beijing, server_local_time_for_beijing_hour},
 };
 
 const MAX_ALIAS_DEPTH: usize = 3;
@@ -41,6 +43,10 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "interrupt",
     "compact",
     "self-update",
+    "408daily",
+    "pushonce",
+    "每日408",
+    "单次推送",
     "alias",
     "back",
     // Chinese aliases also protected
@@ -65,12 +71,12 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "中断",
     "压缩",
     "自更新",
+    "每日408",
     "详细",
     "重命名",
 ];
 
 const PROJECT_KEY_SEP: char = '\u{1f}';
-
 #[derive(Debug, Clone)]
 pub struct CommandReply {
     pub text: String,
@@ -141,6 +147,29 @@ fn maybe_handle_command_inner<'a>(
                     runtime_profile,
                 )
                 .await;
+            }
+            if let Some(minutes) = detect_one_shot_push_minutes(text) {
+                let default_message = if text.contains("408") {
+                    match build_408_one_shot_message(Path::new("/root/note408")).await? {
+                        Some(message) => message,
+                        None => {
+                            if locale == "zh" {
+                                "408 单次推送：未在 /root/note408 找到可解析题目，请放入 .md/.txt 题库。".to_string()
+                            } else {
+                                "408 one-shot push: no parseable questions in /root/note408 (.md/.txt expected).".to_string()
+                            }
+                        }
+                    }
+                } else {
+                    if locale == "zh" {
+                        "一次性推送测试：这条消息由 CodexClaw 项目内置定时推送发送。".to_string()
+                    } else {
+                        "One-shot push test from CodexClaw's built-in scheduler.".to_string()
+                    }
+                };
+                let minutes_string = minutes.to_string();
+                let args = [minutes_string.as_str(), default_message.as_str()];
+                return handle_pushonce(&args, openid, session).await;
             }
             return Ok(CommandOutcome::Continue);
         }
@@ -353,6 +382,8 @@ fn maybe_handle_command_inner<'a>(
             )),
             "/compact" => Ok(CommandOutcome::Compact),
             "/self-update" => Ok(CommandOutcome::SelfUpdate),
+            "/408daily" => handle_daily_408(&rest, openid, session).await,
+            "/pushonce" => handle_pushonce(&rest, openid, session).await,
             "/alias" => handle_alias(&rest, openid, session).await,
             other => {
                 let alias_name = other.trim_start_matches('/').to_ascii_lowercase();
@@ -382,6 +413,189 @@ fn maybe_handle_command_inner<'a>(
             Ok(outcome)
         }
     })
+}
+
+fn detect_one_shot_push_minutes(text: &str) -> Option<i64> {
+    let lowered = text.trim().to_ascii_lowercase();
+    let has_push_intent = text.contains("推送")
+        || text.contains("提醒")
+        || lowered.contains("push")
+        || lowered.contains("remind");
+    if !has_push_intent {
+        return None;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    for idx in 0..chars.len() {
+        if !chars[idx].is_ascii_digit() {
+            continue;
+        }
+        let start = idx;
+        let mut end = idx;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        let number: String = chars[start..end].iter().collect();
+        let Ok(minutes) = number.parse::<i64>() else {
+            continue;
+        };
+        if !(1..=720).contains(&minutes) {
+            continue;
+        }
+        let tail: String = chars[end..].iter().take(8).collect();
+        if tail.contains("分钟后")
+            || tail.contains("分钟之后")
+            || tail.contains("分钟以后")
+            || tail.contains("分钟内")
+            || tail.to_ascii_lowercase().contains("min")
+        {
+            return Some(minutes);
+        }
+    }
+    None
+}
+
+async fn build_408_one_shot_message(note_dir: &Path) -> Result<Option<String>> {
+    let files = collect_text_files(note_dir).await?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut blocks = Vec::new();
+    for path in files {
+        let raw = match tokio::fs::read_to_string(&path).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        blocks.extend(extract_question_blocks(&raw));
+    }
+    if blocks.is_empty() {
+        return Ok(None);
+    }
+    let mut rng = rand::thread_rng();
+    let picked = blocks.choose(&mut rng).cloned();
+    Ok(picked.map(|q| format!("408 单次测试题（操作系统）\n\n{q}\n\n请回复你的答案（如 A）和理由。")))
+}
+
+async fn collect_text_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            let ext = ext.to_ascii_lowercase();
+            if ext == "md" || ext == "txt" {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn extract_question_blocks(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = Vec::new();
+    let mut saw_option = false;
+
+    for line in raw.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if is_question_start_line(line) {
+            push_question_block(&mut out, &mut current, saw_option);
+            current.push(line.to_string());
+            saw_option = false;
+            continue;
+        }
+        if current.is_empty() {
+            continue;
+        }
+        if is_question_noise_line(line) {
+            continue;
+        }
+        if is_option_line(line) {
+            saw_option = true;
+            current.push(line.to_string());
+            continue;
+        }
+        if is_section_boundary(line) {
+            push_question_block(&mut out, &mut current, saw_option);
+            saw_option = false;
+            continue;
+        }
+        current.push(line.to_string());
+    }
+
+    push_question_block(&mut out, &mut current, saw_option);
+    out
+}
+
+fn push_question_block(out: &mut Vec<String>, current: &mut Vec<String>, saw_option: bool) {
+    if current.is_empty() || !saw_option {
+        current.clear();
+        return;
+    }
+    let block = current.join("\n");
+    if (20..=1200).contains(&block.len()) {
+        out.push(block);
+    }
+    current.clear();
+}
+
+fn is_question_start_line(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut saw_digit = false;
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            chars.next();
+            continue;
+        }
+        break;
+    }
+    if !saw_digit {
+        return false;
+    }
+    matches!(chars.next(), Some('.' | '、'))
+}
+
+fn is_option_line(line: &str) -> bool {
+    let mut chars = line.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('A' | 'B' | 'C' | 'D'), Some('.' | '、' | ' '))
+    )
+}
+
+fn is_question_noise_line(line: &str) -> bool {
+    line.starts_with("--- 第 ")
+        || line.starts_with('#')
+        || line.starts_with("- [")
+        || line == "目录"
+        || line.starts_with("闲鱼:")
+        || line.contains("做题本")
+}
+
+fn is_section_boundary(line: &str) -> bool {
+    line.starts_with("## ")
+        || line.starts_with("### ")
+        || line.starts_with("第") && line.contains("章")
 }
 
 fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutcome {
@@ -878,6 +1092,199 @@ async fn handle_new(
         text: format!("{parked}{}", lines.join("\n")),
     }))
 }
+
+async fn handle_daily_408(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = normalize_lang(&snapshot.settings.language);
+    let cfg = session.get_daily_408_config(openid).await?;
+
+    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+        let enabled = if cfg.enabled {
+            if lang == "zh" { "已开启" } else { "on" }
+        } else if lang == "zh" {
+            "已关闭"
+        } else {
+            "off"
+        };
+        let local_equiv = server_local_time_for_beijing_hour(cfg.hour);
+        let text = if lang == "zh" {
+            format!(
+                "408 每日推送状态：{enabled}\n触发时间：每天 {:02}:00（北京时间，UTC+8）\n当前服务器本地对应时间：{:02}:00（{}，仅供参考，会随夏令时变化）\n调度规则：始终按北京时间计算，不按服务器本地时区\n题库目录：{}\n\n用法：/408daily on [小时] | /408daily off | /408daily status",
+                cfg.hour,
+                local_equiv.hour(),
+                local_equiv.format("%Z"),
+                cfg.note_dir.display()
+            )
+        } else {
+            format!(
+                "408 daily push: {enabled}\nTrigger time: {:02}:00 (Beijing time, UTC+8)\nCurrent server-local equivalent: {:02}:00 ({}, for reference only; may change with DST)\nScheduling rule: always interpreted in Beijing time, not server local time\nQuestion bank: {}\n\nUsage: /408daily on [hour] | /408daily off | /408daily status",
+                cfg.hour,
+                local_equiv.hour(),
+                local_equiv.format("%Z"),
+                cfg.note_dir.display()
+            )
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    }
+
+    let next = match args[0].to_ascii_lowercase().as_str() {
+        "on" | "enable" | "enabled" | "start" => Some(true),
+        "off" | "disable" | "disabled" | "stop" => Some(false),
+        _ => None,
+    };
+    let Some(enabled) = next else {
+        let text = if lang == "zh" {
+            "用法：/408daily on [小时] | /408daily off | /408daily status".to_string()
+        } else {
+            "Usage: /408daily on [hour] | /408daily off | /408daily status".to_string()
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    };
+
+    let mut final_hour = cfg.hour;
+    if enabled && let Some(raw_hour) = args.get(1) {
+        let parsed = raw_hour.parse::<u8>().ok().filter(|value| *value <= 23);
+        let Some(hour) = parsed else {
+            let text = if lang == "zh" {
+                "小时必须是 0-23 的整数，例如：/408daily on 21".to_string()
+            } else {
+                "Hour must be an integer in 0-23, e.g. /408daily on 21".to_string()
+            };
+            return Ok(CommandOutcome::Reply(CommandReply { text }));
+        };
+        session.set_daily_408_hour(openid, hour).await?;
+        final_hour = hour;
+    }
+
+    session.set_daily_408_enabled(openid, enabled).await?;
+    let local_equiv = server_local_time_for_beijing_hour(final_hour);
+    let text = if lang == "zh" {
+        if enabled {
+            format!(
+                "已开启 408 每日推送：每天 {:02}:00（北京时间，UTC+8）自动推送一题。\n当前服务器本地对应时间：{:02}:00（{}，仅供参考，会随夏令时变化）。",
+                final_hour,
+                local_equiv.hour(),
+                local_equiv.format("%Z")
+            )
+        } else {
+            "已关闭 408 每日推送。".to_string()
+        }
+    } else if enabled {
+        format!(
+            "Enabled 408 daily push at {:02}:00 (Beijing time, UTC+8).\nCurrent server-local equivalent: {:02}:00 ({}, for reference only; may change with DST).",
+            final_hour,
+            local_equiv.hour(),
+            local_equiv.format("%Z")
+        )
+    } else {
+        "Disabled 408 daily push.".to_string()
+    };
+    Ok(CommandOutcome::Reply(CommandReply { text }))
+}
+
+async fn handle_pushonce(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = normalize_lang(&snapshot.settings.language);
+
+    if args.is_empty() || args[0].eq_ignore_ascii_case("status") {
+        let cfg = session.get_one_shot_push(openid).await?;
+        let text = match cfg {
+            Some(cfg) => {
+                let local_time = cfg.trigger_at.with_timezone(&beijing_tz());
+                if lang == "zh" {
+                    format!(
+                        "一次性推送已设置：\n触发时间（北京时间）：{}\n当天有效期（北京时间日期）：{}\n内容：{}",
+                        local_time.format("%Y-%m-%d %H:%M:%S"),
+                        cfg.expires_on,
+                        cfg.message
+                    )
+                } else {
+                    format!(
+                        "One-shot push is set:\nTrigger time (Beijing, UTC+8): {}\nExpires on (Beijing date): {}\nMessage: {}",
+                        local_time.format("%Y-%m-%d %H:%M:%S"),
+                        cfg.expires_on,
+                        cfg.message
+                    )
+                }
+            }
+            None => {
+                if lang == "zh" {
+                    "当前没有一次性推送任务。".to_string()
+                } else {
+                    "No one-shot push task is set.".to_string()
+                }
+            }
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    }
+
+    if args[0].eq_ignore_ascii_case("off") || args[0].eq_ignore_ascii_case("cancel") {
+        session.set_one_shot_push(openid, None).await?;
+        let text = if lang == "zh" {
+            "已取消一次性推送任务。".to_string()
+        } else {
+            "Canceled one-shot push task.".to_string()
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    }
+
+    let minutes = args[0].parse::<i64>().ok().filter(|v| *v > 0 && *v <= 720);
+    let Some(minutes) = minutes else {
+        let text = if lang == "zh" {
+            "用法：/pushonce 分钟 消息\n示例：/pushonce 5 五分钟后提醒我检查部署\n可用：/pushonce status | /pushonce off".to_string()
+        } else {
+            "Usage: /pushonce <minutes> <message>\nExample: /pushonce 5 remind me to check deployment\nAlso: /pushonce status | /pushonce off".to_string()
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    };
+
+    let message = args[1..].join(" ").trim().to_string();
+    if message.is_empty() {
+        let text = if lang == "zh" {
+            "请提供推送内容。示例：/pushonce 5 五分钟后提醒我".to_string()
+        } else {
+            "Please provide message content. Example: /pushonce 5 remind me in five minutes"
+                .to_string()
+        };
+        return Ok(CommandOutcome::Reply(CommandReply { text }));
+    }
+
+    let now_local = now_in_beijing();
+    let trigger_local = now_local + Duration::minutes(minutes);
+    let expires_on = now_local.format("%Y-%m-%d").to_string();
+    let cfg = crate::session::state::OneShotPushConfig {
+        trigger_at: trigger_local.with_timezone(&Utc),
+        expires_on: expires_on.clone(),
+        message: message.clone(),
+    };
+    session.set_one_shot_push(openid, Some(cfg)).await?;
+
+    let text = if lang == "zh" {
+        format!(
+            "已创建一次性推送：{} 分钟后发送。\n触发时间（北京时间）：{}\n有效期：仅 {} 当天（北京时间日期）。",
+            minutes,
+            trigger_local.format("%Y-%m-%d %H:%M:%S"),
+            expires_on
+        )
+    } else {
+        format!(
+            "One-shot push created for {} minutes later.\nTrigger time (Beijing, UTC+8): {}\nValid on (Beijing date): {} only.",
+            minutes,
+            trigger_local.format("%Y-%m-%d %H:%M:%S"),
+            expires_on
+        )
+    };
+    Ok(CommandOutcome::Reply(CommandReply { text }))
+}
+
 
 async fn handle_bg(
     args: &[&str],
@@ -2041,6 +2448,8 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/中断" => "/interrupt",
         "/压缩" => "/compact",
         "/自更新" => "/self-update",
+        "/每日408" => "/408daily",
+        "/单次推送" => "/pushonce",
         "/重命名" => "/rename",
         "/返回" => "/back",
         other => other,
@@ -2132,6 +2541,17 @@ fn help_text(lang: &str) -> String {
         t!("commands.help.entry_alias", locale = lang).into_owned(),
         t!("commands.help.entry_verbose", locale = lang).into_owned(),
         t!("commands.help.entry_self_update", locale = lang).into_owned(),
+        if lang == "zh" {
+            "- 🧠 `/408daily on|off|status` - 开关每天 08:00 的 408 操作系统题推送".to_string()
+        } else {
+            "- 🧠 `/408daily on|off|status` - toggle daily 08:00 OS question push".to_string()
+        },
+        if lang == "zh" {
+            "- 🧠 `/pushonce 分钟 消息` - 创建一次性推送（仅当天有效）".to_string()
+        } else {
+            "- 🧠 `/pushonce <minutes> <message>` - create one-shot push (today only)"
+                .to_string()
+        },
     ];
     lines.join("\n")
 }
@@ -3592,7 +4012,9 @@ mod tests {
         },
     };
 
-    use super::{CommandOutcome, maybe_handle_command};
+    use super::{
+        CommandOutcome, detect_one_shot_push_minutes, extract_question_blocks, maybe_handle_command,
+    };
 
     #[tokio::test]
     async fn new_command_keeps_settings() {
@@ -3663,8 +4085,7 @@ mod tests {
             panic!("expected reply");
         };
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
-        let expected =
-            std::fs::canonicalize(data.path().join("session/workspace/custom folder")).unwrap();
+        let expected = std::fs::canonicalize(workspace_root.path().join("custom folder")).unwrap();
         assert_eq!(snapshot.foreground.workspace_dir, expected);
         assert!(reply.text.to_lowercase().contains("workdir"));
         assert!(reply.text.contains("custom folder"));
@@ -3854,6 +4275,72 @@ mod tests {
         assert!(matches!(outcome, CommandOutcome::StopCurrent(_)));
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(snapshot.foreground.session_id.is_none());
+    }
+
+    #[test]
+    fn detect_one_shot_push_minutes_accepts_minute_after_variants() {
+        assert_eq!(
+            detect_one_shot_push_minutes("1分钟之后给我推送一次408每日一题，只今天有效"),
+            Some(1)
+        );
+        assert_eq!(
+            detect_one_shot_push_minutes("2分钟以后提醒我检查部署"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn extract_question_blocks_handles_note408_markdown_layout() {
+        let raw = "## 第1章 计算机系统概述\n\
+1. 操作系统是对 (   ) 进行管理的软件。\n\
+A. 软件                                   B. 硬件\n\
+C. 计算机资源                             D. 应用程序\n\
+\n\
+\n\
+2. 下面的 (    ) 资源不是操作系统应该管理的。\n\
+A. CPU B. 内存 C. 外存 D. 源程序\n";
+        let blocks = extract_question_blocks(raw);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].contains("1. 操作系统是对"));
+        assert!(blocks[0].contains("A. 软件"));
+        assert!(blocks[1].contains("2. 下面的"));
+    }
+
+    #[tokio::test]
+    async fn natural_language_one_shot_push_creates_task() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "1分钟之后给我推送一次测试消息，只今天有效",
+            "u1",
+            &session,
+            "default",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected reply");
+        };
+        assert!(
+            reply.text.contains("已创建一次性推送")
+                || reply.text.contains("One-shot push created")
+        );
+
+        let cfg = session.get_one_shot_push("u1").await.unwrap();
+        assert!(cfg.is_some());
     }
 
     #[tokio::test]

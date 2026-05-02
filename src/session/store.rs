@@ -11,9 +11,9 @@ use rand::{Rng, seq::SliceRandom};
 use tokio::sync::RwLock;
 
 use crate::session::state::{
-    CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
-    PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
-    SessionState, TokenUsageSnapshot, UserSessionState,
+    CommandAlias, ContextMode, Daily408Config, DialogOrigin, DialogProfile, DialogState,
+    ImportedSessionProfile, PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier,
+    SessionSettings, SessionState, TokenUsageSnapshot, UserSessionState, OneShotPushConfig,
 };
 
 const ALIAS_WORDS: &[&str] = &[
@@ -75,7 +75,7 @@ impl SessionStore {
         data_dir: &Path,
         global_codex_home: &Path,
         system_codex_home: &Path,
-        _default_workspace_dir: &Path,
+        default_workspace_dir: &Path,
     ) -> Result<Self> {
         let root = data_dir.join("session");
         let attachment_workspace_dir = root.join("workspace");
@@ -95,8 +95,7 @@ impl SessionStore {
             inbox_dir,
             global_codex_home: global_codex_home.to_path_buf(),
             system_codex_home: system_codex_home.to_path_buf(),
-            // Keep the shared attachment workspace as the default temporary workspace root.
-            default_workspace_dir: attachment_workspace_dir,
+            default_workspace_dir: prepare_workspace_dir(default_workspace_dir)?,
             state: RwLock::new(state),
         };
         store.persist().await?;
@@ -104,7 +103,7 @@ impl SessionStore {
     }
 
     fn new_temporary_dialog(&self) -> Result<DialogState> {
-        let workspace_dir = prepare_workspace_dir(&self.attachment_workspace_dir)?;
+        let workspace_dir = prepare_workspace_dir(&self.default_workspace_dir)?;
         Ok(DialogState::new_temporary(workspace_dir))
     }
 
@@ -346,6 +345,95 @@ impl SessionStore {
             .get(openid)
             .map(|user| user.command_aliases.values().cloned().collect())
             .unwrap_or_default())
+    }
+
+    pub async fn set_daily_408_enabled(&self, openid: &str, enabled: bool) -> Result<()> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.daily_408.enabled = enabled;
+            if !enabled {
+                user.daily_408.last_pushed_on = None;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_daily_408_hour(&self, openid: &str, hour: u8) -> Result<()> {
+        anyhow::ensure!(hour <= 23, "hour must be in range 0..=23");
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.daily_408.hour = hour;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn get_daily_408_config(&self, openid: &str) -> Result<Daily408Config> {
+        let state = self.state.read().await;
+        Ok(state
+            .users
+            .get(openid)
+            .map(|user| user.daily_408.clone())
+            .unwrap_or_default())
+    }
+
+    pub async fn mark_daily_408_pushed(&self, openid: &str, day: &str) -> Result<()> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.daily_408.last_pushed_on = Some(day.to_string());
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_daily_408_targets(&self) -> Vec<(String, Daily408Config)> {
+        let state = self.state.read().await;
+        state
+            .users
+            .iter()
+            .filter_map(|(openid, user)| {
+                if user.daily_408.enabled {
+                    Some((openid.clone(), user.daily_408.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub async fn set_one_shot_push(
+        &self,
+        openid: &str,
+        value: Option<OneShotPushConfig>,
+    ) -> Result<()> {
+        self.mutate_state(|state| {
+            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+            user.one_shot_push = value;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn get_one_shot_push(&self, openid: &str) -> Result<Option<OneShotPushConfig>> {
+        let state = self.state.read().await;
+        Ok(state
+            .users
+            .get(openid)
+            .and_then(|user| user.one_shot_push.clone()))
+    }
+
+    pub async fn list_one_shot_push_targets(&self) -> Vec<(String, OneShotPushConfig)> {
+        let state = self.state.read().await;
+        state
+            .users
+            .iter()
+            .filter_map(|(openid, user)| {
+                user.one_shot_push
+                    .clone()
+                    .map(|cfg| (openid.clone(), cfg))
+            })
+            .collect()
     }
 
     pub async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
@@ -626,6 +714,7 @@ impl SessionStore {
         if current.origin == DialogOrigin::Local
             && !saved
             && current.workspace_dir != self.attachment_workspace_dir
+            && current.workspace_dir != self.default_workspace_dir
         {
             cleanup_workspace_if_empty(&current.workspace_dir);
         }
@@ -872,6 +961,8 @@ fn load_legacy_state(
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
             pending_setting: None,
+            daily_408: Daily408Config::default(),
+            one_shot_push: None,
         },
     );
     Ok(PersistedSessionState {
@@ -905,6 +996,8 @@ fn ensure_user_mut<'a>(
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
             pending_setting: None,
+            daily_408: Daily408Config::default(),
+            one_shot_push: None,
         },
     );
     Ok(state.users.get_mut(openid).expect("user entry must exist"))
@@ -1692,6 +1785,30 @@ mod tests {
         let after = store.snapshot_for_user("u1").await.unwrap();
         assert_eq!(after.foreground.workspace_dir, old_workspace);
         assert!(after.foreground.workspace_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn new_foreground_uses_configured_default_workspace() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let configured_workspace = workspace.path().join("project");
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            &configured_workspace,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+
+        assert_eq!(
+            snapshot.foreground.workspace_dir,
+            std::fs::canonicalize(&configured_workspace).unwrap()
+        );
+        assert!(configured_workspace.is_dir());
     }
 
     #[tokio::test]
