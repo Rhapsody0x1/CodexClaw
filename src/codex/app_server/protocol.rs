@@ -97,13 +97,15 @@ pub struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_policy: Option<SandboxPolicy>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionProfileSelectionParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, JsonValue>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub add_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,7 +131,11 @@ pub struct ThreadResumeParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_policy: Option<SandboxPolicy>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionProfileSelectionParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -182,7 +188,11 @@ pub struct TurnStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_policy: Option<SandboxPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionProfileSelectionParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,6 +246,7 @@ pub struct TurnInterruptResponse {}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalPolicy {
+    #[serde(rename = "untrusted")]
     UnlessTrusted,
     OnFailure,
     OnRequest,
@@ -245,7 +256,7 @@ pub enum ApprovalPolicy {
 impl ApprovalPolicy {
     pub fn as_wire_str(self) -> &'static str {
         match self {
-            ApprovalPolicy::UnlessTrusted => "unless-trusted",
+            ApprovalPolicy::UnlessTrusted => "untrusted",
             ApprovalPolicy::OnFailure => "on-failure",
             ApprovalPolicy::OnRequest => "on-request",
             ApprovalPolicy::Never => "never",
@@ -254,21 +265,56 @@ impl ApprovalPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalsReviewer {
+    User,
+    AutoReview,
+    GuardianSubagent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PermissionProfileSelectionParams {
+    Profile {
+        id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        modifications: Vec<PermissionProfileModificationParams>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PermissionProfileModificationParams {
+    AdditionalWritableRoot { path: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SandboxPolicy {
     ReadOnly {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        access: Option<ReadOnlyAccess>,
+        #[serde(rename = "networkAccess")]
+        #[serde(default)]
+        network_access: bool,
     },
     WorkspaceWrite {
+        #[serde(rename = "writableRoots")]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         writable_roots: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        read_only_access: Option<ReadOnlyAccess>,
+        #[serde(rename = "networkAccess")]
         #[serde(default)]
         network_access: bool,
         #[serde(default)]
-        exclude_tmpdir_env: bool,
+        #[serde(rename = "excludeTmpdirEnvVar")]
+        exclude_tmpdir_env_var: bool,
+        #[serde(rename = "excludeSlashTmp")]
         #[serde(default)]
         exclude_slash_tmp: bool,
     },
@@ -760,10 +806,7 @@ mod tests {
     fn approval_policy_wire_strs_match_server() {
         assert_eq!(ApprovalPolicy::OnRequest.as_wire_str(), "on-request");
         assert_eq!(ApprovalPolicy::Never.as_wire_str(), "never");
-        assert_eq!(
-            ApprovalPolicy::UnlessTrusted.as_wire_str(),
-            "unless-trusted"
-        );
+        assert_eq!(ApprovalPolicy::UnlessTrusted.as_wire_str(), "untrusted");
     }
 
     #[test]
@@ -789,11 +832,67 @@ mod tests {
     #[test]
     fn sandbox_policy_read_only_roundtrips() {
         let p = SandboxPolicy::ReadOnly {
-            access: Some(ReadOnlyAccess::FullAccess),
+            network_access: false,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["type"], "readOnly");
-        assert_eq!(v["access"]["type"], "fullAccess");
+        assert_eq!(v["networkAccess"], false);
+    }
+
+    #[test]
+    fn thread_start_uses_v2_sandbox_and_permissions() {
+        let p = ThreadStartParams {
+            sandbox: Some(SandboxMode::WorkspaceWrite),
+            permissions: Some(PermissionProfileSelectionParams::Profile {
+                id: ":workspace".into(),
+                modifications: vec![
+                    PermissionProfileModificationParams::AdditionalWritableRoot {
+                        path: "/tmp/inbox".into(),
+                    },
+                ],
+            }),
+            approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+            ..ThreadStartParams::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["sandbox"], "workspace-write");
+        assert_eq!(v["permissions"]["type"], "profile");
+        assert_eq!(v["permissions"]["id"], ":workspace");
+        assert_eq!(
+            v["permissions"]["modifications"][0]["type"],
+            "additionalWritableRoot"
+        );
+        assert_eq!(v["permissions"]["modifications"][0]["path"], "/tmp/inbox");
+        assert_eq!(v["approvalsReviewer"], "auto_review");
+        assert!(v.get("sandboxPolicy").is_none());
+        assert!(v.get("addDirs").is_none());
+    }
+
+    #[test]
+    fn thread_resume_uses_v2_sandbox_and_permissions() {
+        let p = ThreadResumeParams {
+            thread_id: "thread-1".into(),
+            model: None,
+            cwd: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox: Some(SandboxMode::ReadOnly),
+            permissions: Some(PermissionProfileSelectionParams::Profile {
+                id: ":workspace".into(),
+                modifications: vec![
+                    PermissionProfileModificationParams::AdditionalWritableRoot {
+                        path: "/tmp/inbox".into(),
+                    },
+                ],
+            }),
+            service_tier: None,
+            config: HashMap::new(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["sandbox"], "read-only");
+        assert_eq!(v["permissions"]["modifications"][0]["path"], "/tmp/inbox");
+        assert!(v.get("sandboxPolicy").is_none());
+        assert!(v.get("addDirs").is_none());
     }
 
     #[test]
@@ -822,7 +921,9 @@ mod tests {
             thread_id: "t".into(),
             input: Vec::new(),
             approval_policy: None,
+            approvals_reviewer: None,
             sandbox_policy: None,
+            permissions: None,
             model: None,
             effort: None,
             service_tier: Some(Some("fast".into())),

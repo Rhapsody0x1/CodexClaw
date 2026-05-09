@@ -29,12 +29,13 @@ use super::{
     events::{self as translator, TurnOutcome, TurnState},
     protocol::{
         ApprovalPolicy, CollaborationMode, CollaborationSettings, CompactedNotification,
-        ItemNotification, ModeKind, ModelReroutedNotification, ReadOnlyAccess, SandboxPolicy,
-        ThreadCompactStartParams, ThreadCompactStartResponse, ThreadResumeParams,
-        ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadUnsubscribeParams,
-        ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TokenUsageUpdatedNotification,
-        TurnCompletedNotification, TurnInputItem, TurnInterruptParams, TurnInterruptResponse,
-        TurnPlanUpdatedNotification, TurnStartParams, TurnStartResponse, method,
+        ItemNotification, ModeKind, ModelReroutedNotification, PermissionProfileModificationParams,
+        PermissionProfileSelectionParams, SandboxMode, SandboxPolicy, ThreadCompactStartParams,
+        ThreadCompactStartResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+        ThreadStartResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
+        ThreadUnsubscribeStatus, TokenUsageUpdatedNotification, TurnCompletedNotification,
+        TurnInputItem, TurnInterruptParams, TurnInterruptResponse, TurnPlanUpdatedNotification,
+        TurnStartParams, TurnStartResponse, method,
     },
     supervisor::AppServerSupervisor,
 };
@@ -108,7 +109,7 @@ impl TurnPolicy {
         Self {
             approval_policy: Some(ApprovalPolicy::Never),
             sandbox_policy: Some(SandboxPolicy::ReadOnly {
-                access: Some(ReadOnlyAccess::FullAccess),
+                network_access: false,
             }),
             plan_mode: true,
         }
@@ -179,7 +180,9 @@ impl AppServerSession {
             thread_id: thread_id.clone(),
             input: build_turn_input(&request),
             approval_policy: policy.approval_policy,
+            approvals_reviewer: None,
             sandbox_policy: policy.sandbox_policy.clone(),
+            permissions: None,
             model: request.model.clone(),
             effort,
             service_tier: service_tier_wire,
@@ -212,9 +215,7 @@ impl AppServerSession {
         };
         let outcome = runner.drive().await?;
 
-        let ExecutionRequestContext { context_window, .. } =
-            ExecutionRequestContext::from_request(&request);
-        let token_usage_info = runner.build_token_usage_info(context_window);
+        let token_usage_info = runner.build_token_usage_info();
         let text = runner
             .state
             .agent_text_parts
@@ -230,8 +231,7 @@ impl AppServerSession {
                 token_usage_info: token_usage_info.clone(),
                 context_window: token_usage_info
                     .as_ref()
-                    .and_then(|info| info.model_context_window)
-                    .or(context_window),
+                    .and_then(|info| info.model_context_window),
             }),
             TurnOutcome::Interrupted => Err(anyhow!("codex turn aborted by user")),
             TurnOutcome::Failed(msg) => Err(anyhow!("codex turn failed: {msg}")),
@@ -310,7 +310,9 @@ impl AppServerSession {
                     model: request.model.clone(),
                     cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
                     approval_policy: None,
-                    sandbox_policy: None,
+                    approvals_reviewer: None,
+                    sandbox: None,
+                    permissions: build_permissions(&request.add_dirs),
                     service_tier: request.service_tier.map(service_tier_to_wire),
                     config: build_compact_config_overrides(request),
                 },
@@ -357,7 +359,9 @@ impl AppServerSession {
                         model: request.model.clone(),
                         cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
                         approval_policy: policy.approval_policy,
-                        sandbox_policy: policy.sandbox_policy.clone(),
+                        approvals_reviewer: None,
+                        sandbox: thread_sandbox(policy, &request.add_dirs),
+                        permissions: build_permissions(&request.add_dirs),
                         service_tier: request.service_tier.map(service_tier_to_wire),
                         config: build_config_overrides(request),
                     },
@@ -375,8 +379,11 @@ impl AppServerSession {
                     warn!(
                         thread_id = %existing,
                         error = %err,
-                        "thread/resume failed; starting a fresh thread"
+                        "thread/resume failed; waiting for user recovery choice"
                     );
+                    return Err(anyhow!(
+                        "codex resume failed for thread `{existing}`: {err:#}"
+                    ));
                 }
             }
         }
@@ -384,14 +391,11 @@ impl AppServerSession {
             model: request.model.clone(),
             cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
             approval_policy: policy.approval_policy,
-            sandbox_policy: policy.sandbox_policy.clone(),
+            approvals_reviewer: None,
+            sandbox: thread_sandbox(policy, &request.add_dirs),
+            permissions: build_permissions(&request.add_dirs),
             service_tier: request.service_tier.map(service_tier_to_wire),
             config: build_config_overrides(request),
-            add_dirs: request
-                .add_dirs
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
         };
         info!(
             approval_policy = ?start.approval_policy,
@@ -495,6 +499,40 @@ fn build_turn_input(req: &ExecutionRequest) -> Vec<TurnInputItem> {
     items
 }
 
+fn build_permissions(add_dirs: &[PathBuf]) -> Option<PermissionProfileSelectionParams> {
+    if add_dirs.is_empty() {
+        return None;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut modifications = Vec::new();
+    for dir in add_dirs {
+        let path = dir.to_string_lossy().into_owned();
+        if seen.insert(path.clone()) {
+            modifications
+                .push(PermissionProfileModificationParams::AdditionalWritableRoot { path });
+        }
+    }
+    Some(PermissionProfileSelectionParams::Profile {
+        id: ":workspace".to_string(),
+        modifications,
+    })
+}
+
+fn thread_sandbox(policy: &TurnPolicy, add_dirs: &[PathBuf]) -> Option<SandboxMode> {
+    if !add_dirs.is_empty() {
+        return None;
+    }
+    policy.sandbox_policy.as_ref().map(sandbox_policy_to_mode)
+}
+
+fn sandbox_policy_to_mode(policy: &SandboxPolicy) -> SandboxMode {
+    match policy {
+        SandboxPolicy::ReadOnly { .. } => SandboxMode::ReadOnly,
+        SandboxPolicy::WorkspaceWrite { .. } => SandboxMode::WorkspaceWrite,
+        SandboxPolicy::DangerFullAccess => SandboxMode::DangerFullAccess,
+    }
+}
+
 fn build_config_overrides(req: &ExecutionRequest) -> HashMap<String, JsonValue> {
     build_runtime_config_overrides(
         &req.config_overrides,
@@ -588,20 +626,6 @@ fn service_tier_to_config_value(tier: ServiceTier) -> JsonValue {
     match service_tier_to_wire(tier) {
         Some(value) => JsonValue::String(value),
         None => JsonValue::Null,
-    }
-}
-
-struct ExecutionRequestContext {
-    context_window: Option<u64>,
-}
-
-impl ExecutionRequestContext {
-    fn from_request(request: &ExecutionRequest) -> Self {
-        let context_window = request.context_mode.map(|mode| match mode {
-            ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
-            ContextMode::OneM => 1_000_000u64,
-        });
-        Self { context_window }
     }
 }
 
@@ -814,7 +838,7 @@ impl TurnRunner {
         }
     }
 
-    fn build_token_usage_info(&self, fallback_window: Option<u64>) -> Option<TokenUsageInfo> {
+    fn build_token_usage_info(&self) -> Option<TokenUsageInfo> {
         let payload = self.state.token_usage.as_ref()?;
         Some(TokenUsageInfo {
             total_token_usage: TokenUsage {
@@ -831,7 +855,7 @@ impl TurnRunner {
                 reasoning_output_tokens: payload.last.reasoning_output_tokens,
                 total_tokens: payload.last.total_tokens,
             },
-            model_context_window: payload.model_context_window.or(fallback_window),
+            model_context_window: payload.model_context_window,
         })
     }
 }
@@ -1036,6 +1060,35 @@ mod tests {
     }
 
     #[test]
+    fn add_dirs_become_permission_profile_modifications() {
+        let permissions = build_permissions(&[
+            std::path::PathBuf::from("/tmp/inbox"),
+            std::path::PathBuf::from("/tmp/workspace"),
+            std::path::PathBuf::from("/tmp/inbox"),
+        ])
+        .expect("permissions");
+        let v = serde_json::to_value(permissions).unwrap();
+
+        assert_eq!(v["type"], "profile");
+        assert_eq!(v["id"], ":workspace");
+        assert_eq!(v["modifications"].as_array().unwrap().len(), 2);
+        assert_eq!(v["modifications"][0]["type"], "additionalWritableRoot");
+        assert_eq!(v["modifications"][0]["path"], "/tmp/inbox");
+        assert_eq!(v["modifications"][1]["path"], "/tmp/workspace");
+    }
+
+    #[test]
+    fn add_dirs_permissions_take_precedence_over_thread_sandbox() {
+        let policy = TurnPolicy::plan_mode();
+
+        assert!(thread_sandbox(&policy, &[std::path::PathBuf::from("/tmp/inbox")]).is_none());
+        assert!(matches!(
+            thread_sandbox(&policy, &[]),
+            Some(SandboxMode::ReadOnly)
+        ));
+    }
+
+    #[test]
     fn flex_service_tier_does_not_write_empty_config_override() {
         let req = ExecutionRequest {
             prompt: "hi".to_string(),
@@ -1100,6 +1153,7 @@ mod tests {
                 "model_context_window=128000".to_string(),
                 "tool_output_token_limit=2048".to_string(),
             ],
+            add_dirs: Vec::new(),
             model: Some("gpt-session".to_string()),
             service_tier: Some(ServiceTier::Fast),
             context_mode: Some(ContextMode::OneM),
@@ -1155,6 +1209,7 @@ mod tests {
             session_id: "thread-1".to_string(),
             workspace_dir: std::path::PathBuf::from("/tmp/work-a"),
             config_overrides: Vec::new(),
+            add_dirs: Vec::new(),
             model: Some("gpt-5.5".to_string()),
             service_tier: None,
             context_mode: Some(ContextMode::Standard),

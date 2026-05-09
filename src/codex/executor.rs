@@ -45,6 +45,7 @@ pub struct CompactRequest {
     pub session_id: String,
     pub workspace_dir: PathBuf,
     pub config_overrides: Vec<String>,
+    pub add_dirs: Vec<PathBuf>,
     pub model: Option<String>,
     pub service_tier: Option<ServiceTier>,
     pub context_mode: Option<ContextMode>,

@@ -175,6 +175,9 @@ commands:
     usage: "用法：`/恢复 <编号或会话ID>`"
     parked: "原前台已转入后台：`%{alias}`。\n"
     restored: "%{parked}已恢复会话：%{summary}（workspace: `%{workspace}`）。\n%{runtime}"
+    recovery_prompt: "恢复当前 Codex 会话失败，尚未自动新建线程。\n可选择：`/重试` 再试一次、`/新建` 开始新会话，或 `/取消` 放弃本次恢复。"
+    recovery_cancelled: "已取消本次恢复。当前会话保持不变。"
+    no_recovery: "当前没有待恢复的失败会话。"
 
   loadbg:
     usage: "用法：`/载入后台 <编号或会话ID> [alias]`"

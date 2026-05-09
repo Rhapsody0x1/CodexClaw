@@ -20,7 +20,7 @@ use crate::{
             ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, FileChangeApprovalEvent,
             PermissionsApprovalEvent,
         },
-        compact,
+        events::TokenUsageInfo,
         executor::{CodexExecutor, CompactRequest, ExecutionRequest},
         output::{Directive, parse_output},
         prompt::build_prompt,
@@ -43,8 +43,8 @@ use crate::{
     self_update,
     session::{
         state::{
-            ContextMode, DialogProfile, ServiceTier, SessionState, TokenUsageSnapshot,
-            UserSessionState,
+            ContextMode, DialogProfile, PendingSetting, ServiceTier, SessionState,
+            TokenUsageSnapshot, UserSessionState,
         },
         store::SessionStore,
     },
@@ -67,6 +67,7 @@ pub struct App {
     active_openid: Mutex<Option<ActiveTurnContext>>,
     /// Queued approval decisions awaiting user reply. FIFO per openid.
     pending_approvals: Mutex<HashMap<String, VecDeque<PendingApprovalEntry>>>,
+    pending_resume_messages: Mutex<HashMap<String, IncomingMessage>>,
 }
 
 #[derive(Clone)]
@@ -99,6 +100,7 @@ impl App {
             active_turn: Mutex::new(None),
             active_openid: Mutex::new(None),
             pending_approvals: Mutex::new(HashMap::new()),
+            pending_resume_messages: Mutex::new(HashMap::new()),
         });
         app.clone().install_approval_handler();
         app
@@ -213,7 +215,7 @@ impl App {
             "received normalized c2c message"
         );
 
-        match maybe_handle_command(
+        let command_outcome = maybe_handle_command(
             &normalized.text,
             &normalized.sender_openid,
             &self.session,
@@ -221,8 +223,17 @@ impl App {
             &runtime_profile,
             self.busy.load(Ordering::SeqCst),
         )
-        .await?
+        .await?;
+        if normalized.text.trim_start().starts_with('/')
+            && !matches!(command_outcome, CommandOutcome::RetryResume)
         {
+            self.pending_resume_messages
+                .lock()
+                .await
+                .remove(&normalized.sender_openid);
+        }
+
+        match command_outcome {
             CommandOutcome::Reply(reply) => {
                 info!(
                     sender_openid = %normalized.sender_openid,
@@ -269,6 +280,30 @@ impl App {
                     &runtime_profile,
                 )
                 .await?;
+                return Ok(());
+            }
+            CommandOutcome::RetryResume => {
+                let mut retry_message = {
+                    self.pending_resume_messages
+                        .lock()
+                        .await
+                        .remove(&normalized.sender_openid)
+                };
+                let Some(mut retry_message) = retry_message.take() else {
+                    let lang = self.command_locale(&normalized.sender_openid).await;
+                    self.qq_client
+                        .send_text(
+                            &normalized.sender_openid,
+                            &normalized.message_id,
+                            &t!("commands.resume.no_recovery", locale = lang.as_str()),
+                            Some(&normalized.message_id),
+                        )
+                        .await?;
+                    return Ok(());
+                };
+                retry_message.message_id = normalized.message_id.clone();
+                self.run_normal_message(retry_message, runtime_profile)
+                    .await?;
                 return Ok(());
             }
             CommandOutcome::SetGlobalModel(value) => {
@@ -422,6 +457,14 @@ impl App {
             CommandOutcome::Continue => {}
         }
 
+        self.run_normal_message(normalized, runtime_profile).await
+    }
+
+    async fn run_normal_message(
+        &self,
+        normalized: IncomingMessage,
+        runtime_profile: crate::codex::runtime::CodexRuntimeProfile,
+    ) -> Result<()> {
         if self.busy.swap(true, Ordering::SeqCst) {
             warn!(
                 sender_openid = %normalized.sender_openid,
@@ -596,25 +639,15 @@ impl App {
                         .await?;
                 }
                 let usage_snapshot = if let Some(info) = output.token_usage_info {
-                    let window = info
-                        .model_context_window
-                        .or(output.context_window)
-                        .or_else(|| context_mode.map(compact::context_mode_window))
-                        .unwrap_or(ContextMode::STANDARD_CONTEXT_WINDOW);
-                    let context_usage = info.context_window_usage().clone();
-                    let snapshot = TokenUsageSnapshot {
-                        total_tokens: context_usage.tokens_in_context_window(),
-                        window,
-                        input_tokens: context_usage.input_tokens,
-                        cached_input_tokens: context_usage.cached_input_tokens,
-                        output_tokens: context_usage.output_tokens,
-                        updated_at: chrono::Utc::now(),
-                    };
-                    let _ = self
-                        .session
-                        .set_foreground_usage(&message.sender_openid, snapshot.clone())
-                        .await;
-                    Some(snapshot)
+                    if let Some(snapshot) = build_usage_snapshot(&info, output.context_window) {
+                        let _ = self
+                            .session
+                            .set_foreground_usage(&message.sender_openid, snapshot.clone())
+                            .await;
+                        Some(snapshot)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -726,6 +759,29 @@ impl App {
             Err(err) => {
                 if err.to_string().contains("aborted by user") {
                     info!("codex turn aborted by operator");
+                    return Ok(());
+                }
+                if is_resume_recovery_error(&err) {
+                    warn!("codex resume failed; entering user recovery flow: {err:#}");
+                    self.pending_resume_messages
+                        .lock()
+                        .await
+                        .insert(message.sender_openid.clone(), message.clone());
+                    let lang = self.command_locale(&message.sender_openid).await;
+                    self.session
+                        .set_pending_setting(
+                            &message.sender_openid,
+                            Some(PendingSetting::ResumeRecovery),
+                        )
+                        .await?;
+                    self.qq_client
+                        .send_text(
+                            &message.sender_openid,
+                            &message.message_id,
+                            &t!("commands.resume.recovery_prompt", locale = lang.as_str()),
+                            Some(&message.message_id),
+                        )
+                        .await?;
                     return Ok(());
                 }
                 error!("codex execution failed: {err:#}");
@@ -910,6 +966,7 @@ impl App {
             session_id: session_id.clone(),
             workspace_dir: user_snapshot.foreground.workspace_dir.clone(),
             config_overrides: Vec::new(),
+            add_dirs: self.compact_add_dirs(&user_snapshot.foreground.workspace_dir),
             model: Some(effective_model.clone()),
             service_tier: runtime_profile.service_tier,
             context_mode,
@@ -994,6 +1051,15 @@ impl App {
         self.clear_active_turn().await;
         compaction?;
         Ok(())
+    }
+
+    fn compact_add_dirs(&self, workspace_dir: &PathBuf) -> Vec<PathBuf> {
+        let mut add_dirs = vec![self.session.inbox_dir().to_path_buf()];
+        let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
+        if workspace_dir != &shared_workspace_dir {
+            add_dirs.push(shared_workspace_dir);
+        }
+        add_dirs
     }
 
     async fn send_directive(
@@ -1108,6 +1174,10 @@ fn global_context_label(context_mode: Option<ContextMode>) -> &'static str {
         Some(ContextMode::OneM) => "1M",
         None => "inherit",
     }
+}
+
+fn is_resume_recovery_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("codex resume failed for thread")
 }
 
 fn decline_approval_request(request: ApprovalRequest) {
@@ -1280,6 +1350,22 @@ fn build_context_warning(snapshot: &TokenUsageSnapshot, lang: &str) -> Option<St
     )
 }
 
+fn build_usage_snapshot(
+    info: &TokenUsageInfo,
+    context_window: Option<u64>,
+) -> Option<TokenUsageSnapshot> {
+    let window = info.model_context_window.or(context_window)?;
+    let context_usage = info.context_window_usage().clone();
+    Some(TokenUsageSnapshot {
+        total_tokens: context_usage.tokens_in_context_window(),
+        window,
+        input_tokens: context_usage.input_tokens,
+        cached_input_tokens: context_usage.cached_input_tokens,
+        output_tokens: context_usage.output_tokens,
+        updated_at: chrono::Utc::now(),
+    })
+}
+
 fn infer_filename(attachment: &MessageAttachment) -> String {
     let extension = match attachment.content_type.as_str() {
         content if content.starts_with("image/png") => "png",
@@ -1331,10 +1417,11 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 
 #[cfg(test)]
 mod tests {
+    use crate::codex::events::{TokenUsage, TokenUsageInfo};
     use crate::qq::types::{EventAuthor, MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::TokenUsageSnapshot;
 
-    use super::{build_context_warning, extract_quote};
+    use super::{build_context_warning, build_usage_snapshot, extract_quote};
 
     #[test]
     fn extracts_quote_from_msg_elements() {
@@ -1381,6 +1468,33 @@ mod tests {
         assert!(warning.contains("220K used / 272K"));
         assert!(warning.contains("`/compact`"));
         assert!(!warning.contains("`/压缩`"));
+    }
+
+    #[test]
+    fn usage_snapshot_requires_context_window() {
+        let info = TokenUsageInfo {
+            total_token_usage: TokenUsage {
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                output_tokens: 50,
+                reasoning_output_tokens: 0,
+                total_tokens: 150,
+            },
+            last_token_usage: TokenUsage {
+                input_tokens: 80,
+                cached_input_tokens: 0,
+                output_tokens: 20,
+                reasoning_output_tokens: 0,
+                total_tokens: 100,
+            },
+            model_context_window: None,
+        };
+
+        assert!(build_usage_snapshot(&info, None).is_none());
+
+        let snapshot = build_usage_snapshot(&info, Some(272_000)).expect("snapshot");
+        assert_eq!(snapshot.window, 272_000);
+        assert_eq!(snapshot.total_tokens, 100);
     }
 
     #[test]

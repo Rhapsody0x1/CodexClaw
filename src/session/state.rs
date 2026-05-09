@@ -424,6 +424,7 @@ pub enum PendingSetting {
     },
     Approvals,
     Plan,
+    ResumeRecovery,
 }
 
 impl PendingSetting {
@@ -520,6 +521,13 @@ impl PendingSetting {
                     "/计划"
                 } else {
                     "/plan"
+                }
+            }
+            ResumeRecovery => {
+                if zh {
+                    "/恢复"
+                } else {
+                    "/resume"
                 }
             }
         }

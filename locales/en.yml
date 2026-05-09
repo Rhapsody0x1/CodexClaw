@@ -175,6 +175,9 @@ commands:
     usage: "usage: `/resume <index|session-id>`"
     parked: "Previous foreground moved to background: `%{alias}`.\n"
     restored: "%{parked}Resumed session: %{summary} (workspace: `%{workspace}`).\n%{runtime}"
+    recovery_prompt: "Resuming the current Codex session failed, and no fresh thread was started automatically.\nChoose `/retry` to try again, `/new` to start a new session, or `/cancel` to abandon this recovery."
+    recovery_cancelled: "Recovery cancelled. The current session is unchanged."
+    no_recovery: "There is no failed resume waiting to retry."
 
   loadbg:
     usage: "usage: `/loadbg <index|session-id> [alias]`"

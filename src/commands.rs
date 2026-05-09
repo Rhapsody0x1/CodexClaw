@@ -52,6 +52,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "execute-plan",
     "keep-planning",
     "cancel-plan",
+    "retry",
     // Chinese aliases also protected
     "帮助",
     "状态",
@@ -85,6 +86,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "实施",
     "继续规划",
     "取消计划",
+    "重试",
 ];
 
 const PROJECT_KEY_SEP: char = '\u{1f}';
@@ -105,6 +107,7 @@ pub enum CommandOutcome {
     SetGlobalReasoning(Option<ReasoningEffort>),
     SetGlobalFast(Option<ServiceTier>),
     SetGlobalContext(Option<ContextMode>),
+    RetryResume,
     /// Resolve the user's next pending approval request with the given
     /// decision. App looks up its `pending_approvals[openid]` queue and
     /// sends the result back to the app-server via the broker.
@@ -184,6 +187,23 @@ fn maybe_handle_command_inner<'a>(
         let raw_command = parts.next().unwrap_or_default().to_ascii_lowercase();
         let command = canonicalize_core_command(&raw_command).to_string();
         let rest = parts.collect::<Vec<_>>();
+
+        if matches!(pending_before, Some(PendingSetting::ResumeRecovery)) {
+            match command.as_str() {
+                "/retry" => {
+                    session.set_pending_setting(openid, None).await?;
+                    return Ok(CommandOutcome::RetryResume);
+                }
+                "/cancel" => {
+                    session.set_pending_setting(openid, None).await?;
+                    return Ok(CommandOutcome::Reply(CommandReply {
+                        text: t!("commands.resume.recovery_cancelled", locale = locale)
+                            .into_owned(),
+                    }));
+                }
+                _ => {}
+            }
+        }
 
         // /back is a global escape: exits the current interactive setting, or
         // politely reports that nothing interactive was in progress.
@@ -289,6 +309,9 @@ fn maybe_handle_command_inner<'a>(
             "/approve-session" => Ok(CommandOutcome::Approval(ApprovalIntent::AcceptForSession)),
             "/deny" => Ok(CommandOutcome::Approval(ApprovalIntent::Decline)),
             "/cancel" => Ok(CommandOutcome::Approval(ApprovalIntent::Cancel)),
+            "/retry" => Ok(CommandOutcome::Reply(CommandReply {
+                text: t!("commands.resume.no_recovery", locale = locale).into_owned(),
+            })),
             "/status" => Ok(CommandOutcome::Reply(CommandReply {
                 text: build_status_text(
                     &session.snapshot_for_user(openid).await?,
@@ -444,6 +467,7 @@ fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutco
         CommandOutcome::SetGlobalReasoning(value) => CommandOutcome::SetGlobalReasoning(value),
         CommandOutcome::SetGlobalFast(value) => CommandOutcome::SetGlobalFast(value),
         CommandOutcome::SetGlobalContext(value) => CommandOutcome::SetGlobalContext(value),
+        CommandOutcome::RetryResume => CommandOutcome::RetryResume,
         CommandOutcome::Approval(intent) => CommandOutcome::Approval(intent),
         CommandOutcome::Continue => CommandOutcome::Continue,
     }
@@ -528,6 +552,7 @@ async fn expand_alias(
             CommandOutcome::SetGlobalContext(value) => {
                 return Ok(CommandOutcome::SetGlobalContext(value));
             }
+            CommandOutcome::RetryResume => return Ok(CommandOutcome::RetryResume),
             CommandOutcome::Approval(intent) => return Ok(CommandOutcome::Approval(intent)),
         }
     }
@@ -2386,6 +2411,7 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/实施" => "/execute-plan",
         "/继续规划" => "/keep-planning",
         "/取消计划" => "/cancel-plan",
+        "/重试" => "/retry",
         other => other,
     }
 }
@@ -3277,6 +3303,18 @@ mod interactive {
             } => consume_loadbg_sessions(text, openid, session, project_key, page, alias).await,
             PendingSetting::Approvals => consume_approvals(text, openid, session).await,
             PendingSetting::Plan => consume_plan(text, openid, session).await,
+            PendingSetting::ResumeRecovery => Ok(CommandOutcome::Reply(CommandReply {
+                text: t!(
+                    "commands.resume.recovery_prompt",
+                    locale = session
+                        .snapshot_for_user(openid)
+                        .await?
+                        .settings
+                        .language
+                        .as_str()
+                )
+                .into_owned(),
+            })),
         }
     }
 
@@ -3962,12 +4000,48 @@ mod tests {
     use crate::{
         codex::runtime::CodexRuntimeProfile,
         session::{
-            state::{ContextMode, ReasoningEffort, ServiceTier, TokenUsageSnapshot},
+            state::{
+                ContextMode, PendingSetting, ReasoningEffort, ServiceTier, TokenUsageSnapshot,
+            },
             store::SessionStore,
         },
     };
 
     use super::{CommandOutcome, maybe_handle_command};
+
+    #[tokio::test]
+    async fn resume_recovery_retry_enters_retry_outcome_and_clears_pending() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        session
+            .set_pending_setting("u1", Some(PendingSetting::ResumeRecovery))
+            .await
+            .unwrap();
+
+        let runtime = CodexRuntimeProfile::default();
+        let outcome = maybe_handle_command("/retry", "u1", &session, "default", &runtime, false)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, CommandOutcome::RetryResume));
+        assert!(
+            session
+                .snapshot_for_user("u1")
+                .await
+                .unwrap()
+                .pending_setting
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn new_command_keeps_settings() {
