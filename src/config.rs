@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub qq: QqConfig,
     #[serde(default)]
     pub shadow: ShadowSection,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +68,48 @@ fn default_shadow_tool_threshold() -> usize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_scheduler_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_scheduler_tick_secs")]
+    pub tick_secs: u64,
+    #[serde(default = "default_scheduler_default_tz")]
+    pub default_tz: String,
+    #[serde(default = "default_scheduler_max_concurrent_jobs")]
+    pub max_concurrent_jobs: usize,
+    #[serde(default = "default_scheduler_max_turn_secs")]
+    pub max_turn_secs: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_scheduler_enabled(),
+            tick_secs: default_scheduler_tick_secs(),
+            default_tz: default_scheduler_default_tz(),
+            max_concurrent_jobs: default_scheduler_max_concurrent_jobs(),
+            max_turn_secs: default_scheduler_max_turn_secs(),
+        }
+    }
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
+}
+fn default_scheduler_tick_secs() -> u64 {
+    30
+}
+fn default_scheduler_default_tz() -> String {
+    "Asia/Shanghai".to_string()
+}
+fn default_scheduler_max_concurrent_jobs() -> usize {
+    4
+}
+fn default_scheduler_max_turn_secs() -> u64 {
+    600
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -110,6 +154,7 @@ impl Default for AppConfig {
                 token_url: default_token_url(),
             },
             shadow: ShadowSection::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -136,6 +181,12 @@ impl AppConfig {
         let path = std::env::var("CODEX_CLAW_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("codexclaw.toml"));
+        if !path.exists() && path == PathBuf::from("codexclaw.toml") {
+            let fallback = default_codex_claw_root().join("codexclaw.toml");
+            if fallback.exists() {
+                return Self::load_from_path(&fallback);
+            }
+        }
         Self::load_from_path(&path)
     }
 

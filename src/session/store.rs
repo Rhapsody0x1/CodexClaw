@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::RwLock;
 
+use crate::scheduler::store::CronJob;
 use crate::session::state::{
     CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
     PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
@@ -62,6 +63,7 @@ pub struct ImportResult {
 pub struct SessionStore {
     root: PathBuf,
     state_path: PathBuf,
+    cron_jobs_path: PathBuf,
     attachment_workspace_dir: PathBuf,
     inbox_dir: PathBuf,
     global_codex_home: PathBuf,
@@ -83,6 +85,7 @@ impl SessionStore {
         tokio::fs::create_dir_all(&inbox_dir).await?;
         tokio::fs::create_dir_all(global_codex_home.join("sessions")).await?;
         let state_path = root.join("state.json");
+        let cron_jobs_path = data_dir.join("scheduler").join("jobs.json");
         let state = match tokio::fs::read_to_string(&state_path).await {
             Ok(raw) => serde_json::from_str::<PersistedSessionState>(&raw)
                 .with_context(|| format!("failed to parse {}", state_path.display()))?,
@@ -91,6 +94,7 @@ impl SessionStore {
         let store = Self {
             root,
             state_path,
+            cron_jobs_path,
             attachment_workspace_dir: attachment_workspace_dir.clone(),
             inbox_dir,
             global_codex_home: global_codex_home.to_path_buf(),
@@ -99,6 +103,7 @@ impl SessionStore {
             default_workspace_dir: attachment_workspace_dir,
             state: RwLock::new(state),
         };
+        store.migrate_inline_cron_jobs().await?;
         store.persist().await?;
         Ok(store)
     }
@@ -360,6 +365,32 @@ impl SessionStore {
             .get(openid)
             .map(|user| user.command_aliases.values().cloned().collect())
             .unwrap_or_default())
+    }
+
+    pub async fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
+        Ok(self
+            .load_cron_jobs_from_disk()
+            .await?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    pub async fn get_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
+        Ok(self.load_cron_jobs_from_disk().await?.get(job_id).cloned())
+    }
+
+    pub async fn upsert_cron_job(&self, job: CronJob) -> Result<()> {
+        let mut jobs = self.load_cron_jobs_from_disk().await?;
+        jobs.insert(job.id.clone(), job);
+        self.persist_cron_jobs(&jobs).await
+    }
+
+    pub async fn remove_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
+        let mut jobs = self.load_cron_jobs_from_disk().await?;
+        let removed = jobs.remove(job_id);
+        self.persist_cron_jobs(&jobs).await?;
+        Ok(removed)
     }
 
     pub async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
@@ -826,6 +857,52 @@ impl SessionStore {
         }))
     }
 
+    async fn migrate_inline_cron_jobs(&self) -> Result<()> {
+        if self.cron_jobs_path.exists() {
+            return Ok(());
+        }
+        let jobs = self.state.read().await.cron_jobs.clone();
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        self.persist_cron_jobs(&jobs).await?;
+        self.state.write().await.cron_jobs.clear();
+        Ok(())
+    }
+
+    async fn load_cron_jobs_from_disk(&self) -> Result<BTreeMap<String, CronJob>> {
+        match tokio::fs::read_to_string(&self.cron_jobs_path).await {
+            Ok(raw) => serde_json::from_str::<BTreeMap<String, CronJob>>(&raw)
+                .with_context(|| format!("failed to parse {}", self.cron_jobs_path.display())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(self.state.read().await.cron_jobs.clone())
+            }
+            Err(err) => Err(err)
+                .with_context(|| format!("failed to read {}", self.cron_jobs_path.display())),
+        }
+    }
+
+    async fn persist_cron_jobs(&self, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
+        if let Some(parent) = self.cron_jobs_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let raw = serde_json::to_string_pretty(jobs)?;
+        let tmp = self.cron_jobs_path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, raw)
+            .await
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        tokio::fs::rename(&tmp, &self.cron_jobs_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to replace {} with {}",
+                    self.cron_jobs_path.display(),
+                    tmp.display()
+                )
+            })?;
+        Ok(())
+    }
+
     async fn mutate_state<T, F>(&self, mutator: F) -> Result<T>
     where
         F: FnOnce(&mut PersistedSessionState) -> Result<T>,
@@ -891,6 +968,7 @@ fn load_legacy_state(
     Ok(PersistedSessionState {
         users,
         imported_profiles: BTreeMap::new(),
+        cron_jobs: BTreeMap::new(),
     })
 }
 
@@ -1527,14 +1605,141 @@ fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{DateTime, Utc};
     use tempfile::tempdir;
     use tokio::fs;
 
+    use crate::scheduler::store::{CronJob, CronKind, DeliverPolicy, JobAction};
     use crate::session::state::{
-        ContextMode, DialogOrigin, DialogProfile, DialogState, ReasoningEffort, ServiceTier,
+        ContextMode, DialogOrigin, DialogProfile, DialogState, PersistedSessionState,
+        ReasoningEffort, ServiceTier,
     };
 
     use super::{ALIAS_WORDS, SessionListScope, SessionStore};
+
+    fn sample_cron_job(id: &str, workspace_dir: std::path::PathBuf) -> CronJob {
+        let created_at = DateTime::parse_from_rfc3339("2026-05-10T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next_run_at = DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        CronJob {
+            id: id.to_string(),
+            owner_openid: "owner-1".to_string(),
+            title: "drink reminder".to_string(),
+            kind: CronKind::OneShot { at: next_run_at },
+            action: JobAction::Shell {
+                program: "/bin/echo".to_string(),
+                args: vec!["ok".to_string()],
+                env: BTreeMap::new(),
+            },
+            workspace_dir,
+            deliver: DeliverPolicy::LogOnly,
+            created_at,
+            next_run_at: Some(next_run_at),
+            last_run_at: None,
+            last_run_status: None,
+            run_count: 0,
+            failure_streak: 0,
+            disabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_jobs_persist_to_scheduler_file() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let job = sample_cron_job("job-1", workspace.path().join("cron-workspace"));
+
+        store.upsert_cron_job(job.clone()).await.unwrap();
+
+        let jobs_path = data.path().join("scheduler/jobs.json");
+        let raw_jobs = fs::read_to_string(&jobs_path).await.unwrap();
+        let persisted_jobs: BTreeMap<String, CronJob> = serde_json::from_str(&raw_jobs).unwrap();
+        assert_eq!(persisted_jobs.get("job-1"), Some(&job));
+
+        let state_raw = fs::read_to_string(data.path().join("session/state.json"))
+            .await
+            .unwrap();
+        let state: PersistedSessionState = serde_json::from_str(&state_raw).unwrap();
+        assert!(state.cron_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrates_inline_cron_jobs_to_scheduler_file_once() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let state_path = data.path().join("session/state.json");
+        fs::create_dir_all(state_path.parent().unwrap())
+            .await
+            .unwrap();
+        let job = sample_cron_job("legacy-job", workspace.path().join("legacy-workspace"));
+        let mut state = PersistedSessionState::default();
+        state.cron_jobs.insert(job.id.clone(), job.clone());
+        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap())
+            .await
+            .unwrap();
+
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.get_cron_job("legacy-job").await.unwrap(), Some(job));
+        let jobs_path = data.path().join("scheduler/jobs.json");
+        assert!(jobs_path.exists());
+        let state_raw = fs::read_to_string(&state_path).await.unwrap();
+        let migrated_state: PersistedSessionState = serde_json::from_str(&state_raw).unwrap();
+        assert!(migrated_state.cron_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_state_persist_does_not_overwrite_scheduler_jobs() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let job = sample_cron_job("job-keep", workspace.path().join("cron-workspace"));
+        store.upsert_cron_job(job.clone()).await.unwrap();
+
+        store
+            .update_settings_for_user("u1", |settings| {
+                settings.model_override = Some("gpt-test".to_string());
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(store.get_cron_job("job-keep").await.unwrap(), Some(job));
+        let raw_jobs = fs::read_to_string(data.path().join("scheduler/jobs.json"))
+            .await
+            .unwrap();
+        let persisted_jobs: BTreeMap<String, CronJob> = serde_json::from_str(&raw_jobs).unwrap();
+        assert!(persisted_jobs.contains_key("job-keep"));
+    }
 
     #[tokio::test]
     async fn moves_foreground_to_background_with_generated_alias() {

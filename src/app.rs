@@ -525,6 +525,7 @@ impl App {
         let workspace_dir = user_snapshot.foreground.workspace_dir.clone();
         let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
         let codex_home = self.session.codex_home().to_path_buf();
+        write_turn_context(&workspace_dir, &message.sender_openid).await;
         let effective_model = effective_settings
             .model_override
             .clone()
@@ -562,6 +563,11 @@ impl App {
         if workspace_dir != shared_workspace_dir {
             add_dirs.push(shared_workspace_dir.clone());
         }
+        let scheduler_jobs_dir = self.config.general.data_dir.join("cron-jobs");
+        tokio::fs::create_dir_all(&scheduler_jobs_dir).await.ok();
+        add_dirs.push(self.config.general.data_dir.join("session"));
+        add_dirs.push(scheduler_jobs_dir);
+        add_dirs.push(self.config.general.data_dir.join("scheduler"));
         info!(
             sender_openid = %message.sender_openid,
             message_id = %message.message_id,
@@ -1214,6 +1220,22 @@ fn format_command_approval(event: &CommandApprovalEvent, _openid: &str) -> Strin
             .to_string(),
     );
     lines.join("\n")
+}
+
+async fn write_turn_context(workspace_dir: &std::path::Path, openid: &str) {
+    let path = workspace_dir.join(".claw-turn.json");
+    let body = serde_json::json!({
+        "owner_openid": openid,
+        "openid": openid,
+    });
+    if let Err(err) = tokio::fs::write(
+        &path,
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .await
+    {
+        warn!(error = %err, path = %path.display(), "failed to write turn context");
+    }
 }
 
 fn format_file_change_approval(event: &FileChangeApprovalEvent) -> String {

@@ -11,6 +11,7 @@ use codex_claw::{
     config::AppConfig,
     memory::store::MemoryStore,
     qq::{api::QqApiClient, gateway},
+    scheduler,
     session::store::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
     skills::index::SkillIndex,
@@ -24,9 +25,30 @@ async fn main() -> Result<()> {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_usage();
+        return Ok(());
+    }
     let mut config = AppConfig::load()?;
     normalize_config_paths(&mut config).await?;
+    if args.first().is_some_and(|arg| arg == "cron") {
+        scheduler::cli::run(&args[1..], &config).await?;
+        return Ok(());
+    }
     run_bot(config).await
+}
+
+fn print_usage() {
+    println!(
+        "usage: codex-claw [cron <command>]\n\n\
+         Without arguments, starts the QQ bot service.\n\
+         Commands:\n\
+         cron add|once|list|rm|pause|resume|run-now|tail"
+    );
 }
 
 async fn run_bot(config: AppConfig) -> Result<()> {
@@ -123,6 +145,7 @@ async fn run_bot(config: AppConfig) -> Result<()> {
         None
     };
     let app = App::new(config, session, qq_client, codex, memory, shadow);
+    scheduler::Scheduler::spawn(app.clone());
     gateway::spawn_gateway(app.clone());
     pending::<()>().await;
     Ok(())

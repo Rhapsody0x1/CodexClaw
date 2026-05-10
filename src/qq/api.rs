@@ -228,6 +228,10 @@ impl QqApiClient {
             .await
     }
 
+    pub async fn send_text_proactive(&self, openid: &str, text: &str) -> Result<()> {
+        self.send_text_inner(openid, None, text, None).await
+    }
+
     async fn send_text_inner(
         &self,
         openid: &str,
