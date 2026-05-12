@@ -1,0 +1,13 @@
+title: "[综合] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎在这里讨论任何与 CodexClaw 相关的话题！
+  - type: textarea
+    id: body
+    attributes:
+      label: 内容
+    validations:
+      required: true

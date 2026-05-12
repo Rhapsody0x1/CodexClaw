@@ -1,0 +1,43 @@
+name: "\U0001F4A1 功能建议 / Feature Request"
+description: 提出新功能或改进建议
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **提示：** 本项目主要围绕作者的个人需求与兴趣演进，功能建议不保证被采纳或排期。
+        > 若你的需求较为个性化，也欢迎直接 Fork 本项目定制。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 功能描述 / Feature Description
+      description: 简要描述你希望添加或改进的功能
+      placeholder: 例如：我希望 CodexClaw 能支持设置定时任务 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: 使用场景 / Use Case
+      description: 描述你遇到的场景或痛点，帮助作者理解为什么需要这个功能
+      placeholder: 例如：CodexClaw 能每天自动地为我推送新闻，或处理 PR，会很有用 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: 可能的实现方式 / Possible Implementation
+      description: 如果你对实现有想法，可以在这里描述（可选）
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 补充说明 / Additional Context
+      description: 任何其他相关信息、截图或参考链接
+    validations:
+      required: false
