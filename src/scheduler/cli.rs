@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 
-use crate::{config::AppConfig, session::store::SessionStore};
+use crate::{
+    config::AppConfig, session::state::ApprovalPolicySetting, session::store::SessionStore,
+};
 
 use super::{
     cron_expr,
@@ -22,7 +24,7 @@ pub async fn run(args: &[String], config: &AppConfig) -> Result<()> {
         Some("add") => add(&session, config, &args[1..], false).await,
         Some("once") => add(&session, config, &args[1..], true).await,
         Some("list") => list(&session, &args[1..]).await,
-        Some("rm") => remove(&session, &args[1..]).await,
+        Some("rm") => remove(&session, config, &args[1..]).await,
         Some("pause") => set_disabled(&session, &args[1..], true).await,
         Some("resume") => set_disabled(&session, &args[1..], false).await,
         Some("run-now") => run_now(&session, &args[1..]).await,
@@ -110,11 +112,39 @@ async fn add(
             prompt,
             model: opts.value("model"),
             session_state: None,
+            approval_policy: opts
+                .value("approval")
+                .as_deref()
+                .map(parse_approval_policy)
+                .transpose()?,
             session_strategy: parse_session_strategy(
                 opts.value("session-strategy")
                     .as_deref()
                     .unwrap_or("per-invocation"),
             )?,
+            interactive: if opts.flag("interactive") {
+                Some(store::InteractiveSpec {
+                    reply_ttl_secs: opts
+                        .value("reply-ttl")
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .context("invalid --reply-ttl")?
+                        .unwrap_or(86_400),
+                    end_signal: opts
+                        .value("end-signal")
+                        .unwrap_or_else(|| "<<<CLAW_END>>>".to_string()),
+                    max_rounds_hard_cap: opts
+                        .value("max-rounds")
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .context("invalid --max-rounds")?
+                        .unwrap_or(10),
+                })
+            } else {
+                None
+            },
         },
         other => return Err(anyhow!("unsupported --action `{other}`")),
     };
@@ -129,6 +159,7 @@ async fn add(
         deliver: DeliverPolicy::PushToOwner,
         created_at: now,
         next_run_at: None,
+        run_now_at: None,
         last_run_at: None,
         last_run_status: None,
         run_count: 0,
@@ -139,6 +170,12 @@ async fn add(
         CronKind::OneShot { at } if *at <= now => Some(*at),
         _ => cron_expr::next_after(&job.kind, now)?,
     };
+    store::write_job_metadata(
+        &job,
+        &config.general.data_dir,
+        &config.general.codex_home_global,
+    )
+    .await?;
     session.upsert_cron_job(job.clone()).await?;
     println!(
         "created cron job {} `{}` next_run_at={}",
@@ -161,12 +198,14 @@ async fn list(session: &SessionStore, args: &[String]) -> Result<()> {
     jobs.sort_by_key(|job| job.next_run_at);
     for job in jobs {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\tnext={}\truns={}\tfailures={}\t{}\t{}",
             job.id,
             if job.disabled { "disabled" } else { "enabled" },
             job.next_run_at
                 .map(|value| value.to_rfc3339())
                 .unwrap_or_else(|| "-".to_string()),
+            job.run_count,
+            job.failure_streak,
             job.owner_openid,
             job.title
         );
@@ -174,11 +213,21 @@ async fn list(session: &SessionStore, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn remove(session: &SessionStore, args: &[String]) -> Result<()> {
+async fn remove(session: &SessionStore, config: &AppConfig, args: &[String]) -> Result<()> {
+    let opts = Opts::parse(args);
+    let keep_files = opts.flag("keep-files");
     let id = args
-        .first()
+        .iter()
+        .find(|arg| !arg.starts_with("--"))
         .ok_or_else(|| anyhow!("rm requires <job_id>"))?;
     if session.remove_cron_job(id).await?.is_some() {
+        store::remove_job_files(
+            &config.general.data_dir,
+            &config.general.codex_home_global,
+            id,
+            keep_files,
+        )
+        .await?;
         println!("removed {id}");
     } else {
         println!("not found {id}");
@@ -197,6 +246,9 @@ async fn set_disabled(session: &SessionStore, args: &[String], disabled: bool) -
     job.disabled = disabled;
     if !disabled {
         job.next_run_at = cron_expr::next_after(&job.kind, Utc::now())?;
+        if job.next_run_at.is_none() && matches!(job.kind, CronKind::OneShot { .. }) {
+            job.run_now_at = Some(Utc::now());
+        }
     }
     session.upsert_cron_job(job).await?;
     println!("{} {id}", if disabled { "paused" } else { "resumed" });
@@ -207,13 +259,13 @@ async fn run_now(session: &SessionStore, args: &[String]) -> Result<()> {
     let id = args
         .first()
         .ok_or_else(|| anyhow!("run-now requires <job_id>"))?;
-    let mut job = session
-        .get_cron_job(id)
+    session
+        .update_cron_job(id, |job| {
+            job.run_now_at = Some(Utc::now());
+            Ok(())
+        })
         .await?
         .ok_or_else(|| anyhow!("job not found `{id}`"))?;
-    job.disabled = false;
-    job.next_run_at = Some(Utc::now());
-    session.upsert_cron_job(job).await?;
     println!("scheduled {id} to run now");
     Ok(())
 }
@@ -237,8 +289,30 @@ async fn tail(session: &SessionStore, args: &[String]) -> Result<()> {
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
     let Some(last) = entries.last() else {
+        println!(
+            "{}\t{}\tnext={}\truns={}\tfailures={}",
+            job.id,
+            if job.disabled { "disabled" } else { "enabled" },
+            job.next_run_at
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_else(|| "-".to_string()),
+            job.run_count,
+            job.failure_streak
+        );
         return Ok(());
     };
+    println!(
+        "{}\t{}\tnext={}\truns={}\tfailures={}\tlast_status={:?}\n--- {} ---",
+        job.id,
+        if job.disabled { "disabled" } else { "enabled" },
+        job.next_run_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string()),
+        job.run_count,
+        job.failure_streak,
+        job.last_run_status,
+        last.path().display()
+    );
     print!("{}", std::fs::read_to_string(last.path())?);
     Ok(())
 }
@@ -276,6 +350,10 @@ fn parse_session_strategy(raw: &str) -> Result<SessionStrategy> {
     }
 }
 
+fn parse_approval_policy(raw: &str) -> Result<ApprovalPolicySetting> {
+    ApprovalPolicySetting::parse(raw).ok_or_else(|| anyhow!("invalid --approval `{raw}`"))
+}
+
 fn print_usage() {
     println!(
         "usage: codex-claw cron add|once|list|rm|pause|resume|run-now|tail\n\
@@ -309,5 +387,10 @@ impl<'a> Opts<'a> {
             .filter(|pair| pair[0] == needle)
             .map(|pair| pair[1].clone())
             .collect()
+    }
+
+    fn flag(&self, name: &str) -> bool {
+        let needle = format!("--{name}");
+        self.args.iter().any(|arg| arg == &needle)
     }
 }

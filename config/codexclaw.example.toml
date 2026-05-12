@@ -33,3 +33,7 @@ tick_secs = 30
 default_tz = "Asia/Shanghai"
 max_concurrent_jobs = 4
 max_turn_secs = 600
+max_attempts = 3
+retry_backoff_secs = 30
+circuit_breaker_threshold = 5
+runs_retention = 30

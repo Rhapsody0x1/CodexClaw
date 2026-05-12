@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod cron_expr;
+pub mod interactive;
 pub mod runner;
 pub mod store;
 
@@ -59,12 +60,18 @@ impl Scheduler {
         let Some(app) = self.app.upgrade() else {
             return;
         };
+        if let Err(err) = interactive::sweep_expired(&app).await {
+            warn!(error = %err, "failed to sweep expired interactive cron jobs");
+        }
         let now = Utc::now();
         let Ok(jobs) = app.session.list_cron_jobs().await else {
             return;
         };
         for mut job in jobs {
             if job.disabled {
+                continue;
+            }
+            if job.run_now_at.is_some() {
                 continue;
             }
             if cron_expr::due_or_past(&job.kind, now) {
@@ -90,16 +97,20 @@ impl Scheduler {
         let Some(app) = self.app.upgrade() else {
             return;
         };
+        if let Err(err) = interactive::sweep_expired(&app).await {
+            warn!(error = %err, "failed to sweep expired interactive cron jobs");
+        }
         let now = Utc::now();
         let mut due = match app.session.list_cron_jobs().await {
             Ok(jobs) => jobs
                 .into_iter()
                 .filter(|job| {
-                    !job.disabled
-                        && job
-                            .next_run_at
-                            .or_else(|| cron_expr::next_after(&job.kind, now).ok().flatten())
-                            .is_some_and(|next| next <= now)
+                    job.run_now_at.is_some_and(|run_now_at| run_now_at <= now)
+                        || (!job.disabled
+                            && job
+                                .next_run_at
+                                .or_else(|| cron_expr::next_after(&job.kind, now).ok().flatten())
+                                .is_some_and(|next| next <= now))
                 })
                 .collect::<Vec<_>>(),
             Err(err) => {

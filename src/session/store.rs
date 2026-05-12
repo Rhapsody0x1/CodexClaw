@@ -1,14 +1,16 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::RwLock;
+use ulid::Ulid;
 
 use crate::scheduler::store::CronJob;
 use crate::session::state::{
@@ -369,7 +371,7 @@ impl SessionStore {
 
     pub async fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
         Ok(self
-            .load_cron_jobs_from_disk()
+            .read_cron_jobs_from_disk()
             .await?
             .values()
             .cloned()
@@ -377,20 +379,36 @@ impl SessionStore {
     }
 
     pub async fn get_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
-        Ok(self.load_cron_jobs_from_disk().await?.get(job_id).cloned())
+        Ok(self.read_cron_jobs_from_disk().await?.get(job_id).cloned())
     }
 
     pub async fn upsert_cron_job(&self, job: CronJob) -> Result<()> {
-        let mut jobs = self.load_cron_jobs_from_disk().await?;
-        jobs.insert(job.id.clone(), job);
-        self.persist_cron_jobs(&jobs).await
+        self.mutate_cron_jobs_on_disk(move |jobs| {
+            jobs.insert(job.id.clone(), job);
+            Ok(())
+        })
+        .await
     }
 
     pub async fn remove_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
-        let mut jobs = self.load_cron_jobs_from_disk().await?;
-        let removed = jobs.remove(job_id);
-        self.persist_cron_jobs(&jobs).await?;
-        Ok(removed)
+        let job_id = job_id.to_string();
+        self.mutate_cron_jobs_on_disk(move |jobs| Ok(jobs.remove(&job_id)))
+            .await
+    }
+
+    pub async fn update_cron_job<F>(&self, job_id: &str, updater: F) -> Result<Option<CronJob>>
+    where
+        F: FnOnce(&mut CronJob) -> Result<()> + Send + 'static,
+    {
+        let job_id = job_id.to_string();
+        self.mutate_cron_jobs_on_disk(move |jobs| {
+            let Some(job) = jobs.get_mut(&job_id) else {
+                return Ok(None);
+            };
+            updater(job)?;
+            Ok(Some(job.clone()))
+        })
+        .await
     }
 
     pub async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
@@ -835,6 +853,10 @@ impl SessionStore {
         &self.global_codex_home
     }
 
+    pub fn data_dir(&self) -> &Path {
+        self.root.parent().unwrap_or(&self.root)
+    }
+
     pub fn inbox_dir(&self) -> &Path {
         &self.inbox_dir
     }
@@ -870,37 +892,43 @@ impl SessionStore {
         Ok(())
     }
 
-    async fn load_cron_jobs_from_disk(&self) -> Result<BTreeMap<String, CronJob>> {
-        match tokio::fs::read_to_string(&self.cron_jobs_path).await {
-            Ok(raw) => serde_json::from_str::<BTreeMap<String, CronJob>>(&raw)
-                .with_context(|| format!("failed to parse {}", self.cron_jobs_path.display())),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Ok(self.state.read().await.cron_jobs.clone())
-            }
-            Err(err) => Err(err)
-                .with_context(|| format!("failed to read {}", self.cron_jobs_path.display())),
-        }
+    async fn read_cron_jobs_from_disk(&self) -> Result<BTreeMap<String, CronJob>> {
+        let path = self.cron_jobs_path.clone();
+        let lock_path = cron_jobs_lock_path(&path);
+        let fallback = self.state.read().await.cron_jobs.clone();
+        tokio::task::spawn_blocking(move || {
+            with_cron_jobs_lock(&lock_path, false, || read_cron_jobs_file(&path, fallback))
+        })
+        .await?
     }
 
     async fn persist_cron_jobs(&self, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
-        if let Some(parent) = self.cron_jobs_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let raw = serde_json::to_string_pretty(jobs)?;
-        let tmp = self.cron_jobs_path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, raw)
-            .await
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        tokio::fs::rename(&tmp, &self.cron_jobs_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to replace {} with {}",
-                    self.cron_jobs_path.display(),
-                    tmp.display()
-                )
-            })?;
-        Ok(())
+        let path = self.cron_jobs_path.clone();
+        let lock_path = cron_jobs_lock_path(&path);
+        let jobs = jobs.clone();
+        tokio::task::spawn_blocking(move || {
+            with_cron_jobs_lock(&lock_path, true, || write_cron_jobs_file(&path, &jobs))
+        })
+        .await?
+    }
+
+    async fn mutate_cron_jobs_on_disk<T, F>(&self, mutator: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut BTreeMap<String, CronJob>) -> Result<T> + Send + 'static,
+    {
+        let path = self.cron_jobs_path.clone();
+        let lock_path = cron_jobs_lock_path(&path);
+        let fallback = self.state.read().await.cron_jobs.clone();
+        tokio::task::spawn_blocking(move || {
+            with_cron_jobs_lock(&lock_path, true, || {
+                let mut jobs = read_cron_jobs_file(&path, fallback)?;
+                let result = mutator(&mut jobs)?;
+                write_cron_jobs_file(&path, &jobs)?;
+                Ok(result)
+            })
+        })
+        .await?
     }
 
     async fn mutate_state<T, F>(&self, mutator: F) -> Result<T>
@@ -1603,6 +1631,81 @@ fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
+fn cron_jobs_lock_path(path: &Path) -> PathBuf {
+    path.with_extension("json.lock")
+}
+
+fn with_cron_jobs_lock<T, F>(lock_path: &Path, exclusive: bool, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    if exclusive {
+        FileExt::lock_exclusive(&lock_file)
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    } else {
+        FileExt::lock_shared(&lock_file)
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    }
+    let result = f();
+    FileExt::unlock(&lock_file)
+        .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
+    result
+}
+
+fn read_cron_jobs_file(
+    path: &Path,
+    fallback: BTreeMap<String, CronJob>,
+) -> Result<BTreeMap<String, CronJob>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<BTreeMap<String, CronJob>>(&raw)
+            .with_context(|| format!("failed to parse {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(fallback),
+        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn write_cron_jobs_file(path: &Path, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(jobs)?;
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jobs.json"),
+        Ulid::new()
+    ));
+    {
+        let mut file =
+            File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.write_all(raw.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "failed to replace {} with {}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1640,6 +1743,7 @@ mod tests {
             deliver: DeliverPolicy::LogOnly,
             created_at,
             next_run_at: Some(next_run_at),
+            run_now_at: None,
             last_run_at: None,
             last_run_status: None,
             run_count: 0,
@@ -1739,6 +1843,45 @@ mod tests {
             .unwrap();
         let persisted_jobs: BTreeMap<String, CronJob> = serde_json::from_str(&raw_jobs).unwrap();
         assert!(persisted_jobs.contains_key("job-keep"));
+    }
+
+    #[tokio::test]
+    async fn update_cron_job_mutates_existing_record_without_replacing_it() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let mut job = sample_cron_job("job-update", workspace.path().join("cron-workspace"));
+        job.title = "original title".to_string();
+        store.upsert_cron_job(job).await.unwrap();
+
+        let updated = store
+            .update_cron_job("job-update", |job| {
+                job.failure_streak = 3;
+                Ok(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.title, "original title");
+        assert_eq!(updated.failure_streak, 3);
+        assert_eq!(
+            store
+                .get_cron_job("job-update")
+                .await
+                .unwrap()
+                .unwrap()
+                .failure_streak,
+            3
+        );
     }
 
     #[tokio::test]

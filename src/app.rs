@@ -214,6 +214,33 @@ impl App {
             quote = normalized.quote.is_some(),
             "received normalized c2c message"
         );
+        self.flush_pending_scheduler_deliveries(&normalized.sender_openid, &normalized.message_id)
+            .await;
+        let trimmed_command = normalized.text.trim();
+        if matches!(trimmed_command, "/stop" | "/停止")
+            && crate::scheduler::interactive::pending_for_owner(
+                &self.config.general.data_dir,
+                &normalized.sender_openid,
+            )
+            .await?
+            .is_some()
+        {
+            crate::scheduler::interactive::finish_job_for_owner(
+                self,
+                &normalized.sender_openid,
+                "stopped",
+            )
+            .await?;
+            self.qq_client
+                .send_text(
+                    &normalized.sender_openid,
+                    &normalized.message_id,
+                    "已停止当前定时交互任务并恢复原对话。",
+                    Some(&normalized.message_id),
+                )
+                .await?;
+            return Ok(());
+        }
 
         let command_outcome = maybe_handle_command(
             &normalized.text,
@@ -508,6 +535,41 @@ impl App {
         result
     }
 
+    async fn flush_pending_scheduler_deliveries(&self, openid: &str, message_id: &str) {
+        let deliveries = match crate::scheduler::store::take_pending_deliveries(
+            &self.config.general.data_dir,
+            openid,
+        )
+        .await
+        {
+            Ok(deliveries) => deliveries,
+            Err(err) => {
+                warn!(openid = %openid, error = %err, "failed to load pending scheduler deliveries");
+                return;
+            }
+        };
+        for delivery in deliveries {
+            let text = format!(
+                "补发定时任务 `{}` 的消息（原发送失败：{}）：\n\n{}",
+                delivery.title, delivery.error, delivery.text
+            );
+            if let Err(err) = self
+                .qq_client
+                .send_markdown(openid, message_id, &text, Some(message_id))
+                .await
+            {
+                warn!(openid = %openid, job_id = %delivery.job_id, error = %err, "failed to flush pending scheduler delivery");
+                let _ = crate::scheduler::store::queue_pending_delivery(
+                    &self.config.general.data_dir,
+                    openid,
+                    &delivery,
+                )
+                .await;
+                break;
+            }
+        }
+    }
+
     async fn run_turn(
         &self,
         message: IncomingMessage,
@@ -579,6 +641,29 @@ impl App {
         );
 
         let (update_tx, update_rx) = mpsc::unbounded_channel();
+        let strip_signal = match crate::scheduler::interactive::pending_for_owner(
+            &self.config.general.data_dir,
+            &message.sender_openid,
+        )
+        .await
+        {
+            Ok(Some(pending))
+                if pending.codex_session_id.is_none()
+                    || user_snapshot.foreground.session_id == pending.codex_session_id =>
+            {
+                Some(pending.end_signal)
+            }
+            Ok(Some(_)) => None,
+            Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    sender_openid = %message.sender_openid,
+                    error = %err,
+                    "failed to inspect pending interactive scheduler state"
+                );
+                None
+            }
+        };
         let emitter = tokio::spawn(
             PassiveTurnEmitter::new(
                 self.qq_client.clone(),
@@ -587,6 +672,7 @@ impl App {
                 workspace_dir.clone(),
                 effective_settings.verbose,
             )
+            .with_strip_signal(strip_signal)
             .run(update_rx),
         );
 
@@ -699,6 +785,20 @@ impl App {
                             Some(&message.message_id),
                         )
                         .await?;
+                }
+
+                if let Err(err) = crate::scheduler::interactive::on_fg_turn_completed(
+                    self,
+                    &message.sender_openid,
+                    &output.text,
+                )
+                .await
+                {
+                    warn!(
+                        sender_openid = %message.sender_openid,
+                        error = %err,
+                        "failed to process interactive scheduler completion hook"
+                    );
                 }
 
                 // Plan-mode post-turn: if the planning turn produced a

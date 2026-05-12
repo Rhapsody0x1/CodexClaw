@@ -79,6 +79,14 @@ pub struct SchedulerConfig {
     pub max_concurrent_jobs: usize,
     #[serde(default = "default_scheduler_max_turn_secs")]
     pub max_turn_secs: u64,
+    #[serde(default = "default_scheduler_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_scheduler_retry_backoff_secs")]
+    pub retry_backoff_secs: u64,
+    #[serde(default = "default_scheduler_circuit_breaker_threshold")]
+    pub circuit_breaker_threshold: u32,
+    #[serde(default = "default_scheduler_runs_retention")]
+    pub runs_retention: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -89,6 +97,10 @@ impl Default for SchedulerConfig {
             default_tz: default_scheduler_default_tz(),
             max_concurrent_jobs: default_scheduler_max_concurrent_jobs(),
             max_turn_secs: default_scheduler_max_turn_secs(),
+            max_attempts: default_scheduler_max_attempts(),
+            retry_backoff_secs: default_scheduler_retry_backoff_secs(),
+            circuit_breaker_threshold: default_scheduler_circuit_breaker_threshold(),
+            runs_retention: default_scheduler_runs_retention(),
         }
     }
 }
@@ -107,6 +119,18 @@ fn default_scheduler_max_concurrent_jobs() -> usize {
 }
 fn default_scheduler_max_turn_secs() -> u64 {
     600
+}
+fn default_scheduler_max_attempts() -> u32 {
+    3
+}
+fn default_scheduler_retry_backoff_secs() -> u64 {
+    30
+}
+fn default_scheduler_circuit_breaker_threshold() -> u32 {
+    5
+}
+fn default_scheduler_runs_retention() -> usize {
+    30
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

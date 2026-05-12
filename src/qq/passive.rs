@@ -31,6 +31,7 @@ pub struct PassiveTurnEmitter {
     message_id: String,
     workspace_dir: PathBuf,
     verbose: bool,
+    strip_signal: Option<String>,
     sent_replies: usize,
     saw_agent_message: bool,
     tool_call_count: usize,
@@ -51,11 +52,17 @@ impl PassiveTurnEmitter {
             message_id,
             workspace_dir,
             verbose,
+            strip_signal: None,
             sent_replies: 0,
             saw_agent_message: false,
             tool_call_count: 0,
             pending_tools: Vec::new(),
         }
+    }
+
+    pub fn with_strip_signal(mut self, signal: Option<String>) -> Self {
+        self.strip_signal = signal;
+        self
     }
 
     pub async fn run(
@@ -91,6 +98,11 @@ impl PassiveTurnEmitter {
 
     async fn handle_agent_message(&mut self, raw_text: String) -> Result<()> {
         self.saw_agent_message = true;
+        let raw_text = if let Some(signal) = self.strip_signal.as_deref() {
+            crate::scheduler::interactive::strip_end_signal(&raw_text, signal).0
+        } else {
+            raw_text
+        };
         let parsed = parse_output(&raw_text, &self.workspace_dir);
         let text = parsed.text.trim().to_string();
 
