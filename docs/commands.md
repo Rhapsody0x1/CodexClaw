@@ -1,68 +1,69 @@
-# CodexClaw 命令参考 / Command Reference
+# CodexClaw 命令参考
 
 > CodexClaw 是一个由 OpenAI Codex 驱动的 Rust QQ 机器人。所有命令通过 QQ 私聊以 `/命令` 格式触发。
 > 中文别名与英文命令完全等价，在消息调度层自动规范化。
 
+*Read this in: [English](commands_en.md) | [中文](commands.md)*
+
 ---
 
-## 目录 / Table of Contents
+## 目录
 
-- [命令调度机制](#命令调度机制--command-dispatch)
-- [基础命令](#1-基础命令--basic-commands)
-  - [/help](#help--帮助)
-  - [/status](#status--状态)
-  - [/lang](#lang--语言)
-  - [/verbose](#verbose--详细)
-- [会话管理](#2-会话管理--session-management)
-  - [/new](#new--新建)
-  - [/stop](#stop--停止)
-  - [/interrupt](#interrupt--中断)
-  - [/save](#save--保存)
-  - [/sessions](#sessions--会话)
-  - [/import](#import--导入)
-  - [/resume](#resume--恢复)
-  - [/loadbg](#loadbg--载入后台)
-  - [/bg](#bg--后台)
-  - [/fg](#fg--前台)
-  - [/rename](#rename--重命名)
-  - [/compact](#compact--压缩)
-- [模型设置](#3-模型设置--model-settings)
-  - [/model](#model--模型)
-  - [/fast](#fast--快速)
-  - [/context](#context--上下文)
-  - [/reasoning](#reasoning--思考)
-- [审批流程](#4-审批流程--approval-flow)
-  - [/approvals](#approvals--审批)
-  - [/approve](#approve--同意)
-  - [/approve-session](#approve-session--同意本会话)
-  - [/deny](#deny--拒绝)
-  - [/cancel (审批)](#cancel--取消)
-- [计划模式](#5-计划模式--plan-mode)
-  - [/plan](#plan--计划)
-  - [/execute-plan](#execute-plan--实施)
-  - [/keep-planning](#keep-planning--继续规划)
-  - [/cancel-plan](#cancel-plan--取消计划)
-- [命令别名](#6-命令别名--command-aliases)
+- [命令调度机制](#命令调度机制)
+- [基础命令](#1-基础命令)
+  - [/help](#help)
+  - [/status](#status)
+  - [/lang](#lang)
+  - [/verbose](#verbose)
+- [会话管理](#2-会话管理)
+  - [/new](#new)
+  - [/stop](#stop)
+  - [/interrupt](#interrupt)
+  - [/save](#save)
+  - [/sessions](#sessions)
+  - [/import](#import)
+  - [/resume](#resume)
+  - [/loadbg](#loadbg)
+  - [/bg](#bg)
+  - [/fg](#fg)
+  - [/rename](#rename)
+  - [/compact](#compact)
+- [模型设置](#3-模型设置)
+  - [/model](#model)
+  - [/fast](#fast)
+  - [/context](#context)
+  - [/reasoning](#reasoning)
+- [审批流程](#4-审批流程)
+  - [/approvals](#approvals)
+  - [/approve](#approve)
+  - [/approve-session](#approve-session)
+  - [/deny](#deny)
+  - [/cancel](#cancel)
+- [计划模式](#5-计划模式)
+  - [/plan](#plan)
+  - [/execute-plan](#execute-plan)
+  - [/keep-planning](#keep-planning)
+  - [/cancel-plan](#cancel-plan)
+- [命令别名](#6-命令别名)
   - [/alias add](#alias-add)
   - [/alias list](#alias-list)
   - [/alias remove](#alias-remove)
-- [定时任务](#7-定时任务--scheduler)
+- [定时任务](#7-定时任务)
   - [/cron list](#cron-list)
   - [/cron pause](#cron-pause)
   - [/cron resume](#cron-resume)
   - [/cron rm](#cron-rm)
   - [/cron run-now](#cron-run-now)
   - [/cron tail](#cron-tail)
-- [系统命令](#8-系统命令--system)
-  - [/self-update](#self-update--自更新)
-  - [/back](#back--返回)
-  - [/retry](#retry--重试)
-- [交互模式行为规则](#交互模式行为规则--interactive-mode-rules)
-- [English Summary](#english-summary)
+- [系统命令](#8-系统命令)
+  - [/self-update](#self-update)
+  - [/back](#back)
+  - [/retry](#retry)
+- [交互模式行为规则](#交互模式行为规则)
 
 ---
 
-## 命令调度机制 / Command Dispatch
+## 命令调度机制
 
 1. 用户在 QQ 中发送 `/command` 或 `/中文命令`。
 2. 中文别名由 `canonicalize_core_command()` 规范化为对应的英文命令。
@@ -111,9 +112,9 @@
 
 ---
 
-## 1. 基础命令 / Basic Commands
+## 1. 基础命令
 
-### /help / 帮助
+### /help
 
 显示命令帮助列表。
 
@@ -138,7 +139,7 @@
 
 ---
 
-### /status / 状态
+### /status
 
 显示当前会话状态的综合摘要。
 
@@ -176,7 +177,7 @@
 
 ---
 
-### /lang / 语言
+### /lang
 
 切换界面语言。
 
@@ -212,7 +213,7 @@
 
 ---
 
-### /verbose / 详细
+### /verbose
 
 切换工具调用输出的详细/简略模式。
 
@@ -244,9 +245,9 @@
 
 ---
 
-## 2. 会话管理 / Session Management
+## 2. 会话管理
 
-### /new / 新建
+### /new
 
 创建新的前台会话。
 
@@ -280,7 +281,7 @@
 
 ---
 
-### /stop / 停止
+### /stop
 
 结束当前前台会话。
 
@@ -314,7 +315,7 @@
 
 ---
 
-### /interrupt / 中断
+### /interrupt
 
 停止当前正在运行的任务，但不结束会话。
 
@@ -339,7 +340,7 @@
 
 ---
 
-### /save / 保存
+### /save
 
 将当前前台会话标记为持久保存。
 
@@ -367,7 +368,7 @@
 
 ---
 
-### /sessions / 会话
+### /sessions
 
 浏览历史会话，按工作目录（项目）分组。
 
@@ -403,7 +404,7 @@
 
 ---
 
-### /import / 导入
+### /import
 
 从系统 `~/.codex/sessions` 导入宿主 Codex 的会话。
 
@@ -436,7 +437,7 @@
 
 ---
 
-### /resume / 恢复
+### /resume
 
 从磁盘恢复会话到前台。
 
@@ -474,7 +475,7 @@
 
 ---
 
-### /loadbg / 载入后台
+### /loadbg
 
 加载磁盘会话到后台。
 
@@ -500,7 +501,7 @@
 
 ---
 
-### /bg / 后台
+### /bg
 
 将当前前台会话转入后台。
 
@@ -531,7 +532,7 @@
 
 ---
 
-### /fg / 前台
+### /fg
 
 将后台会话切到前台。
 
@@ -564,7 +565,7 @@
 
 ---
 
-### /rename / 重命名
+### /rename
 
 重命名后台会话标签。
 
@@ -590,7 +591,7 @@
 
 ---
 
-### /compact / 压缩
+### /compact
 
 手动压缩当前会话上下文。
 
@@ -633,11 +634,11 @@
 
 ---
 
-## 3. 模型设置 / Model Settings
+## 3. 模型设置
 
 > **全局 vs 会话级设置：** 当前台会话为未保存的临时会话时，模型、快速模式、上下文、思考深度的修改写入全局运行时配置文件（`config.toml`）。当前台会话已保存（`saved=true`）时，修改仅作用于当前会话。
 
-### /model / 模型
+### /model
 
 设置或查看当前使用的模型。
 
@@ -678,7 +679,7 @@
 
 ---
 
-### /fast / 快速
+### /fast
 
 设置快速推理模式（Fast service tier）。
 
@@ -712,7 +713,7 @@
 
 ---
 
-### /context / 上下文
+### /context
 
 设置上下文窗口模式。
 
@@ -746,7 +747,7 @@
 
 ---
 
-### /reasoning / 思考
+### /reasoning
 
 设置推理（思考）深度。
 
@@ -777,11 +778,11 @@
 
 ---
 
-## 4. 审批流程 / Approval Flow
+## 4. 审批流程
 
 当 Codex 需要执行 shell 命令、写入/修改文件或请求权限升级时，会通过 QQ 消息发送审批请求，等待用户决策。
 
-### /approvals / 审批
+### /approvals
 
 查看和切换执行审批策略。
 
@@ -818,7 +819,7 @@
 
 ---
 
-### /approve / 同意
+### /approve
 
 放行当前挂起的审批请求（仅本次）。
 
@@ -844,7 +845,7 @@
 
 ---
 
-### /approve-session / 同意本会话
+### /approve-session
 
 在当前会话中自动放行同类命令。
 
@@ -869,7 +870,7 @@
 
 ---
 
-### /deny / 拒绝
+### /deny
 
 拒绝当前审批请求。
 
@@ -894,7 +895,7 @@
 
 ---
 
-### /cancel / 取消
+### /cancel
 
 拒绝审批请求并终止当前回合。
 
@@ -921,11 +922,11 @@
 
 ---
 
-## 5. 计划模式 / Plan Mode
+## 5. 计划模式
 
 计划模式下，Codex 以只读方式运行，先制定计划再执行。
 
-### /plan / 计划
+### /plan
 
 进入或退出计划模式。
 
@@ -954,7 +955,7 @@
 
 ---
 
-### /execute-plan / 实施
+### /execute-plan
 
 审批通过待执行计划，开始执行。
 
@@ -983,7 +984,7 @@
 
 ---
 
-### /keep-planning / 继续规划
+### /keep-planning
 
 留在计划模式继续优化计划。
 
@@ -1008,7 +1009,7 @@
 
 ---
 
-### /cancel-plan / 取消计划
+### /cancel-plan
 
 丢弃当前待执行计划。
 
@@ -1033,7 +1034,7 @@
 
 ---
 
-## 6. 命令别名 / Command Aliases
+## 6. 命令别名
 
 用户可以创建自定义命令别名，支持多步管道式执行。
 
@@ -1121,7 +1122,7 @@
 
 ---
 
-## 7. 定时任务 / Scheduler
+## 7. 定时任务
 
 通过 QQ 管理自己的定时任务。任务由 CodexClaw 的调度器引擎在后台执行。
 
@@ -1268,9 +1269,9 @@
 
 ---
 
-## 8. 系统命令 / System
+## 8. 系统命令
 
-### /self-update / 自更新
+### /self-update
 
 构建并部署最新版本。
 
@@ -1303,7 +1304,7 @@
 
 ---
 
-### /back / 返回
+### /back
 
 退出当前交互式设置。
 
@@ -1335,7 +1336,7 @@
 
 ---
 
-### /retry / 重试
+### /retry
 
 在恢复失败交互模式中重试恢复。
 
@@ -1367,7 +1368,7 @@
 
 ---
 
-## 交互模式行为规则 / Interactive Mode Rules
+## 交互模式行为规则
 
 以下命令在无参数时会进入交互式设置模式：`/model`、`/fast`、`/context`、`/reasoning`、`/verbose`、`/lang`、`/approvals`、`/plan`、`/sessions`、`/import`、`/fg`、`/resume`、`/loadbg`。
 
@@ -1377,38 +1378,3 @@
 2. **`/back`**（或 `/返回`）退出交互模式，清除 pending 状态。
 3. **其他斜杠命令**会隐式退出当前交互模式（清除 pending 状态并发送"已退出 `XXX` 设置"通知），然后执行该命令。
 4. 交互模式下的模糊匹配：输入的值会模糊匹配选项列表。匹配到唯一项则应用，匹配多个则提示"请更精确"，匹配不到则提示"没有匹配项"。
-
----
-
-## English Summary
-
-CodexClaw is a Rust-based QQ bot powered by OpenAI Codex. Users interact with it via slash commands in QQ direct messages. Every command has a Chinese alias that is canonicalized to the English form at dispatch time.
-
-### Command Categories
-
-**Basic:** `/help`, `/status`, `/lang`, `/verbose` -- show help, session status, switch UI language, toggle verbose output.
-
-**Session Management:** `/new`, `/stop`, `/interrupt`, `/save`, `/sessions`, `/import`, `/resume`, `/loadbg`, `/bg`, `/fg`, `/rename`, `/compact` -- create, end, browse, restore, background/foreground, and compress sessions.
-
-**Model Settings:** `/model`, `/fast`, `/context`, `/reasoning` -- configure the model name, fast service tier, context window size (272K/1M), and reasoning depth (low/medium/high/xhigh). Changes apply globally when the foreground session is unsaved, or per-session when saved.
-
-**Approval Flow:** `/approvals`, `/approve`, `/approve-session`, `/deny`, `/cancel` -- configure the approval policy and respond to pending approval requests for shell commands, file writes, and permission escalations.
-
-**Plan Mode:** `/plan`, `/execute-plan`, `/keep-planning`, `/cancel-plan` -- enter a read-only planning mode where Codex proposes a plan before execution, then approve/refine/discard the plan.
-
-**Command Aliases:** `/alias add|list|remove` -- create multi-step command aliases with pipe-separated sub-commands. Max expansion depth is 3. Built-in command names cannot be overridden.
-
-**Scheduler:** `/cron list|pause|resume|rm|run-now|tail` -- manage personal cron jobs from QQ. Only the job owner can manage their own jobs.
-
-**System:** `/self-update` (build and hot-swap the binary), `/back` (exit interactive mode), `/retry` (retry a failed session resume).
-
-### Interactive Mode
-
-When invoked without arguments, many commands enter an interactive picker. In this mode, plain text is consumed by the picker; `/back` exits; other slash commands implicitly exit the picker first.
-
-### Key Behaviors
-
-- **Busy guard:** Only one Codex turn runs at a time. Extra messages are rejected with a "still processing" notice.
-- **Context warnings:** When context usage exceeds 80%, a warning is appended suggesting `/compact`.
-- **Auto-build on self-modification:** If a Codex turn modifies CodexClaw's own source code, an automatic build is triggered.
-- **Resume recovery:** If session resumption fails, the user enters a recovery flow with `/retry`, `/new`, or `/cancel` options.

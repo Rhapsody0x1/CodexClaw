@@ -1,26 +1,27 @@
-# CodexClaw Scheduler -- 定时任务系统 (Scheduled Task System)
-
-> 版本对应: `vibe-dev` 分支，2026-05
+# CodexClaw 定时任务系统
 
 ---
 
-## 目录 (Table of Contents)
-
-1. [架构概览 (Architecture)](#架构概览-architecture)
-2. [任务模型 (Job Schema)](#任务模型-job-schema)
-3. [调度类型 (CronKind)](#调度类型-cronkind)
-4. [任务动作 (JobAction)](#任务动作-jobaction)
-5. [交互模式 (Interactive Mode)](#交互模式-interactive-mode)
-6. [CLI 命令 (CLI Commands)](#cli-命令-cli-commands)
-7. [QQ 命令 (QQ Commands)](#qq-命令-qq-commands)
-8. [目录结构 (Directory Layout)](#目录结构-directory-layout)
-9. [生命周期 (Lifecycle)](#生命周期-lifecycle)
-10. [最佳实践 (Best Practices)](#最佳实践-best-practices)
-11. [English Summary](#english-summary)
+*Read this in: [English](scheduler_en.md) | [中文](scheduler.md)*
 
 ---
 
-## 架构概览 (Architecture)
+## 目录
+
+1. [架构概览](#架构概览)
+2. [任务模型](#任务模型)
+3. [调度类型](#调度类型)
+4. [任务动作](#任务动作)
+5. [交互模式](#交互模式)
+6. [CLI 命令](#cli-命令)
+7. [QQ 命令](#qq-命令)
+8. [目录结构](#目录结构)
+9. [生命周期](#生命周期)
+10. [最佳实践](#最佳实践)
+
+---
+
+## 架构概览
 
 Scheduler 是一个运行在 tokio 异步运行时上的无限循环任务。核心参数:
 
@@ -35,7 +36,7 @@ Scheduler 是一个运行在 tokio 异步运行时上的无限循环任务。核
 
 ---
 
-## 任务模型 (Job Schema)
+## 任务模型
 
 任务以 `CronJob` 结构体定义（`src/scheduler/store.rs`），字段如下:
 
@@ -57,7 +58,7 @@ Scheduler 是一个运行在 tokio 异步运行时上的无限循环任务。核
 | `failure_streak` | `u32` | 连续失败次数（熔断依据） |
 | `disabled` | `bool` | 是否已停用 |
 
-### 推送策略 (DeliverPolicy)
+### 推送策略
 
 | 枚举值 | 行为 |
 |--------|------|
@@ -66,7 +67,7 @@ Scheduler 是一个运行在 tokio 异步运行时上的无限循环任务。核
 | `LogOnly` | 仅写日志，不推送 |
 | `PushTruncated` | 推送截断后的结果（适用于大输出） |
 
-### 运行状态 (RunStatus)
+### 运行状态
 
 | 枚举值 | 说明 |
 |--------|------|
@@ -76,7 +77,7 @@ Scheduler 是一个运行在 tokio 异步运行时上的无限循环任务。核
 
 ---
 
-## 调度类型 (CronKind)
+## 调度类型
 
 ### Recurring -- 周期性任务
 
@@ -108,7 +109,7 @@ OneShot { at: DateTime<Utc> }
 
 ---
 
-## 任务动作 (JobAction)
+## 任务动作
 
 ### 1. Reminder -- 提醒
 
@@ -170,7 +171,7 @@ Shell {
 
 ---
 
-## 交互模式 (Interactive Mode)
+## 交互模式
 
 交互模式允许定时任务在触发后与用户进行多轮对话，由 `InteractiveSpec` 配置:
 
@@ -180,7 +181,7 @@ Shell {
 | `end_signal` | `"<<<CLAW_END>>>"` | Codex 发出此信号表示交互结束 |
 | `max_rounds_hard_cap` | `10` | 最大来回轮次上限 |
 
-### 交互流程 (Flow)
+### 交互流程
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -200,7 +201,7 @@ Shell {
 
 ---
 
-## CLI 命令 (CLI Commands)
+## CLI 命令
 
 所有命令通过 `codex-claw cron` 子命令调用。
 
@@ -307,7 +308,7 @@ codex-claw cron tail 01J5K...
 
 ---
 
-## QQ 命令 (QQ Commands)
+## QQ 命令
 
 用户可在 QQ 中通过以下命令管理自己的定时任务:
 
@@ -324,7 +325,7 @@ codex-claw cron tail 01J5K...
 
 ---
 
-## 目录结构 (Directory Layout)
+## 目录结构
 
 ```
 data/
@@ -351,7 +352,7 @@ data/
 
 ---
 
-## 生命周期 (Lifecycle)
+## 生命周期
 
 ```
 创建 ──> 调度 ──> 执行 ──> 成功 ──> 更新 next_run_at ──> 调度（循环）
@@ -387,7 +388,7 @@ data/
 
 ---
 
-## 最佳实践 (Best Practices)
+## 最佳实践
 
 ### 为定时任务编写专属 Skill
 
@@ -418,26 +419,3 @@ Agent 应先和用户确认以下要素，再创建任务:
 
 - **PerInvocation**（默认）: 每次执行互不影响。适合独立的重复性任务。
 - **Persistent**: 跨次保留上下文。适合需要记住历史的连续性任务（如追踪项目进度）。
-
----
-
-## English Summary
-
-CodexClaw's scheduler is a tokio-based background task system that powers recurring and one-shot jobs for the QQ bot. Key highlights:
-
-**Architecture** -- An infinite-loop tokio task ticks every 30 seconds, using a semaphore (max 4 concurrent jobs) and an in-flight set to prevent duplicate execution.
-
-**Job types** -- Each job has a `CronKind` (Recurring with a 6-field cron expression, or OneShot at a fixed UTC time) and a `JobAction`:
-- *Reminder* -- send a message to the owner via QQ.
-- *CodexTurn* -- run a full Codex turn through the app-server pipeline (recommended).
-- *CodexExec* -- run via `codex exec` CLI (legacy).
-- *Shell* -- run an arbitrary command.
-
-**Interactive mode** -- CodexTurn jobs can include an `InteractiveSpec` that parks the user's current session, opens a new foreground session in the job workspace, and lets Codex chat with the user in real time until an end signal is emitted or the round cap is reached.
-
-**CLI** -- `codex-claw cron {add, once, list, rm, pause, resume, run-now, tail}`.
-**QQ** -- `/cron {list, pause, resume, rm, run-now, tail}` (alias: `/定时`).
-
-**Lifecycle** -- Create -> Schedule -> Execute -> Retry on failure -> Circuit-break after repeated failures -> Archive (one-shot). Delivery failures are buffered in `pending-deliveries/` and retried on the owner's next QQ message.
-
-**Best practice** -- For workflow-oriented tasks (news, market scans, paper summaries), the agent should confirm data sources, filters, output format, and failure strategies with the user, then write a dedicated skill into the job's `workspace/.agents/skills/` directory rather than relying on a single generic prompt.

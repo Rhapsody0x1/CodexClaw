@@ -1,24 +1,23 @@
-# CodexClaw System Architecture
+# CodexClaw 系统架构
 
 > CodexClaw 系统架构文档
->
-> 本文档以中文为主体，章节标题使用英文。文末附有英文摘要。
+
+*Read this in: [English](architecture_en.md) | [中文](architecture.md)*
 
 ---
 
-## Table of Contents
+## 目录
 
-1. [Overview](#overview)
-2. [System Diagram](#system-diagram)
-3. [Module Responsibilities](#module-responsibilities)
-4. [Key Data Flows](#key-data-flows)
-5. [Async Patterns](#async-patterns)
-6. [Extension Guide](#extension-guide)
-7. [English Summary](#english-summary)
+1. [概览](#概览)
+2. [系统架构图](#系统架构图)
+3. [模块职责](#模块职责)
+4. [关键数据流](#关键数据流)
+5. [异步模式](#异步模式)
+6. [扩展指南](#扩展指南)
 
 ---
 
-## Overview
+## 概览
 
 CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-server 进程将 QQ（中国主流即时通讯平台）桥接到 OpenAI Codex CLI。系统提供以下核心能力：
 
@@ -31,7 +30,7 @@ CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-ser
 
 ---
 
-## System Diagram
+## 系统架构图
 
 ```
 ┌─────────────────┐       WebSocket        ┌──────────────┐
@@ -70,9 +69,9 @@ CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-ser
 
 ---
 
-## Module Responsibilities
+## 模块职责
 
-### src/main.rs -- Entry Point
+### src/main.rs -- 入口
 
 程序入口。负责解析 CLI 参数（路由到调度器 CLI 或 Bot 主服务），加载配置文件，规范化路径，并按以下顺序引导启动所有服务：
 
@@ -81,7 +80,7 @@ CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-ser
   -> memory -> shadow -> scheduler -> gateway
 ```
 
-### src/app.rs (~1656 lines) -- Central Dispatcher
+### src/app.rs (~1656 行) -- 中央调度
 
 中央调度模块，是系统的核心枢纽。
 
@@ -92,7 +91,7 @@ CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-ser
 | 审批代理集成         | 将 app-server 发起的审批请求路由到 QQ 用户               |
 | 自我更新检测         | 当 Codex 修改了源码文件时触发重编译                      |
 
-### src/commands.rs (~600+ lines) -- Command Dispatch
+### src/commands.rs (~5,700+ 行) -- 命令分发
 
 命令解析与分发模块。
 
@@ -101,7 +100,7 @@ CodexClaw 是一个约 24,000 行的 Rust 异步应用，通过长驻的 app-ser
 - 别名展开，递归深度限制为 3 层
 - 受保护命令列表，防止别名冲突
 
-### src/codex/ -- Codex Integration
+### src/codex/ -- Codex 集成
 
 Codex 集成子系统，是代码量最大的模块。
 
@@ -128,7 +127,7 @@ Codex 集成子系统，是代码量最大的模块。
 | config_snapshot.rs| 从系统 `~/.codex` 引导初始化 `~/.codex-claw/.codex`       |
 | compact.rs        | 会话上下文压缩                                             |
 
-### src/qq/ -- QQ Platform Integration
+### src/qq/ -- QQ 平台集成
 
 QQ 平台集成模块。
 
@@ -139,7 +138,7 @@ QQ 平台集成模块。
 | passive.rs  | `PassiveTurnEmitter` -- 将 Codex 事件流式推送到 QQ（批量工具调用，500 字符长消息拆分） |
 | types.rs    | QQ Gateway 协议类型定义                                                  |
 
-### src/session/ -- Session State
+### src/session/ -- 会话状态
 
 会话状态模块。
 
@@ -148,7 +147,7 @@ QQ 平台集成模块。
 | state.rs  | `SessionSettings`、`ReasoningEffort`、`ContextMode`、`ApprovalPolicy`、`TokenUsageSnapshot` 等类型 |
 | store.rs  | 磁盘持久化的按用户状态存储，文件锁，前台/后台会话管理，工作区目录                   |
 
-### src/scheduler/ -- Cron Scheduling
+### src/scheduler/ -- 定时调度
 
 定时调度模块。
 
@@ -161,7 +160,7 @@ QQ 平台集成模块。
 | cron_expr.rs    | Cron 表达式解析，时区支持                        |
 | interactive.rs  | 多轮次调度任务，劫持前台会话                     |
 
-### src/memory/ -- User Memory
+### src/memory/ -- 用户记忆
 
 用户记忆模块。
 
@@ -171,7 +170,7 @@ QQ 平台集成模块。
 | inject.rs | 格式化记忆块用于提示词注入                             |
 | scan.rs   | 记忆条目扫描与过滤                                     |
 
-### src/shadow/ -- Background Distillation
+### src/shadow/ -- 后台蒸馏
 
 后台蒸馏模块。
 
@@ -183,7 +182,7 @@ QQ 平台集成模块。
 | prompt.rs | 记忆/技能合成的提示词                    |
 | runner.rs | 一次性 Codex 调用，用于 shadow 任务      |
 
-### src/skills/ -- Skill Discovery
+### src/skills/ -- 技能发现
 
 技能发现模块。
 
@@ -192,7 +191,7 @@ QQ 平台集成模块。
 | index.rs  | 文件系统技能扫描，带缓存       |
 | writer.rs | 写入 `SKILL.md` 文件           |
 
-### Other Files
+### 其他文件
 
 | 文件              | 职责                                               |
 | ----------------- | -------------------------------------------------- |
@@ -203,9 +202,9 @@ QQ 平台集成模块。
 
 ---
 
-## Key Data Flows
+## 关键数据流
 
-### 1. Normal Conversation Turn -- 正常对话轮次
+### 1. 正常对话轮次
 
 ```
 QQ WebSocket 事件
@@ -227,7 +226,7 @@ QQ WebSocket 事件
   -> 释放忙碌锁
 ```
 
-### 2. Approval Flow -- 审批流程
+### 2. 审批流程
 
 ```
 codex app-server -> 审批通知 (JSON-RPC)
@@ -240,7 +239,7 @@ codex app-server -> 审批通知 (JSON-RPC)
   -> app-server 继续执行或取消轮次
 ```
 
-### 3. Scheduler -- 调度器
+### 3. 调度器
 
 ```
 Scheduler.tick() 每隔 tick_secs (默认 30 秒) 执行一次
@@ -258,7 +257,7 @@ Scheduler.tick() 每隔 tick_secs (默认 30 秒) 执行一次
 
 ---
 
-## Async Patterns
+## 异步模式
 
 CodexClaw 基于 tokio 多线程运行时构建，使用以下异步模式：
 
@@ -276,9 +275,9 @@ CodexClaw 基于 tokio 多线程运行时构建，使用以下异步模式：
 
 ---
 
-## Extension Guide
+## 扩展指南
 
-### How to Add a New Command -- 添加新命令
+### 添加新命令
 
 1. 在 `src/commands.rs` 的 `PROTECTED_COMMANDS` 中添加命令字符串。
 2. 在 `commands.rs` 底部的 `canonicalize_core_command()` 中添加中文别名。
@@ -287,31 +286,10 @@ CodexClaw 基于 tokio 多线程运行时构建，使用以下异步模式：
 5. 在 `locales/en.yml` 和 `locales/zh.yml` 中添加语言键。
 6. 在两个语言文件的 `commands.help` 下添加帮助条目。
 
-### How to Add a New Module -- 添加新模块
+### 添加新模块
 
 1. 创建 `src/<module>/mod.rs`。
 2. 在 `src/lib.rs` 中添加 `pub mod <module>;`。
 3. 如需要，将模块接入 `App` 结构体（参考 session/memory/shadow 的模式）。
 4. 在每个文件中使用 `#[cfg(test)] mod tests` 添加单元测试。
 5. 如有需要，在 `tests/` 目录下添加集成测试。
-
----
-
-## English Summary
-
-CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's major messaging platform) to OpenAI's Codex CLI through a long-lived app-server child process communicating over JSON-RPC via stdio.
-
-**Core components:**
-
-- **gateway.rs** -- Maintains a WebSocket connection to Tencent's QQ Gateway, handling heartbeats and reconnection with exponential backoff.
-- **app.rs** -- Central dispatcher (~1,656 lines) that coordinates the entire message processing pipeline: event normalization, attachment download, command parsing, Codex execution, approval brokering, and self-update detection. Uses an atomic busy flag to serialize turns globally.
-- **commands.rs** -- Parses slash commands with Chinese alias canonicalization, supports alias expansion (3-level recursion limit), and maintains a protected command list to prevent collisions.
-- **codex/** -- The largest subsystem. Contains a JSON-RPC client for the long-lived codex app-server process (`supervisor.rs`, `client.rs`, `transport.rs`), per-turn session management (`session.rs`, ~46KB), hand-copied protocol types (`protocol.rs`, ~31KB), approval routing, prompt construction with memory injection, and output parsing for qqbot directives.
-- **qq/** -- QQ platform integration: REST API client with token caching and chunked file upload, WebSocket gateway, and `PassiveTurnEmitter` that streams Codex events to QQ users (batching tool calls, splitting messages at 500 characters).
-- **session/** -- Disk-backed per-user session state with file locking, supporting foreground/background session management and workspace directories.
-- **scheduler/** -- Cron scheduling system with semaphore-based concurrency, support for reminder/codex-turn/codex-exec/shell job types, failure streak tracking with circuit breaker auto-disable, and one-shot job recycling.
-- **memory/** -- Per-user memory files (`MEMORY.md`, `USER.md`) with section-delimited entries, injected into prompts for personalized context.
-- **shadow/** -- Background distillation worker that extracts facts, insights, and skill information from conversation turns and modified files via one-shot Codex invocations.
-- **skills/** -- Filesystem-based skill discovery with caching and `SKILL.md` generation.
-
-**Async architecture:** Built on the tokio multi-threaded runtime. Uses `Arc<App>` for shared state, `AtomicBool` for the busy flag, `tokio::sync::Mutex` for per-user state, `RwLock` for gateway sessions, `Semaphore` for scheduler concurrency, `oneshot` channels for approval resolution, `mpsc::unbounded_channel` for execution event streaming, `Weak<App>` to break reference cycles in the scheduler, and `fs2` file locking for safe concurrent disk writes.

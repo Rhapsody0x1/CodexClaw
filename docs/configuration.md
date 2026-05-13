@@ -1,10 +1,12 @@
+*Read this in: [English](configuration_en.md) | [中文](configuration.md)*
+
 # CodexClaw 配置参考 (Configuration Reference)
 
 本文档描述 CodexClaw 的全部配置项。配置文件使用 TOML 格式。
 
 ---
 
-## 配置文件加载顺序 (Config Loading Order)
+## 配置文件加载顺序
 
 CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
@@ -12,7 +14,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 2. 当前工作目录下的 `./codexclaw.toml`
 3. 回退路径 `~/.codex-claw/codexclaw.toml`
 
-### 启动校验 (Startup Validation)
+### 启动校验
 
 以下字段为必填项，不能为空字符串，否则程序启动将失败：
 
@@ -22,14 +24,14 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ---
 
-## 路径处理说明 (Path Handling Notes)
+## 路径处理说明
 
 - **波浪号展开**：所有 `PathBuf` 类型的字段中，前缀 `~` 会在运行时展开为 `$HOME` 的实际值。例如 `~/.codex-claw/data` 会展开为 `/home/youruser/.codex-claw/data`。
 - **相对路径**：如果配置中使用了相对路径（如 `"."`），则相对于 CodexClaw 进程的当前工作目录解析。
 
 ---
 
-## `[general]` — 通用配置 (General Settings)
+## `[general]` — 通用配置
 
 控制运行时目录、Codex CLI 调用方式、以及自更新行为。
 
@@ -48,7 +50,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ---
 
-## `[qq]` — QQ 机器人配置 (QQ Bot Settings)
+## `[qq]` — QQ 机器人配置
 
 配置 QQ 开放平台的认证信息和 API 端点。
 
@@ -64,7 +66,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ---
 
-## `[shadow]` — 后台蒸馏配置 (Shadow Distillation Settings)
+## `[shadow]` — 后台蒸馏配置
 
 控制后台记忆蒸馏和技能蒸馏模块的行为。当 `enabled = false` 时，整个 shadow 子系统不会运行。
 
@@ -80,7 +82,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ---
 
-## `[scheduler]` — 调度器配置 (Scheduler Settings)
+## `[scheduler]` — 调度器配置
 
 控制定时任务调度器。调度器支持 cron 表达式触发任务，并内置重试、熔断机制。
 
@@ -98,7 +100,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ---
 
-## 完整配置示例 (Full Example)
+## 完整配置示例
 
 以下是一份包含所有字段的完整配置文件，可作为起始模板使用。
 
@@ -153,22 +155,3 @@ retry_backoff_secs       = 30
 circuit_breaker_threshold = 5            # 连续失败 5 次后自动停用
 runs_retention           = 30
 ```
-
----
-
-## Summary (English)
-
-CodexClaw reads its configuration from a single TOML file, resolved in order:
-
-1. The path in the `CODEX_CLAW_CONFIG` environment variable
-2. `./codexclaw.toml` in the current working directory
-3. `~/.codex-claw/codexclaw.toml` as a fallback
-
-The file is divided into four sections:
-
-- **`[general]`** -- Runtime directories, Codex CLI binary location, default model/reasoning settings, and self-update parameters.
-- **`[qq]`** -- QQ Bot platform credentials (`app_id` and `app_secret` are required) and API endpoint URLs. The default `api_base_url` points to the sandbox; switch it to `https://api.sgroup.qq.com` for production.
-- **`[shadow]`** -- Background memory and skill distillation. Controls when distillation triggers (message length, file count, tool call count) and resource limits (model, reasoning depth, timeout).
-- **`[scheduler]`** -- Cron-based task scheduler with configurable concurrency, timeouts, retry back-off, and a circuit breaker that auto-disables a job after repeated failures.
-
-All `PathBuf` fields support tilde (`~`) expansion to `$HOME`. Relative paths are resolved against the process working directory.

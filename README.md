@@ -4,6 +4,8 @@
 
 由 [OpenAI Codex App-Server](https://developers.openai.com/codex/app-server) 驱动的 QQ 私人 AI 助理
 
+*Read this in: [English](README_en.md) | [中文](README.md)*
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 
@@ -43,6 +45,8 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 3. Codex 订阅给的额度真的很多 👍；
 4. 这个项目在蹭 OpenClaw 的热度 : (
 
+一些其他的碎碎念可以看这篇 [Blog](https://rhapsody0x1.github.io/p/about-codex-claw)。
+
 ## 功能亮点
 
 - **会话管理** &mdash; 前台/后台多会话并行，支持保存、恢复、导入系统 Codex 会话
@@ -55,7 +59,7 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 
 > 完整部署指南见 [docs/getting-started.md](docs/getting-started.md)
 
-1. 在你想要部署 CodexClaw 的设备上配置好 Codex 的登陆凭据，确认 `codex exec --json` 可以正常运行；
+1. 在你想要部署 CodexClaw 的设备上配置好 Codex 的登陆凭据或 API key，确认 `codex` 命令启动的 TUI 中可以正常和 Codex 进行对话；
 
 2. 前往 [QQ 开放平台](https://q.qq.com/)，按要求完成登陆和个人认证等操作；
 
@@ -122,22 +126,46 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 
 </details>
 
+## 定时任务
+
+CodexClaw 内置 cron 调度器，支持以下类型的任务：
+
+| 类型 | 说明 |
+|------|------|
+| `reminder` | 在指定时间发送提醒消息 |
+| `codex` | 按计划执行 Codex 任务 |
+| `shell` | 按计划运行 Shell 命令或脚本 |
+| `interactive` | 按计划发起交互式多轮对话 |
+
+> 完整的调度器参考见 [docs/scheduler.md](docs/scheduler.md)
+
+## 运行时文件
+
+| 路径 | 说明 |
+|------|------|
+| `~/.codex-claw/codexclaw.toml` | 主配置文件 |
+| `~/.codex-claw/data/` | 运行时数据目录 |
+| `~/.codex-claw/.codex/` | 独立的 Codex 运行目录 |
+| `~/.codex-claw/data/session/` | 会话存储 |
+| `~/.codex-claw/data/memory/` | 记忆蒸馏数据 |
+| `~/.codex-claw/data/scheduler/` | 调度器持久化数据 |
+
 ## 文档
 
-| 文档 | 说明 |
-|------|------|
-| [快速入门](docs/getting-started.md) | 安装、配置、首次运行与系统服务注册 |
-| [命令参考](docs/commands.md) | 全部 QQ 命令的详细用法 |
-| [配置参考](docs/configuration.md) | 所有 TOML 配置项及默认值 |
-| [定时任务](docs/scheduler.md) | 调度器系统、CLI 完整参考与最佳实践 |
-| [系统架构](docs/architecture.md) | 模块职责、数据流与扩展指南 |
-| [贡献指南](CONTRIBUTING.md) | 开发环境、代码风格与 PR 流程 |
+| 文档 | English |
+|------|---------|
+| [快速入门](docs/getting-started.md) | [Getting Started](docs/getting-started_en.md) |
+| [命令参考](docs/commands.md) | [Commands](docs/commands_en.md) |
+| [配置参考](docs/configuration.md) | [Configuration](docs/configuration_en.md) |
+| [定时任务](docs/scheduler.md) | [Scheduler](docs/scheduler_en.md) |
+| [系统架构](docs/architecture.md) | [Architecture](docs/architecture_en.md) |
+| [贡献指南](CONTRIBUTING.md) | [Contributing](CONTRIBUTING_en.md) |
 
 ## 贡献指南
 
 本项目主要围绕作者的个人需求与兴趣演进。如果你有新的想法或使用场景，欢迎在 Discussion 中交流；如果你发现了明确的 Bug 或兼容性问题，也欢迎提交 Issue。对于功能建议，作者不保证一定会采纳、排期或长期维护。
 
-若你的需求较为个性化，或与当前路线不完全一致，你可以直接 fork 本仓库，并在其基础上继续定制。
+若你的需求较为个性化，或与当前路线不完全一致，你可以直接 fork 本仓库，并在其基础上继续定制。如果你做出了有趣的功能，作者主张你**通过分享你使用的 Prompt 或 Plan** 来实现功能的共享。
 
 详细的开发指南见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
