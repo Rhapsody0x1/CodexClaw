@@ -7,6 +7,7 @@ pub mod config;
 pub mod memory;
 pub mod message;
 pub mod qq;
+pub mod scheduler;
 pub mod self_update;
 pub mod session;
 pub mod shadow;

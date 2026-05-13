@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rust_i18n::t;
 
@@ -42,6 +42,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "compact",
     "self-update",
     "alias",
+    "cron",
     "back",
     "approvals",
     "plan",
@@ -78,6 +79,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "详细",
     "重命名",
     "审批",
+    "定时",
     "计划",
     "同意",
     "同意本会话",
@@ -302,6 +304,7 @@ fn maybe_handle_command_inner<'a>(
             }
             "/approvals" => handle_approvals(&rest, openid, session).await,
             "/plan" => handle_plan(&rest, openid, session).await,
+            "/cron" => handle_cron(&rest, openid, session).await,
             "/execute-plan" => handle_execute_plan(openid, session).await,
             "/keep-planning" => handle_keep_planning(openid, session).await,
             "/cancel-plan" => handle_cancel_plan(openid, session).await,
@@ -1031,6 +1034,153 @@ async fn handle_plan(
         }));
     }
     handle_plan_arg(&args.join(" "), openid, session).await
+}
+
+async fn handle_cron(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+) -> Result<CommandOutcome> {
+    let Some(subcommand) = args.first().copied() else {
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: "用法：/cron list | pause <job_id> | resume <job_id> | rm <job_id> | run-now <job_id> | tail <job_id>".to_string(),
+        }));
+    };
+    match subcommand {
+        "list" | "ls" => {
+            let mut jobs = session.list_cron_jobs().await?;
+            jobs.retain(|job| job.owner_openid == openid);
+            jobs.sort_by_key(|job| job.next_run_at);
+            if jobs.is_empty() {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: "当前没有你的定时任务。".to_string(),
+                }));
+            }
+            let mut text = String::from("你的定时任务：");
+            for job in jobs {
+                text.push_str(&format!(
+                    "\n{}  {}  next={}  runs={}  failures={}  {}",
+                    job.id,
+                    if job.disabled { "disabled" } else { "enabled" },
+                    job.next_run_at
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string()),
+                    job.run_count,
+                    job.failure_streak,
+                    job.title
+                ));
+            }
+            Ok(CommandOutcome::Reply(CommandReply { text }))
+        }
+        "pause" | "resume" | "rm" | "remove" | "run-now" | "tail" => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| anyhow!("{subcommand} requires <job_id>"))?;
+            let job = session
+                .get_cron_job(id)
+                .await?
+                .ok_or_else(|| anyhow!("定时任务 `{id}` 不存在"))?;
+            if job.owner_openid != openid {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: "只能管理你自己的定时任务。".to_string(),
+                }));
+            }
+            match subcommand {
+                "pause" => {
+                    session
+                        .update_cron_job(id, |job| {
+                            job.disabled = true;
+                            Ok(())
+                        })
+                        .await?;
+                    Ok(CommandOutcome::Reply(CommandReply {
+                        text: format!("已暂停 `{}`。", job.title),
+                    }))
+                }
+                "resume" => {
+                    session
+                        .update_cron_job(id, |job| {
+                            job.disabled = false;
+                            job.next_run_at =
+                                crate::scheduler::cron_expr::next_after(&job.kind, Utc::now())?;
+                            if job.next_run_at.is_none()
+                                && matches!(
+                                    job.kind,
+                                    crate::scheduler::store::CronKind::OneShot { .. }
+                                )
+                            {
+                                job.run_now_at = Some(Utc::now());
+                            }
+                            Ok(())
+                        })
+                        .await?;
+                    Ok(CommandOutcome::Reply(CommandReply {
+                        text: format!("已恢复 `{}`。", job.title),
+                    }))
+                }
+                "rm" | "remove" => {
+                    session.remove_cron_job(id).await?;
+                    crate::scheduler::store::remove_job_files(
+                        session.data_dir(),
+                        session.codex_home(),
+                        id,
+                        false,
+                    )
+                    .await?;
+                    Ok(CommandOutcome::Reply(CommandReply {
+                        text: format!("已删除 `{}`。", job.title),
+                    }))
+                }
+                "run-now" => {
+                    session
+                        .update_cron_job(id, |job| {
+                            job.run_now_at = Some(Utc::now());
+                            Ok(())
+                        })
+                        .await?;
+                    Ok(CommandOutcome::Reply(CommandReply {
+                        text: format!("已安排 `{}` 立即运行一次。", job.title),
+                    }))
+                }
+                "tail" => {
+                    let runs_dir = job
+                        .workspace_dir
+                        .parent()
+                        .unwrap_or(job.workspace_dir.as_path())
+                        .join("runs");
+                    let mut entries = std::fs::read_dir(&runs_dir)
+                        .with_context(|| format!("failed to read {}", runs_dir.display()))?
+                        .filter_map(Result::ok)
+                        .collect::<Vec<_>>();
+                    entries.sort_by_key(|entry| entry.file_name());
+                    let Some(last) = entries.last() else {
+                        return Ok(CommandOutcome::Reply(CommandReply {
+                            text: "还没有运行日志。".to_string(),
+                        }));
+                    };
+                    let raw = std::fs::read_to_string(last.path())?;
+                    let preview = tail_chars(&raw, 3500);
+                    Ok(CommandOutcome::Reply(CommandReply {
+                        text: format!("最近运行日志 `{}`：\n{}", last.path().display(), preview),
+                    }))
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => Ok(CommandOutcome::Reply(CommandReply {
+            text: "未知 /cron 子命令。".to_string(),
+        })),
+    }
+}
+
+fn tail_chars(raw: &str, max_chars: usize) -> String {
+    let count = raw.chars().count();
+    if count <= max_chars {
+        return raw.to_string();
+    }
+    raw.chars()
+        .skip(count.saturating_sub(max_chars))
+        .collect::<String>()
 }
 
 async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
@@ -2403,6 +2553,7 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/重命名" => "/rename",
         "/返回" => "/back",
         "/审批" => "/approvals",
+        "/定时" => "/cron",
         "/计划" => "/plan",
         "/同意" => "/approve",
         "/同意本会话" => "/approve-session",
@@ -2489,6 +2640,7 @@ fn help_text(lang: &str) -> String {
         t!("commands.help.section_approval_settings", locale = lang).into_owned(),
         t!("commands.help.entry_approvals", locale = lang).into_owned(),
         t!("commands.help.entry_plan", locale = lang).into_owned(),
+        "`/cron list|pause|resume|rm|run-now|tail` - manage scheduled tasks".to_string(),
         t!("commands.help.entry_execute_plan", locale = lang).into_owned(),
         t!("commands.help.entry_keep_planning", locale = lang).into_owned(),
         t!("commands.help.entry_cancel_plan", locale = lang).into_owned(),

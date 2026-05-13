@@ -1,0 +1,14 @@
+title: "[问答] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        在这里提出使用问题。提问前建议先查阅 [快速入门](../docs/getting-started.md) 和 [配置参考](../docs/configuration.md)。
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题描述
+      description: 尽量包含你的环境信息和已经尝试过的步骤
+    validations:
+      required: true

@@ -10,7 +10,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     codex::{
-        app_server::{AppServerHandle, TurnPolicy, protocol::ApprovalPolicy},
+        app_server::{
+            AppServerHandle, TurnPolicy,
+            protocol::{ApprovalPolicy, ApprovalsReviewer},
+        },
         events::{CodexItem, PatchChangeKind, TokenUsageInfo, WebSearchAction},
     },
     session::state::{
@@ -120,7 +123,12 @@ pub fn build_turn_policy(request: &ExecutionRequest) -> TurnPolicy {
         return TurnPolicy::plan_mode();
     }
     if let Some(setting) = request.session_state.settings.approval_policy_override {
-        return TurnPolicy::with_approval_policy(approval_setting_to_protocol(setting));
+        return match setting {
+            ApprovalPolicySetting::GuardianSubagent => {
+                TurnPolicy::with_approvals_reviewer(ApprovalsReviewer::GuardianSubagent)
+            }
+            _ => TurnPolicy::with_approval_policy(approval_setting_to_protocol(setting)),
+        };
     }
     TurnPolicy::inherit_from_config()
 }
@@ -130,6 +138,7 @@ fn approval_setting_to_protocol(setting: ApprovalPolicySetting) -> ApprovalPolic
         ApprovalPolicySetting::UnlessTrusted => ApprovalPolicy::UnlessTrusted,
         ApprovalPolicySetting::OnRequest => ApprovalPolicy::OnRequest,
         ApprovalPolicySetting::Never => ApprovalPolicy::Never,
+        ApprovalPolicySetting::GuardianSubagent => ApprovalPolicy::OnRequest,
     }
 }
 

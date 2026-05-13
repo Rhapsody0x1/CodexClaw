@@ -85,6 +85,7 @@ pub enum ApprovalPolicySetting {
     UnlessTrusted,
     OnRequest,
     Never,
+    GuardianSubagent,
 }
 
 impl ApprovalPolicySetting {
@@ -93,6 +94,9 @@ impl ApprovalPolicySetting {
             "never" | "off" | "关" | "关闭" => Some(Self::Never),
             "on-request" | "on" | "开" | "开启" | "ask" => Some(Self::OnRequest),
             "unless-trusted" | "strict" | "严格" => Some(Self::UnlessTrusted),
+            "guardian-subagent" | "guardian" | "guardian_subagent" | "守护" => {
+                Some(Self::GuardianSubagent)
+            }
             _ => None,
         }
     }
@@ -102,6 +106,7 @@ impl ApprovalPolicySetting {
             Self::UnlessTrusted => "unless-trusted",
             Self::OnRequest => "on-request",
             Self::Never => "never",
+            Self::GuardianSubagent => "guardian-subagent",
         }
     }
 
@@ -110,6 +115,7 @@ impl ApprovalPolicySetting {
             Self::UnlessTrusted => "严格（unless-trusted）",
             Self::OnRequest => "按需（on-request）",
             Self::Never => "关闭（never）",
+            Self::GuardianSubagent => "守护子代理（guardian-subagent）",
         }
     }
 
@@ -118,6 +124,7 @@ impl ApprovalPolicySetting {
             Self::UnlessTrusted => "unless-trusted",
             Self::OnRequest => "on-request",
             Self::Never => "never",
+            Self::GuardianSubagent => "guardian-subagent",
         }
     }
 }
@@ -586,6 +593,8 @@ pub struct PersistedSessionState {
     pub users: BTreeMap<String, UserSessionState>,
     #[serde(default)]
     pub imported_profiles: BTreeMap<String, ImportedSessionProfile>,
+    #[serde(default)]
+    pub cron_jobs: BTreeMap<String, crate::scheduler::store::CronJob>,
 }
 
 #[cfg(test)]

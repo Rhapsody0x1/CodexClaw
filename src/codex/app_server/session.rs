@@ -28,14 +28,14 @@ use super::{
     client::{JsonRpcClient, Notification},
     events::{self as translator, TurnOutcome, TurnState},
     protocol::{
-        ApprovalPolicy, CollaborationMode, CollaborationSettings, CompactedNotification,
-        ItemNotification, ModeKind, ModelReroutedNotification, PermissionProfileModificationParams,
-        PermissionProfileSelectionParams, SandboxMode, SandboxPolicy, ThreadCompactStartParams,
-        ThreadCompactStartResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-        ThreadStartResponse, ThreadUnsubscribeParams, ThreadUnsubscribeResponse,
-        ThreadUnsubscribeStatus, TokenUsageUpdatedNotification, TurnCompletedNotification,
-        TurnInputItem, TurnInterruptParams, TurnInterruptResponse, TurnPlanUpdatedNotification,
-        TurnStartParams, TurnStartResponse, method,
+        ApprovalPolicy, ApprovalsReviewer, CollaborationMode, CollaborationSettings,
+        CompactedNotification, ItemNotification, ModeKind, ModelReroutedNotification,
+        PermissionProfileModificationParams, PermissionProfileSelectionParams, SandboxMode,
+        SandboxPolicy, ThreadCompactStartParams, ThreadCompactStartResponse, ThreadResumeParams,
+        ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadUnsubscribeParams,
+        ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TokenUsageUpdatedNotification,
+        TurnCompletedNotification, TurnInputItem, TurnInterruptParams, TurnInterruptResponse,
+        TurnPlanUpdatedNotification, TurnStartParams, TurnStartResponse, method,
     },
     supervisor::AppServerSupervisor,
 };
@@ -92,6 +92,7 @@ impl RuntimeConfigSignature {
 #[derive(Debug, Clone, Default)]
 pub struct TurnPolicy {
     pub approval_policy: Option<ApprovalPolicy>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_policy: Option<SandboxPolicy>,
     pub plan_mode: bool,
 }
@@ -108,6 +109,7 @@ impl TurnPolicy {
     pub fn plan_mode() -> Self {
         Self {
             approval_policy: Some(ApprovalPolicy::Never),
+            approvals_reviewer: None,
             sandbox_policy: Some(SandboxPolicy::ReadOnly {
                 network_access: false,
             }),
@@ -119,6 +121,16 @@ impl TurnPolicy {
     pub fn with_approval_policy(policy: ApprovalPolicy) -> Self {
         Self {
             approval_policy: Some(policy),
+            approvals_reviewer: None,
+            sandbox_policy: None,
+            plan_mode: false,
+        }
+    }
+
+    pub fn with_approvals_reviewer(reviewer: ApprovalsReviewer) -> Self {
+        Self {
+            approval_policy: None,
+            approvals_reviewer: Some(reviewer),
             sandbox_policy: None,
             plan_mode: false,
         }
@@ -180,7 +192,7 @@ impl AppServerSession {
             thread_id: thread_id.clone(),
             input: build_turn_input(&request),
             approval_policy: policy.approval_policy,
-            approvals_reviewer: None,
+            approvals_reviewer: policy.approvals_reviewer.clone(),
             sandbox_policy: policy.sandbox_policy.clone(),
             permissions: None,
             model: request.model.clone(),
@@ -359,7 +371,7 @@ impl AppServerSession {
                         model: request.model.clone(),
                         cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
                         approval_policy: policy.approval_policy,
-                        approvals_reviewer: None,
+                        approvals_reviewer: policy.approvals_reviewer.clone(),
                         sandbox: thread_sandbox(policy, &request.add_dirs),
                         permissions: build_permissions(&request.add_dirs),
                         service_tier: request.service_tier.map(service_tier_to_wire),
@@ -391,7 +403,7 @@ impl AppServerSession {
             model: request.model.clone(),
             cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
             approval_policy: policy.approval_policy,
-            approvals_reviewer: None,
+            approvals_reviewer: policy.approvals_reviewer.clone(),
             sandbox: thread_sandbox(policy, &request.add_dirs),
             permissions: build_permissions(&request.add_dirs),
             service_tier: request.service_tier.map(service_tier_to_wire),

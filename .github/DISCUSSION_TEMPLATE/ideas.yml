@@ -1,0 +1,13 @@
+title: "[想法] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        分享你的功能想法或改进建议。如果是明确的功能需求，也可以直接提交 [Feature Request](../issues/new?template=feature-request.yml)。
+  - type: textarea
+    id: idea
+    attributes:
+      label: 描述你的想法
+    validations:
+      required: true

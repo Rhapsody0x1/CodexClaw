@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "\U0001F4AC 使用问题 / Usage Questions"
+    url: https://github.com/Rhapsody0x1/CodexClaw/discussions/categories/q-a
+    about: 非 Bug 的使用疑问请到 Discussions 提问

@@ -42,18 +42,10 @@ pub fn changed_self_repo(
 }
 
 pub async fn ensure_successful_build(config: &AppConfig) -> Result<BuildResult> {
-    if let Some(record) = load_last_build_record(&config.general.data_dir).await?
-        && record.success
-    {
-        let binary_path = PathBuf::from(record.binary_path);
-        if binary_path.exists() {
-            return Ok(BuildResult {
-                success: true,
-                binary_path,
-                summary: "复用最近一次成功构建产物。".to_string(),
-            });
-        }
-    }
+    // Self-update must deploy the current working tree, not a previously
+    // recorded build artifact. Reusing last-build.json can silently roll the
+    // service back to an older binary when source files changed after the last
+    // successful release build.
     run_build(config).await
 }
 

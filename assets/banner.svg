@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="120" viewBox="0 0 680 120">
+  <defs>
+    <linearGradient id="t" x1="0" y1="0" x2="680" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4fc3f7"/>
+      <stop offset="50%" stop-color="#2979ff"/>
+      <stop offset="100%" stop-color="#1a237e"/>
+    </linearGradient>
+  </defs>
+  <text x="340" y="82"
+        font-family="'JetBrains Mono','Fira Code','Cascadia Code','SF Mono','Consolas',monospace"
+        font-size="76" font-weight="800"
+        fill="url(#t)"
+        letter-spacing="6"
+        text-anchor="middle">CodexClaw</text>
+</svg>

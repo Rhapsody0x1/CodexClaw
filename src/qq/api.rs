@@ -228,6 +228,25 @@ impl QqApiClient {
             .await
     }
 
+    pub async fn send_markdown(
+        &self,
+        openid: &str,
+        message_id: &str,
+        markdown: &str,
+        reference_message_id: Option<&str>,
+    ) -> Result<()> {
+        self.send_text_inner(openid, Some(message_id), markdown, reference_message_id)
+            .await
+    }
+
+    pub async fn send_text_proactive(&self, openid: &str, text: &str) -> Result<()> {
+        self.send_text_inner(openid, None, text, None).await
+    }
+
+    pub async fn send_markdown_proactive(&self, openid: &str, markdown: &str) -> Result<()> {
+        self.send_text_inner(openid, None, markdown, None).await
+    }
+
     async fn send_text_inner(
         &self,
         openid: &str,
@@ -939,6 +958,44 @@ mod tests {
     fn estimates_text_chunks() {
         let text = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
         assert_eq!(estimate_text_chunk_count(&text), 2);
+    }
+
+    #[tokio::test]
+    async fn proactive_markdown_sends_markdown_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "token-1",
+                "expires_in": 7200
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v2/users/u1/messages"))
+            .and(body_partial_json(serde_json::json!({
+                "msg_type": 2,
+                "markdown": {
+                    "content": "# AI 新闻早餐\n- item"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = QqApiClient::new(QqConfig {
+            app_id: "app".into(),
+            app_secret: "secret".into(),
+            api_base_url: server.uri(),
+            token_url: format!("{}/token", server.uri()),
+        })
+        .unwrap();
+
+        client
+            .send_markdown_proactive("u1", "# AI 新闻早餐\n- item")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
