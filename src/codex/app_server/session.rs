@@ -963,6 +963,12 @@ async fn next_compaction_notification(
 ) -> Result<Notification> {
     loop {
         match notifications.recv().await {
+            // Child exited mid-compact: fail fast instead of waiting out the
+            // idle timeout (the Sender is program-lifetime, so Closed never
+            // fires on a child crash).
+            Ok(n) if n.method == method::BACKEND_DISCONNECTED => {
+                anyhow::bail!("app-server exited during compact");
+            }
             Ok(n) => return Ok(n),
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!(lagged = n, "app-server notification stream lagged");
