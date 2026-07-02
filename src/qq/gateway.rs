@@ -159,7 +159,11 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
                         match payload.op {
                             HELLO_EVENT => {
                                 let hello: HelloPayload = serde_json::from_value(payload.d)?;
-                                let mut interval = tokio::time::interval(Duration::from_millis(hello.heartbeat_interval));
+                                // Clamp the server-provided interval: tokio::time::interval
+                                // panics on a zero period, and heartbeat_interval is untrusted
+                                // network data from the gateway HELLO frame.
+                                let heartbeat_ms = hello.heartbeat_interval.max(1);
+                                let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_ms));
                                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                                 heartbeat = Some(interval);
                                 if let (Some(existing_session), Some(seq)) = (session_id.as_deref(), last_seq) {
