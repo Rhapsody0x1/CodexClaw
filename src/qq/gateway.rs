@@ -98,7 +98,7 @@ pub fn spawn_gateway(app: Arc<App>) {
             };
         let mut reconnect_delay = Duration::from_secs(1);
         loop {
-            match connect_once(app.clone(), &session_store).await {
+            match connect_once(app.clone(), &session_store, &mut reconnect_delay).await {
                 Ok(()) => reconnect_delay = Duration::from_secs(1),
                 Err(err) => {
                     warn!(
@@ -113,7 +113,11 @@ pub fn spawn_gateway(app: Arc<App>) {
     });
 }
 
-async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Result<()> {
+async fn connect_once(
+    app: Arc<App>,
+    session_store: &GatewaySessionStore,
+    reconnect_delay: &mut Duration,
+) -> Result<()> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let token = app.qq_client.get_access_token().await?;
@@ -127,6 +131,11 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
     let mut last_seq = session.last_seq;
     let mut session_id = session.session_id;
     let mut heartbeat: Option<tokio::time::Interval> = None;
+    // Half-open detection: set when a heartbeat is sent, cleared on its ACK. If
+    // the next heartbeat tick fires while still awaiting the previous ACK, the
+    // connection is silently dead (no RST) and we must reconnect rather than
+    // block forever on websocket.next().
+    let mut awaiting_ack = false;
 
     loop {
         tokio::select! {
@@ -137,11 +146,15 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
                     pending::<()>().await;
                 }
             } => {
+                if awaiting_ack {
+                    return Err(anyhow!("qq gateway heartbeat not acknowledged; connection is half-open"));
+                }
                 let payload = serde_json::json!({
                     "op": HEARTBEAT_EVENT,
                     "d": last_seq,
                 });
                 websocket.send(Message::Text(payload.to_string())).await?;
+                awaiting_ack = true;
             }
             message = websocket.next() => {
                 let Some(message) = message else {
@@ -196,9 +209,13 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
                                         info!("qq gateway ready, session {}", ready.session_id);
                                         session_id = Some(ready.session_id.clone());
                                         session_store.set_session_id(session_id.clone()).await?;
+                                        // Connection is healthy again; reset the reconnect backoff
+                                        // so the next unexpected drop retries promptly.
+                                        *reconnect_delay = Duration::from_secs(1);
                                     }
                                     Some("RESUMED") => {
                                         info!("qq gateway session resumed");
+                                        *reconnect_delay = Duration::from_secs(1);
                                     }
                                     Some("C2C_MESSAGE_CREATE") => {
                                         let event = serde_json::from_value::<C2CMessageEvent>(payload.d)?;
@@ -215,7 +232,9 @@ async fn connect_once(app: Arc<App>, session_store: &GatewaySessionStore) -> Res
                                     None => {}
                                 }
                             }
-                            HEARTBEAT_ACK_EVENT => {}
+                            HEARTBEAT_ACK_EVENT => {
+                                awaiting_ack = false;
+                            }
                             RECONNECT_EVENT => {
                                 return Err(anyhow!("qq gateway requested reconnect"));
                             }
