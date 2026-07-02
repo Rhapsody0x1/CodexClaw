@@ -80,14 +80,29 @@ pub async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
         .stdout
         .take()
         .ok_or_else(|| anyhow!("codex exec produced no stdout"))?;
+    let stderr = child.stderr.take();
     let mut reader = BufReader::new(stdout).lines();
 
     let mut lines = Vec::new();
     let collect = async {
-        while let Some(line) = reader.next_line().await? {
-            lines.push(line);
-        }
-        Ok::<(), anyhow::Error>(())
+        let read_stdout = async {
+            while let Some(line) = reader.next_line().await? {
+                lines.push(line);
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        // `codex exec --json` writes log/progress lines to stderr. If that pipe
+        // is never drained it fills (~64KB), the child blocks writing, and it
+        // stops producing stdout — stalling collection until the deadline.
+        // Drain stderr concurrently so the pipe can never back up.
+        let drain_stderr = async {
+            if let Some(stderr) = stderr {
+                let mut err_reader = BufReader::new(stderr).lines();
+                while let Ok(Some(_)) = err_reader.next_line().await {}
+            }
+        };
+        let (stdout_result, ()) = tokio::join!(read_stdout, drain_stderr);
+        stdout_result
     };
 
     match timeout(cfg.deadline, collect).await {
@@ -99,7 +114,15 @@ pub async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
         }
     }
 
-    let status = child.wait().await.context("codex shadow wait failed")?;
+    // Guard the reap with a timeout: even after stdout closes the child could
+    // otherwise wedge and hang this task forever.
+    let status = match timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status.context("codex shadow wait failed")?,
+        Err(_) => {
+            child.start_kill().ok();
+            return Err(anyhow!("codex shadow did not exit after stdout closed"));
+        }
+    };
     if !status.success() {
         return Err(anyhow!("codex shadow exited with status {status}"));
     }
