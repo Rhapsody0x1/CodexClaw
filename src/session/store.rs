@@ -3,6 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -72,10 +73,14 @@ pub struct SessionStore {
     system_codex_home: PathBuf,
     default_workspace_dir: PathBuf,
     state: RwLock<PersistedSessionState>,
-    /// Serializes persistence so concurrent mutators write to disk in the same
-    /// order they committed to memory, preventing a stale snapshot from
-    /// clobbering a newer one (lost update).
-    persist_lock: Mutex<()>,
+    /// Monotonic commit sequence, incremented under the state write lock so it
+    /// reflects commit order.
+    mutation_seq: AtomicU64,
+    /// Guards disk persistence and holds the highest commit seq already written.
+    /// Serializes writers so a stale snapshot never clobbers a newer one, and
+    /// lets a superseded write be skipped entirely. Held only across the disk
+    /// I/O — never together with the state lock — so readers are not blocked.
+    persist_lock: Mutex<u64>,
 }
 
 impl SessionStore {
@@ -108,7 +113,8 @@ impl SessionStore {
             // Keep the shared attachment workspace as the default temporary workspace root.
             default_workspace_dir: attachment_workspace_dir,
             state: RwLock::new(state),
-            persist_lock: Mutex::new(()),
+            mutation_seq: AtomicU64::new(0),
+            persist_lock: Mutex::new(0),
         };
         store.migrate_inline_cron_jobs().await?;
         store.persist().await?;
@@ -948,15 +954,21 @@ impl SessionStore {
         let mut guard = self.state.write().await;
         let result = mutator(&mut guard)?;
         let snapshot = guard.clone();
-        // Acquire the persist lock BEFORE releasing the state write lock: this
-        // pins the persistence order to the commit order, so a slower older
-        // write can never rename its stale snapshot over a newer one. The state
-        // lock is released before the disk I/O so readers are not blocked.
-        let persist_guard = self.persist_lock.lock().await;
+        // Assign the commit seq under the exclusive lock so it matches commit
+        // order, then release the lock BEFORE any disk I/O so readers never
+        // block on persistence.
+        let seq = self.mutation_seq.fetch_add(1, Ordering::SeqCst) + 1;
         drop(guard);
-        let persist_result = self.persist_snapshot(&snapshot).await;
-        drop(persist_guard);
-        persist_result?;
+
+        // Serialize writers on persist_lock (holds the highest seq written).
+        // Because each later commit's snapshot is a superset of earlier ones, a
+        // write whose seq is already superseded can be skipped; and a stale
+        // snapshot can never overwrite a newer one that already reached disk.
+        let mut last_persisted = self.persist_lock.lock().await;
+        if seq > *last_persisted {
+            self.persist_snapshot(&snapshot).await?;
+            *last_persisted = seq;
+        }
         Ok(result)
     }
 
