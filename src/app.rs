@@ -37,7 +37,7 @@ use crate::{
     normalize_lang,
     qq::{
         api::QqApiClient,
-        passive::PassiveTurnEmitter,
+        passive::{PassiveDispatchReport, PassiveTurnEmitter},
         types::{C2CMessageEvent, MSG_TYPE_QUOTE, MessageAttachment, MsgElement},
     },
     self_update,
@@ -714,7 +714,26 @@ impl App {
             )
             .await;
         self.clear_active_turn().await;
-        let dispatch_report = emitter.await??;
+        // Do NOT hard-fail the turn on a streaming-send error: if execution
+        // succeeded we still need to persist the session id and run the
+        // post-turn hooks. A default report (saw_agent_message = false) also
+        // makes the success branch below re-send the reply as a whole message,
+        // recovering from a transient streamed-send failure.
+        let dispatch_report = match emitter.await {
+            Ok(Ok(report)) => report,
+            Ok(Err(err)) => {
+                warn!(
+                    error = %err,
+                    message_id = %message.message_id,
+                    "failed to stream reply to QQ; continuing to persist turn state"
+                );
+                PassiveDispatchReport::default()
+            }
+            Err(err) => {
+                warn!(error = %err, "reply emitter task panicked; continuing to persist turn state");
+                PassiveDispatchReport::default()
+            }
+        };
 
         match execution {
             Ok(output) => {
