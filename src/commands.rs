@@ -346,10 +346,12 @@ fn maybe_handle_command_inner<'a>(
                 .await
             }
             "/new" => {
-                let raw_args = trimmed
-                    .strip_prefix(command.as_str())
-                    .unwrap_or_default()
-                    .trim();
+                // Strip the user's *actual* first token, not the canonical command:
+                // `command` is the lowercased/aliased form ("/new"), but `trimmed`
+                // still starts with what the user typed (e.g. "/新建" or "/New"), so
+                // strip_prefix(command) would fail and silently drop the <dir> arg.
+                let first_token = trimmed.split_whitespace().next().unwrap_or_default();
+                let raw_args = trimmed[first_token.len()..].trim();
                 handle_new(
                     raw_args,
                     openid,
