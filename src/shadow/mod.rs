@@ -110,7 +110,11 @@ impl ShadowWorker {
     }
 
     async fn inner_memory_shadow(&self, ctx: &ShadowContext) -> Result<()> {
-        let snapshot = self.memory.snapshot_for(&ctx.openid)?;
+        let snapshot = {
+            let memory = self.memory.clone();
+            let openid = ctx.openid.clone();
+            tokio::task::spawn_blocking(move || memory.snapshot_for(&openid)).await??
+        };
         let prompt_text = prompt::render_memory_prompt(
             &snapshot.memory,
             &snapshot.user,
@@ -128,7 +132,15 @@ impl ShadowWorker {
         };
         let output = runner::run_codex_oneshot(oneshot).await?;
         let response = memory::parse_memory_response(&output)?;
-        let report = memory::apply_memory_response(&self.memory, &ctx.openid, &response)?;
+        // apply_memory_response writes + fsyncs to disk; keep it off the reactor.
+        let report = {
+            let memory = self.memory.clone();
+            let openid = ctx.openid.clone();
+            tokio::task::spawn_blocking(move || {
+                memory::apply_memory_response(&memory, &openid, &response)
+            })
+            .await??
+        };
         info!(
             openid = %ctx.openid,
             added = report.added,

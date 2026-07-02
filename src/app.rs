@@ -601,14 +601,27 @@ impl App {
         let context_mode = effective_settings
             .context_mode
             .or(runtime_profile.context_mode);
-        let memory_block = match self.memory.snapshot_for(&message.sender_openid) {
-            Ok(snap) => memory_inject::render(&snap),
-            Err(err) => {
+        // snapshot_for does synchronous file reads (and fsync on the write
+        // paths); run it off the reactor so the per-message hot path never
+        // blocks a tokio worker thread.
+        let memory = self.memory.clone();
+        let snapshot_openid = message.sender_openid.clone();
+        let memory_block = match tokio::task::spawn_blocking(move || {
+            memory.snapshot_for(&snapshot_openid)
+        })
+        .await
+        {
+            Ok(Ok(snap)) => memory_inject::render(&snap),
+            Ok(Err(err)) => {
                 warn!(
                     error = %err,
                     openid = %message.sender_openid,
                     "failed to load memory snapshot; continuing without it",
                 );
+                None
+            }
+            Err(err) => {
+                warn!(error = %err, "memory snapshot task panicked; continuing without it");
                 None
             }
         };
