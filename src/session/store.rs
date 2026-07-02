@@ -951,11 +951,43 @@ impl SessionStore {
     async fn persist_snapshot(&self, snapshot: &PersistedSessionState) -> Result<()> {
         tokio::fs::create_dir_all(&self.root).await?;
         let raw = serde_json::to_string_pretty(snapshot)?;
-        tokio::fs::write(&self.state_path, raw)
-            .await
-            .with_context(|| format!("failed to write {}", self.state_path.display()))?;
+        let path = self.state_path.clone();
+        // Write atomically (temp file + fsync + rename) so an interrupted or
+        // crashed write can never leave a truncated state.json that fails to
+        // parse on the next startup and wipes every user's session state.
+        tokio::task::spawn_blocking(move || write_state_file(&path, &raw)).await??;
         Ok(())
     }
+}
+
+fn write_state_file(path: &Path, raw: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("state.json"),
+        Ulid::new()
+    ));
+    {
+        let mut file =
+            File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.write_all(raw.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "failed to replace {} with {}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn load_legacy_state(
