@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
     time::{Duration, Instant},
 };
@@ -41,7 +41,40 @@ pub struct QqApiClient {
     client: Client,
     config: QqConfig,
     token_cache: std::sync::Arc<Mutex<Option<CachedToken>>>,
-    msg_seq: std::sync::Arc<Mutex<HashMap<String, u32>>>,
+    msg_seq: std::sync::Arc<Mutex<MsgSeqCache>>,
+}
+
+/// Per-target monotonic message-seq counters with FIFO eviction. The seq only
+/// needs to increase within a single message's reply window, so bounding the
+/// map (dropping the oldest ids first) keeps it from growing without limit over
+/// the process lifetime.
+#[derive(Debug, Default)]
+struct MsgSeqCache {
+    counters: HashMap<String, u32>,
+    order: VecDeque<String>,
+}
+
+impl MsgSeqCache {
+    /// Maximum number of distinct reply targets kept at once. Far above any
+    /// realistic count of concurrently-in-flight reply windows.
+    const CAP: usize = 4096;
+
+    fn next(&mut self, key: &str) -> u32 {
+        if let Some(seq) = self.counters.get_mut(key) {
+            *seq += 1;
+            return *seq;
+        }
+        while self.order.len() >= Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.counters.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.counters.insert(key.to_string(), 1);
+        self.order.push_back(key.to_string());
+        1
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +246,7 @@ impl QqApiClient {
             client,
             config,
             token_cache: std::sync::Arc::new(Mutex::new(None)),
-            msg_seq: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            msg_seq: std::sync::Arc::new(Mutex::new(MsgSeqCache::default())),
         })
     }
 
@@ -769,10 +802,7 @@ impl QqApiClient {
     }
 
     async fn next_msg_seq(&self, msg_id: &str) -> u32 {
-        let mut map = self.msg_seq.lock().await;
-        let seq = map.entry(msg_id.to_string()).or_insert(0);
-        *seq += 1;
-        *seq
+        self.msg_seq.lock().await.next(msg_id)
     }
 }
 
