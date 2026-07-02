@@ -898,25 +898,58 @@ where
 }
 
 fn split_text(text: &str, limit: usize) -> Vec<String> {
-    if text.chars().count() <= limit {
+    if limit == 0 || text.chars().count() <= limit {
         return vec![text.to_string()];
     }
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0usize;
     for line in text.lines() {
-        let candidate_len = current.chars().count() + line.chars().count() + 1;
-        if !current.is_empty() && candidate_len > limit {
-            chunks.push(std::mem::take(&mut current));
+        // A single line can itself exceed the limit (long code line, URL, or an
+        // unbroken paragraph). Hard-split it on char boundaries so no emitted
+        // chunk is ever over the limit and rejected by QQ.
+        for piece in split_long_line(line, limit) {
+            let piece_len = piece.chars().count();
+            let sep = usize::from(!current.is_empty());
+            if !current.is_empty() && current_len + sep + piece_len > limit {
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            if !current.is_empty() {
+                current.push('\n');
+                current_len += 1;
+            }
+            current.push_str(&piece);
+            current_len += piece_len;
         }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
     }
     if !current.is_empty() {
         chunks.push(current);
     }
     chunks
+}
+
+/// Split a single line into pieces of at most `limit` chars, cutting on char
+/// boundaries. Returns the line unchanged when it already fits.
+fn split_long_line(line: &str, limit: usize) -> Vec<String> {
+    if limit == 0 || line.chars().count() <= limit {
+        return vec![line.to_string()];
+    }
+    let mut pieces = Vec::new();
+    let mut buf = String::new();
+    let mut count = 0usize;
+    for ch in line.chars() {
+        buf.push(ch);
+        count += 1;
+        if count == limit {
+            pieces.push(std::mem::take(&mut buf));
+            count = 0;
+        }
+    }
+    if !buf.is_empty() {
+        pieces.push(buf);
+    }
+    pieces
 }
 
 pub fn estimate_text_chunk_count(text: &str) -> usize {
