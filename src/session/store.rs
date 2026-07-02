@@ -776,13 +776,18 @@ impl SessionStore {
         _openid: &str,
         scope: SessionListScope,
     ) -> Result<Vec<DiskSessionMeta>> {
-        let mut by_id = BTreeMap::new();
-
-        for session in scan_home_sessions(&self.global_codex_home)? {
-            insert_prefer_recent(&mut by_id, session);
-        }
-
-        let mut values = by_id.into_values().collect::<Vec<_>>();
+        // scan_home_sessions recursively walks the sessions dir and reads every
+        // rollout file to EOF; run it off the reactor so a /sessions with many
+        // or large sessions can't stall a tokio worker (and the gateway).
+        let home = self.global_codex_home.clone();
+        let mut values = tokio::task::spawn_blocking(move || -> Result<Vec<DiskSessionMeta>> {
+            let mut by_id = BTreeMap::new();
+            for session in scan_home_sessions(&home)? {
+                insert_prefer_recent(&mut by_id, session);
+            }
+            Ok(by_id.into_values().collect::<Vec<_>>())
+        })
+        .await??;
         values.retain(|session| match scope {
             SessionListScope::All => true,
             SessionListScope::Local => {
