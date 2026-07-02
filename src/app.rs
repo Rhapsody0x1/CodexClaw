@@ -1225,9 +1225,14 @@ impl App {
         message_id: &str,
         attachment: &MessageAttachment,
     ) -> Result<PathBuf> {
-        let filename = attachment
+        let raw_filename = attachment
             .filename
             .clone()
+            .unwrap_or_else(|| infer_filename(attachment));
+        // The filename is untrusted QQ attachment metadata. Reduce it to its
+        // final path component so embedded separators (e.g. "../../etc/foo")
+        // cannot escape the inbox directory and write to an arbitrary path.
+        let filename = sanitize_attachment_filename(&raw_filename)
             .unwrap_or_else(|| infer_filename(attachment));
         let destination = self
             .session
@@ -1486,6 +1491,19 @@ fn build_usage_snapshot(
         output_tokens: context_usage.output_tokens,
         updated_at: chrono::Utc::now(),
     })
+}
+
+/// Reduce an untrusted attachment filename to a safe single path component.
+/// Returns None when nothing usable remains (empty, ".", "..", or only
+/// separators), so the caller can fall back to an inferred name.
+fn sanitize_attachment_filename(raw: &str) -> Option<String> {
+    // Treat both '/' and '\\' as separators regardless of host platform, since
+    // the value originates from a remote peer.
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    if last.is_empty() || last == "." || last == ".." {
+        return None;
+    }
+    Some(last.to_string())
 }
 
 fn infer_filename(attachment: &MessageAttachment) -> String {
