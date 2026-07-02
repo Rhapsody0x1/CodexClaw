@@ -1,4 +1,4 @@
-use std::{future::pending, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use codex_claw::{
@@ -147,8 +147,39 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     let app = App::new(config, session, qq_client, codex, memory, shadow);
     scheduler::Scheduler::spawn(app.clone());
     gateway::spawn_gateway(app.clone());
-    pending::<()>().await;
+
+    wait_for_shutdown_signal().await;
+    tracing::info!("shutdown signal received, terminating app-server child");
+    // Give the supervisor a chance to kill+reap the codex app-server child so it
+    // is not orphaned against the shared CODEX_HOME (a second app-server started
+    // after restart would corrupt the shared SQLite/rollout state).
+    app.codex.handle().shutdown().await;
     Ok(())
+}
+
+/// Wait for SIGTERM (service stop / supervisor restart) or SIGINT (Ctrl-C).
+/// On non-unix platforms this falls back to Ctrl-C only.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(sig) => sig,
+            Err(err) => {
+                tracing::warn!(%err, "failed to install SIGTERM handler; waiting on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn normalize_config_paths(config: &mut AppConfig) -> Result<()> {
