@@ -112,12 +112,31 @@ impl Scheduler {
             Ok(jobs) => jobs
                 .into_iter()
                 .filter(|job| {
-                    job.run_now_at.is_some_and(|run_now_at| run_now_at <= now)
-                        || (!job.disabled
-                            && job
-                                .next_run_at
-                                .or_else(|| cron_expr::next_after(&job.kind, now).ok().flatten())
-                                .is_some_and(|next| next <= now))
+                    if job.run_now_at.is_some_and(|run_now_at| run_now_at <= now) {
+                        return true;
+                    }
+                    if job.disabled {
+                        return false;
+                    }
+                    let next = match job.next_run_at {
+                        Some(next) => Some(next),
+                        // Distinguish a genuine Err from Ok(None): the old code
+                        // swallowed Err via .ok(), so a job with an invalid or
+                        // uncomputable schedule looked enabled but silently
+                        // never ran and never warned. Surface the error instead.
+                        None => match cron_expr::next_after(&job.kind, now) {
+                            Ok(next) => next,
+                            Err(err) => {
+                                warn!(
+                                    job_id = %job.id,
+                                    error = %err,
+                                    "cron job has an invalid schedule and will not run until fixed"
+                                );
+                                None
+                            }
+                        },
+                    };
+                    next.is_some_and(|next| next <= now)
                 })
                 .collect::<Vec<_>>(),
             Err(err) => {
