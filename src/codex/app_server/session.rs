@@ -224,7 +224,6 @@ impl AppServerSession {
             update_tx,
             cancel_rx,
             cancel_requested: false,
-            last_activity: tokio::time::Instant::now(),
         };
         let outcome = runner.drive().await?;
 
@@ -650,11 +649,6 @@ struct TurnRunner {
     update_tx: Option<mpsc::UnboundedSender<ExecutionUpdate>>,
     cancel_rx: Option<oneshot::Receiver<()>>,
     cancel_requested: bool,
-    /// Last time an event *for this turn* was observed. The idle timeout is
-    /// measured from here (not reset by unrelated traffic on the shared
-    /// broadcast), so a lag that drops this turn's terminal event still fails
-    /// the turn instead of hanging while other turns keep the channel busy.
-    last_activity: tokio::time::Instant,
 }
 
 impl TurnRunner {
@@ -700,22 +694,17 @@ impl TurnRunner {
 
     async fn next_event(&mut self) -> Result<Option<Notification>> {
         loop {
-            // Measure the idle timeout from the last event for THIS turn, so
-            // unrelated traffic on the shared broadcast cannot keep resetting a
-            // per-recv timeout and mask a lost terminal event indefinitely.
-            let remaining = OUTPUT_IDLE_TIMEOUT.saturating_sub(self.last_activity.elapsed());
-            if remaining.is_zero() {
-                return Err(anyhow!(
-                    "codex 输出超时（{} 秒无新事件）",
-                    OUTPUT_IDLE_TIMEOUT.as_secs()
-                ));
-            }
-            match timeout(remaining, self.notifications.recv()).await {
+            // Note: the idle timeout resets on ANY broadcast traffic (not just
+            // this turn's), which is intentional — a turn can legitimately be
+            // paused for a long time awaiting a human approval, and unrelated
+            // app-server activity signals the backend is still alive. A turn
+            // whose terminal event is lost to a broadcast lag is instead
+            // rescued by the child-exit fast-fail / interrupt paths.
+            match timeout(OUTPUT_IDLE_TIMEOUT, self.notifications.recv()).await {
                 // Supervisor-synthesized disconnect: the child exited, so fail
                 // fast (fast-restart path) instead of waiting out the timeout.
                 Ok(Ok(n)) if n.method == method::BACKEND_DISCONNECTED => return Ok(None),
                 Ok(Ok(n)) if is_for_turn(&n, &self.thread_id, &self.turn_id) => {
-                    self.last_activity = tokio::time::Instant::now();
                     return Ok(Some(n));
                 }
                 Ok(Ok(_)) => continue,
