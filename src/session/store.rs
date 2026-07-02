@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use rand::{Rng, seq::SliceRandom};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use ulid::Ulid;
 
 use crate::scheduler::store::CronJob;
@@ -72,6 +72,10 @@ pub struct SessionStore {
     system_codex_home: PathBuf,
     default_workspace_dir: PathBuf,
     state: RwLock<PersistedSessionState>,
+    /// Serializes persistence so concurrent mutators write to disk in the same
+    /// order they committed to memory, preventing a stale snapshot from
+    /// clobbering a newer one (lost update).
+    persist_lock: Mutex<()>,
 }
 
 impl SessionStore {
@@ -104,6 +108,7 @@ impl SessionStore {
             // Keep the shared attachment workspace as the default temporary workspace root.
             default_workspace_dir: attachment_workspace_dir,
             state: RwLock::new(state),
+            persist_lock: Mutex::new(()),
         };
         store.migrate_inline_cron_jobs().await?;
         store.persist().await?;
@@ -938,8 +943,15 @@ impl SessionStore {
         let mut guard = self.state.write().await;
         let result = mutator(&mut guard)?;
         let snapshot = guard.clone();
+        // Acquire the persist lock BEFORE releasing the state write lock: this
+        // pins the persistence order to the commit order, so a slower older
+        // write can never rename its stale snapshot over a newer one. The state
+        // lock is released before the disk I/O so readers are not blocked.
+        let persist_guard = self.persist_lock.lock().await;
         drop(guard);
-        self.persist_snapshot(&snapshot).await?;
+        let persist_result = self.persist_snapshot(&snapshot).await;
+        drop(persist_guard);
+        persist_result?;
         Ok(result)
     }
 
