@@ -60,7 +60,11 @@ pub async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Ensure any early return / drop kills the child instead of leaking a
+        // still-running codex process (the reader-error path returns without an
+        // explicit kill).
+        .kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
