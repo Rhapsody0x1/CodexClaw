@@ -317,9 +317,12 @@ mod tests {
         let cargo_path = cargo_dir.join("cargo");
         std::fs::write(&cargo_path, "#!/bin/sh\n").unwrap();
 
+        // Point PATH at a guaranteed-empty dir rather than the real /usr/bin, so
+        // the fallback is exercised regardless of what is installed on the host.
+        let empty_path = tempdir().unwrap();
         let resolved = resolve_program_from_env(
             "cargo",
-            Some(&OsString::from("/usr/bin")),
+            Some(&OsString::from(empty_path.path())),
             Some(home.path()),
         );
 
