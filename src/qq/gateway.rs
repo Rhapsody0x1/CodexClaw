@@ -22,6 +22,14 @@ use crate::{
 };
 
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+/// Floor for the server-provided heartbeat interval. Guards against a zero
+/// (interval panic) or absurdly small value that would make the half-open
+/// check fire before any ACK could realistically round-trip.
+const MIN_HEARTBEAT_MS: u64 = 1_000;
+/// Reconnect only after this many consecutive heartbeats go unacknowledged, so
+/// a single slow ACK or a tick/ACK scheduling race never triggers a spurious
+/// reconnect while a truly dead connection is still detected within ~2 ticks.
+const MAX_MISSED_HEARTBEAT_ACKS: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct GatewaySessionState {
@@ -131,11 +139,11 @@ async fn connect_once(
     let mut last_seq = session.last_seq;
     let mut session_id = session.session_id;
     let mut heartbeat: Option<tokio::time::Interval> = None;
-    // Half-open detection: set when a heartbeat is sent, cleared on its ACK. If
-    // the next heartbeat tick fires while still awaiting the previous ACK, the
-    // connection is silently dead (no RST) and we must reconnect rather than
-    // block forever on websocket.next().
-    let mut awaiting_ack = false;
+    // Half-open detection: incremented when a heartbeat is sent, reset to 0 on
+    // its ACK. If it reaches MAX_MISSED_HEARTBEAT_ACKS the connection is
+    // silently dead (no RST) and we reconnect rather than block forever on
+    // websocket.next().
+    let mut unacked_heartbeats: u32 = 0;
 
     loop {
         tokio::select! {
@@ -146,7 +154,7 @@ async fn connect_once(
                     pending::<()>().await;
                 }
             } => {
-                if awaiting_ack {
+                if unacked_heartbeats >= MAX_MISSED_HEARTBEAT_ACKS {
                     return Err(anyhow!("qq gateway heartbeat not acknowledged; connection is half-open"));
                 }
                 let payload = serde_json::json!({
@@ -154,7 +162,7 @@ async fn connect_once(
                     "d": last_seq,
                 });
                 websocket.send(Message::Text(payload.to_string())).await?;
-                awaiting_ack = true;
+                unacked_heartbeats += 1;
             }
             message = websocket.next() => {
                 let Some(message) = message else {
@@ -174,8 +182,9 @@ async fn connect_once(
                                 let hello: HelloPayload = serde_json::from_value(payload.d)?;
                                 // Clamp the server-provided interval: tokio::time::interval
                                 // panics on a zero period, and heartbeat_interval is untrusted
-                                // network data from the gateway HELLO frame.
-                                let heartbeat_ms = hello.heartbeat_interval.max(1);
+                                // network data from the gateway HELLO frame. A floor also keeps
+                                // a tiny value from tripping the half-open check every cycle.
+                                let heartbeat_ms = hello.heartbeat_interval.max(MIN_HEARTBEAT_MS);
                                 let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_ms));
                                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                                 heartbeat = Some(interval);
@@ -233,7 +242,7 @@ async fn connect_once(
                                 }
                             }
                             HEARTBEAT_ACK_EVENT => {
-                                awaiting_ack = false;
+                                unacked_heartbeats = 0;
                             }
                             RECONNECT_EVENT => {
                                 return Err(anyhow!("qq gateway requested reconnect"));
