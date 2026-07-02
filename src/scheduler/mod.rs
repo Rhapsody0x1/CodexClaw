@@ -81,6 +81,13 @@ impl Scheduler {
                 }
                 continue;
             }
+            // A persisted next_run_at that is already past-due means a run was
+            // missed while the process was down. Keep it so the tick loop fires
+            // it once to catch up, instead of overwriting it with the next
+            // future occurrence and silently dropping the missed run.
+            if job.next_run_at.is_some_and(|next| next <= now) {
+                continue;
+            }
             match cron_expr::next_after(&job.kind, now) {
                 Ok(next) => {
                     job.next_run_at = next;
