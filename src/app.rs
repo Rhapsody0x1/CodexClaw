@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -982,7 +982,10 @@ impl App {
     }
 
     async fn handle_self_update_command(&self, openid: &str, message_id: &str) -> Result<()> {
-        if self.busy.load(Ordering::SeqCst) {
+        // Reserve the busy slot for the whole update (swap, not load): otherwise
+        // a message arriving during the multi-minute build would see busy=false,
+        // start a real turn, and be silently killed by the exit(0) below.
+        if self.busy.swap(true, Ordering::SeqCst) {
             self.qq_client
                 .send_text(
                     openid,
@@ -993,17 +996,53 @@ impl App {
                 .await?;
             return Ok(());
         }
-        let build_result = self_update::ensure_successful_build(&self.config).await?;
+        let build_result = match self_update::ensure_successful_build(&self.config).await {
+            Ok(result) => result,
+            Err(err) => {
+                self.busy.store(false, Ordering::SeqCst);
+                return Err(err);
+            }
+        };
         if !build_result.success {
+            self.busy.store(false, Ordering::SeqCst);
             self.qq_client
                 .send_text(openid, message_id, &build_result.summary, Some(message_id))
                 .await?;
             return Ok(());
         }
-        let running_binary =
-            std::env::current_exe().context("failed to detect current executable")?;
-        self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await?;
-        self.qq_client
+        // Smoke-test the freshly built binary before overwriting the running one,
+        // so a binary that compiles but panics on startup can't brick the
+        // service via an external supervisor's crash loop.
+        if let Err(err) = self_update::smoke_test_binary(&build_result.binary_path).await {
+            self.busy.store(false, Ordering::SeqCst);
+            warn!(error = %err, "self-update smoke test failed; aborting update");
+            self.qq_client
+                .send_text(
+                    openid,
+                    message_id,
+                    &format!("新构建的二进制启动自检失败，已放弃本次更新：{err}"),
+                    Some(message_id),
+                )
+                .await?;
+            return Ok(());
+        }
+        let running_binary = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(err) => {
+                self.busy.store(false, Ordering::SeqCst);
+                return Err(anyhow::Error::new(err).context("failed to detect current executable"));
+            }
+        };
+        if let Err(err) =
+            self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await
+        {
+            self.busy.store(false, Ordering::SeqCst);
+            return Err(err);
+        }
+        // The binary is already replaced; the notification is best-effort so a
+        // send failure must not leave us stuck with busy=true and no exit.
+        if let Err(err) = self
+            .qq_client
             .send_text(
                 openid,
                 message_id,
@@ -1013,7 +1052,10 @@ impl App {
                 ),
                 Some(message_id),
             )
-            .await?;
+            .await
+        {
+            warn!(error = %err, "failed to send self-update completion notice; exiting anyway");
+        }
         // Gracefully shut down the shared codex app-server child before
         // exiting — `std::process::exit` skips Drop impls, so `kill_on_drop`
         // won't fire and the child would otherwise be reparented to init.
