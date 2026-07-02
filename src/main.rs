@@ -35,6 +35,14 @@ async fn main() -> Result<()> {
     }
     let mut config = AppConfig::load()?;
     normalize_config_paths(&mut config).await?;
+    // Startup self-check used by the self-update smoke test: exercises arg
+    // handling + config load/normalization (the common startup-panic surface)
+    // and exits 0 without starting the service. Placed after config load so a
+    // bad config is caught before a freshly built binary is installed.
+    if args.first().is_some_and(|arg| arg == "--smoke-test") {
+        println!("codex-claw smoke test ok");
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "cron") {
         scheduler::cli::run(&args[1..], &config).await?;
         return Ok(());

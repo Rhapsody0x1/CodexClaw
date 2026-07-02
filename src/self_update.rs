@@ -221,15 +221,17 @@ fn truncate(input: &str, max_chars: usize) -> String {
     value
 }
 
-/// Run a freshly built binary with `--help` and require a clean, timely exit,
-/// so a binary that compiles but panics on startup (bad config parse, failed
-/// handshake, env drift) is caught BEFORE it overwrites the running binary.
+/// Run a freshly built binary with `--smoke-test` and require a clean, timely
+/// exit, so a binary that compiles but panics on startup (bad config parse,
+/// arg handling, env drift) is caught BEFORE it overwrites the running binary.
+/// `--smoke-test` loads and normalizes config, unlike `--help` which returns
+/// before any startup work.
 pub async fn smoke_test_binary(binary: &Path) -> Result<()> {
     use std::process::Stdio;
     use std::time::Duration;
 
     let mut child = Command::new(binary)
-        .arg("--help")
+        .arg("--smoke-test")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
