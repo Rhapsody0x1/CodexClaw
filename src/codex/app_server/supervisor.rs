@@ -94,6 +94,14 @@ impl AppServerSupervisor {
                 }
                 _ = &mut exit_rx => {
                     warn!("app-server stdout closed; respawning");
+                    // Notify in-flight turns immediately. The broadcast Sender is
+                    // program-lifetime, so receivers never observe Closed on a
+                    // child crash; without this synthetic signal each turn would
+                    // stall for the full output-idle timeout before failing.
+                    let _ = self.notifications_tx.send(Notification {
+                        method: method::BACKEND_DISCONNECTED.to_string(),
+                        params: serde_json::Value::Null,
+                    });
                     if let Some(client) = self.client.write().await.take() {
                         client.drain_pending_with_disconnect("app-server exited").await;
                         // Kill child if still around.

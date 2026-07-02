@@ -384,6 +384,12 @@ pub mod method {
     pub const ERROR: &str = "error";
     pub const INITIALIZED: &str = "initialized";
 
+    /// Internal, codex-claw-synthesized notification broadcast by the
+    /// supervisor when the app-server child exits, so in-flight turns can abort
+    /// promptly instead of waiting out the output-idle timeout. Namespaced so it
+    /// can never collide with a real app-server method.
+    pub const BACKEND_DISCONNECTED: &str = "codexclaw/internal/backendDisconnected";
+
     // Server-initiated request methods (require a response).
     pub const COMMAND_EXECUTION_REQUEST_APPROVAL: &str = "item/commandExecution/requestApproval";
     pub const FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
