@@ -228,6 +228,7 @@ fn maybe_handle_command_inner<'a>(
 
         // Non-/back slash command while in an interactive setting: quietly
         // exit the pending state and prepend a notice to the eventual reply.
+        let had_pending_picker = pending_before.is_some();
         let pending_exit_prefix = if let Some(pending) = pending_before {
             session.set_pending_setting(openid, None).await?;
             Some(
@@ -241,6 +242,23 @@ fn maybe_handle_command_inner<'a>(
         } else {
             None
         };
+
+        // Guard against picker/approval crossfire: when a picker was active and
+        // the user issues an approval command (the documented picker-escape is
+        // /back, and pickers are not busy-gated so a turn can be paused awaiting
+        // approval), exit the picker but do NOT dispatch the approval — that
+        // would silently resolve a queued Codex approval and abort the turn.
+        // Require the approval command to be re-issued.
+        if had_pending_picker
+            && matches!(
+                command.as_str(),
+                "/approve" | "/approve-session" | "/deny" | "/cancel"
+            )
+        {
+            return Ok(CommandOutcome::Reply(CommandReply {
+                text: pending_exit_prefix.unwrap_or_default(),
+            }));
+        }
 
         let outcome_result: Result<CommandOutcome> = match command.as_str() {
             "/help" => Ok(CommandOutcome::Reply(CommandReply {
