@@ -1635,7 +1635,28 @@ mod tests {
     use crate::qq::types::{EventAuthor, MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::TokenUsageSnapshot;
 
-    use super::{build_context_warning, build_usage_snapshot, extract_quote};
+    use super::{
+        build_context_warning, build_usage_snapshot, extract_quote, sanitize_attachment_filename,
+    };
+
+    #[test]
+    fn sanitize_attachment_filename_strips_traversal() {
+        assert_eq!(
+            sanitize_attachment_filename("foo/../../bar").as_deref(),
+            Some("bar")
+        );
+        assert_eq!(
+            sanitize_attachment_filename("a\\b\\c.png").as_deref(),
+            Some("c.png")
+        );
+        assert_eq!(
+            sanitize_attachment_filename("plain.jpg").as_deref(),
+            Some("plain.jpg")
+        );
+        assert_eq!(sanitize_attachment_filename("../"), None);
+        assert_eq!(sanitize_attachment_filename(".."), None);
+        assert_eq!(sanitize_attachment_filename(""), None);
+    }
 
     #[test]
     fn extracts_quote_from_msg_elements() {

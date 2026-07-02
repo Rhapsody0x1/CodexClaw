@@ -997,8 +997,9 @@ mod tests {
     };
 
     use super::{
-        CHUNKED_UPLOAD_THRESHOLD_BYTES, QqApiClient, QqConfig, estimate_text_chunk_count,
-        normalized_upload_file_name, should_use_chunked_upload,
+        CHUNKED_UPLOAD_THRESHOLD_BYTES, MsgSeqCache, QqApiClient, QqConfig,
+        estimate_text_chunk_count, normalized_upload_file_name, should_use_chunked_upload,
+        split_text,
     };
 
     #[test]
@@ -1021,6 +1022,37 @@ mod tests {
     fn estimates_text_chunks() {
         let text = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
         assert_eq!(estimate_text_chunk_count(&text), 2);
+    }
+
+    #[test]
+    fn split_text_hard_splits_a_single_over_limit_line() {
+        // A single line longer than the limit must still be broken up so no
+        // emitted chunk exceeds the limit (QQ rejects over-limit content).
+        let text = "x".repeat(10_000);
+        let chunks = split_text(&text, 4500);
+        assert!(chunks.len() >= 3);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 4500));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn split_text_bounds_mixed_long_and_short_lines() {
+        let text = format!("{}\nshort tail", "y".repeat(9000));
+        let chunks = split_text(&text, 4500);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 4500));
+    }
+
+    #[test]
+    fn msg_seq_cache_is_monotonic_and_bounded() {
+        let mut cache = MsgSeqCache::default();
+        assert_eq!(cache.next("a"), 1);
+        assert_eq!(cache.next("a"), 2);
+        assert_eq!(cache.next("b"), 1);
+        for i in 0..(MsgSeqCache::CAP * 2) {
+            cache.next(&format!("k{i}"));
+        }
+        assert!(cache.counters.len() <= MsgSeqCache::CAP);
+        assert_eq!(cache.order.len(), cache.counters.len());
     }
 
     #[tokio::test]
