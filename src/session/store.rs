@@ -141,7 +141,9 @@ impl SessionStore {
             .await
             .users
             .get(openid)
-            .map(|user| user.settings.language.clone())
+            // Normalize so a legacy/hand-edited value like "zh-CN" resolves to a
+            // canonical locale instead of silently falling back to English.
+            .map(|user| crate::normalize_lang(&user.settings.language).to_string())
     }
 
     pub async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
