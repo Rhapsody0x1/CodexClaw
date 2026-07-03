@@ -418,6 +418,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn abnormal_finish_reasons_are_localized_not_raw_tokens() {
+        // Guards the regression where a reason passed to finish_job has no
+        // catalog entry and falls through `other => other.to_string()`, leaking
+        // a raw snake_case token into the localized banner.
+        for locale in ["en", "zh"] {
+            for reason in ["failed", "timed_out", "no_answer"] {
+                let rendered = localized_finish_reason(reason, locale);
+                assert_ne!(
+                    rendered, reason,
+                    "reason `{reason}` was not localized for locale `{locale}`"
+                );
+                assert!(
+                    !rendered.contains('_'),
+                    "raw token leaked for `{reason}`/`{locale}`: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn strip_end_signal_removes_standalone_and_inline_tokens() {
         let (text, ended) = strip_end_signal("答案正确\n<<<CLAW_END>>>", "<<<CLAW_END>>>");
         assert!(ended);
