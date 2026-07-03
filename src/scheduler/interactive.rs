@@ -263,15 +263,35 @@ pub async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
     } else {
         t!("scheduler.interactive.blank", locale = locale).into_owned()
     };
-    let reason = localized_finish_reason(reason, locale);
-    let text = t!(
-        "scheduler.interactive.ended",
-        title = pending.title.as_str(),
-        reason = reason.as_str(),
-        suffix = suffix.as_str(),
-        locale = locale
-    )
-    .into_owned();
+    // Three banner shapes: a normal end and a manual stop read as plain
+    // statements; only genuinely abnormal endings surface a reason.
+    let text = match reason {
+        "ended" => t!(
+            "scheduler.interactive.ended",
+            title = pending.title.as_str(),
+            suffix = suffix.as_str(),
+            locale = locale
+        )
+        .into_owned(),
+        "stopped" => t!(
+            "scheduler.interactive.stopped",
+            title = pending.title.as_str(),
+            suffix = suffix.as_str(),
+            locale = locale
+        )
+        .into_owned(),
+        abnormal => {
+            let reason = localized_finish_reason(abnormal, locale);
+            t!(
+                "scheduler.interactive.ended_abnormal",
+                title = pending.title.as_str(),
+                reason = reason.as_str(),
+                suffix = suffix.as_str(),
+                locale = locale
+            )
+            .into_owned()
+        }
+    };
     if let Err(err) = app
         .qq_client
         .send_markdown_proactive(&pending.owner_openid, &text)
@@ -370,8 +390,8 @@ async fn owner_locale(app: &App, openid: &str) -> String {
 
 fn localized_finish_reason(reason: &str, locale: &str) -> String {
     match reason {
-        "ended" => t!("scheduler.interactive.reason_ended", locale = locale).into_owned(),
         "failed" => t!("scheduler.interactive.reason_failed", locale = locale).into_owned(),
+        "timed_out" => t!("scheduler.interactive.reason_timed_out", locale = locale).into_owned(),
         "no_answer" => t!("scheduler.interactive.reason_no_answer", locale = locale).into_owned(),
         other => other.to_string(),
     }
