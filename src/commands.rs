@@ -1061,8 +1061,12 @@ async fn handle_cron(
     openid: &str,
     session: &SessionStore,
 ) -> Result<CommandOutcome> {
-    let snapshot = session.snapshot_for_user(openid).await?;
-    let lang = snapshot.settings.language.clone();
+    // Cheap locale lookup: no deep snapshot clone, and no ensure-user side
+    // effect / hard failure on the /cron path.
+    let lang = session
+        .language_for_user(openid)
+        .await
+        .unwrap_or_else(crate::session::state::default_language);
     let locale = lang.as_str();
     let Some(subcommand) = args.first().copied() else {
         return Ok(CommandOutcome::Reply(CommandReply {

@@ -189,7 +189,7 @@ pub struct SessionSettings {
     pub language: String,
 }
 
-fn default_language() -> String {
+pub(crate) fn default_language() -> String {
     "en".to_string()
 }
 

@@ -94,7 +94,7 @@ pub async fn prepare_foreground(
         },
     };
     write_pending(&app.config.general.data_dir, &pending).await?;
-    let lang = owner_locale(app, &job.owner_openid).await;
+    let lang = app.command_locale(&job.owner_openid).await;
     let locale = lang.as_str();
     let banner = if let Some(alias) = pending.parked_fg_alias.as_deref() {
         t!(
@@ -251,7 +251,7 @@ pub async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
             .await;
     }
     remove_pending(&app.config.general.data_dir, job_id).await?;
-    let lang = owner_locale(app, &pending.owner_openid).await;
+    let lang = app.command_locale(&pending.owner_openid).await;
     let locale = lang.as_str();
     let suffix = if let Some(alias) = pending.parked_fg_alias.as_deref() {
         t!(
@@ -378,14 +378,6 @@ async fn remove_pending(data_dir: &Path, job_id: &str) -> Result<()> {
 
 fn pending_path(data_dir: &Path, job_id: &str) -> PathBuf {
     new_job_dir(data_dir, job_id).join("pending.json")
-}
-
-async fn owner_locale(app: &App, openid: &str) -> String {
-    app.session
-        .snapshot_for_user(openid)
-        .await
-        .map(|snapshot| snapshot.settings.language)
-        .unwrap_or_else(|_| "en".to_string())
 }
 
 fn localized_finish_reason(reason: &str, locale: &str) -> String {

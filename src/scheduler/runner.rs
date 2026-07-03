@@ -170,7 +170,7 @@ pub async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJ
         && job.disabled
         && job.failure_streak >= circuit_breaker_threshold
     {
-        let lang = owner_locale(&app, &job.owner_openid).await;
+        let lang = app.command_locale(&job.owner_openid).await;
         let text = t!(
             "scheduler.failure.disabled",
             title = job.title.as_str(),
@@ -199,14 +199,6 @@ pub async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJ
         }
     }
     Ok(job)
-}
-
-async fn owner_locale(app: &App, openid: &str) -> String {
-    app.session
-        .snapshot_for_user(openid)
-        .await
-        .map(|snapshot| snapshot.settings.language)
-        .unwrap_or_else(|_| "en".to_string())
 }
 
 async fn run_job_inner(

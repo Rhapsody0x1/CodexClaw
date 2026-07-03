@@ -946,13 +946,14 @@ impl App {
         codex_home.join("config.toml")
     }
 
-    async fn command_locale(&self, openid: &str) -> String {
+    /// Resolve a user's UI language, falling back to the canonical default when
+    /// they have no session record yet. Shared by command handlers and the
+    /// scheduler so locale resolution stays consistent in one place.
+    pub(crate) async fn command_locale(&self, openid: &str) -> String {
         self.session
-            .snapshot_for_user(openid)
+            .language_for_user(openid)
             .await
-            .ok()
-            .map(|snap| snap.settings.language)
-            .unwrap_or_else(|| "zh".to_string())
+            .unwrap_or_else(crate::session::state::default_language)
     }
 
     fn format_execution_error_message(
@@ -1076,12 +1077,7 @@ impl App {
         runtime_profile: &crate::codex::runtime::CodexRuntimeProfile,
     ) -> Result<()> {
         if self.busy.swap(true, Ordering::SeqCst) {
-            let lang = self
-                .session
-                .snapshot_for_user(openid)
-                .await
-                .map(|snapshot| snapshot.settings.language)
-                .unwrap_or_else(|_| "zh".to_string());
+            let lang = self.command_locale(openid).await;
             self.qq_client
                 .send_text(
                     openid,

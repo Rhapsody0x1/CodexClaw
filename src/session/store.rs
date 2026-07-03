@@ -131,6 +131,19 @@ impl SessionStore {
         Ok(DialogState::new_temporary(workspace_dir))
     }
 
+    /// Cheap locale lookup: clones only the language string under the read
+    /// lock, without deep-cloning the whole UserSessionState and without the
+    /// ensure-user side effect of snapshot_for_user. Returns None for a user
+    /// with no session record yet (callers fall back to the default language).
+    pub async fn language_for_user(&self, openid: &str) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .users
+            .get(openid)
+            .map(|user| user.settings.language.clone())
+    }
+
     pub async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
         if let Some(snapshot) = self.state.read().await.users.get(openid).cloned() {
             return Ok(snapshot);
