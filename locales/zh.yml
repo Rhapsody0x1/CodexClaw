@@ -33,7 +33,7 @@ commands:
     entry_execute_plan: "- ✅ `/实施`：开始执行计划"
     entry_keep_planning: "- 📝 `/继续规划`：继续打磨计划"
     entry_cancel_plan: "- 🗑️ `/取消计划`：丢弃当前待执行计划"
-    entry_cron: "- ⏰ `/定时`：管理定时任务"
+    entry_cron: "- ⏰ `/定时 list|pause|resume|rm|run-now|tail`：管理定时任务"
     entry_approve: "- 👍 `/同意`：放行当前的审批请求"
     entry_approve_session: "- 🔓 `/同意本会话`：在本次会话中放行同类命令"
     entry_deny: "- 👎 `/拒绝`：拒绝当前的审批请求"

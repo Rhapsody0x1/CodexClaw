@@ -33,7 +33,7 @@ commands:
     entry_execute_plan: "- ✅ `/execute-plan` - approve the pending plan and start executing"
     entry_keep_planning: "- 📝 `/keep-planning` - stay in Plan mode and refine the plan"
     entry_cancel_plan: "- 🗑️ `/cancel-plan` - discard the pending plan"
-    entry_cron: "- ⏰ `/cron` - manage scheduled tasks"
+    entry_cron: "- ⏰ `/cron list|pause|resume|rm|run-now|tail` - manage scheduled tasks"
     entry_approve: "- 👍 `/approve` - approve the current pending approval (once)"
     entry_approve_session: "- 🔓 `/approve-session` - auto-approve similar commands for this session"
     entry_deny: "- 👎 `/deny` - decline the current approval request"
