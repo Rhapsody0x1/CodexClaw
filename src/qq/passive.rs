@@ -23,6 +23,10 @@ pub struct PassiveDispatchReport {
     pub sent_replies: usize,
     pub saw_agent_message: bool,
     pub tool_call_count: usize,
+    /// The turn's codex thread id, captured from the update stream as soon as
+    /// the thread is established — available even when the turn is interrupted
+    /// or fails before completing, so the caller can still persist it.
+    pub session_id: Option<String>,
 }
 
 pub struct PassiveTurnEmitter {
@@ -36,6 +40,7 @@ pub struct PassiveTurnEmitter {
     saw_agent_message: bool,
     tool_call_count: usize,
     pending_tools: Vec<ToolSummary>,
+    session_id: Option<String>,
 }
 
 impl PassiveTurnEmitter {
@@ -57,6 +62,7 @@ impl PassiveTurnEmitter {
             saw_agent_message: false,
             tool_call_count: 0,
             pending_tools: Vec::new(),
+            session_id: None,
         }
     }
 
@@ -71,6 +77,9 @@ impl PassiveTurnEmitter {
     ) -> Result<PassiveDispatchReport> {
         while let Some(update) = updates.recv().await {
             match update {
+                ExecutionUpdate::SessionStarted { session_id } => {
+                    self.session_id = Some(session_id)
+                }
                 ExecutionUpdate::ToolCall { display } => self.record_tool(display),
                 ExecutionUpdate::AgentMessage { text } => self.handle_agent_message(text).await?,
             }
@@ -80,6 +89,7 @@ impl PassiveTurnEmitter {
             sent_replies: self.sent_replies,
             saw_agent_message: self.saw_agent_message,
             tool_call_count: self.tool_call_count,
+            session_id: self.session_id.clone(),
         })
     }
 
@@ -243,6 +253,39 @@ mod tests {
             compact_tool_display("[Thinking]\n检查日志中断点"),
             "[Thinking]"
         );
+    }
+
+    #[tokio::test]
+    async fn run_captures_session_id_from_session_started() {
+        use crate::codex::executor::ExecutionUpdate;
+        use tokio::sync::mpsc;
+
+        let client = Arc::new(
+            QqApiClient::new(QqConfig {
+                app_id: String::new(),
+                app_secret: String::new(),
+                api_base_url: "https://example.com".to_string(),
+                token_url: "https://example.com/token".to_string(),
+            })
+            .unwrap(),
+        );
+        let emitter = super::PassiveTurnEmitter::new(
+            client,
+            "u".to_string(),
+            "m".to_string(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        // SessionStarted must be captured even when the turn produces no agent
+        // message (interrupted / failed mid-flight): no network send happens.
+        tx.send(ExecutionUpdate::SessionStarted {
+            session_id: "thread-xyz".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+        let report = emitter.run(rx).await.unwrap();
+        assert_eq!(report.session_id.as_deref(), Some("thread-xyz"));
     }
 
     #[test]

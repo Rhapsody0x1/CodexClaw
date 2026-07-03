@@ -169,6 +169,15 @@ impl AppServerSession {
             .await
             .context("establish thread")?;
 
+        // Announce the thread id up front so the caller can persist it for
+        // resume even if this turn is later interrupted (/stop) or fails
+        // mid-flight — those paths return Err and would otherwise drop it.
+        if let Some(tx) = update_tx.as_ref() {
+            let _ = tx.send(ExecutionUpdate::SessionStarted {
+                session_id: thread_id.clone(),
+            });
+        }
+
         let effort = Some(request.reasoning_effort.as_str().to_string());
         let service_tier_wire = request.service_tier.map(service_tier_to_wire);
 

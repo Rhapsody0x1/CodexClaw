@@ -66,6 +66,10 @@ pub struct ExecutionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionUpdate {
+    /// Emitted once, as soon as the turn's thread is established, so the caller
+    /// learns the thread id even if the turn is later interrupted or fails
+    /// before producing an ExecutionResult.
+    SessionStarted { session_id: String },
     AgentMessage { text: String },
     ToolCall { display: String },
 }

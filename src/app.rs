@@ -901,8 +901,21 @@ impl App {
                 Ok(())
             }
             Err(err) => {
+                // The turn established a thread (id captured via the update
+                // stream) but did not complete — /stop or an upstream failure
+                // mid-flight. Persist that thread id so the next message
+                // resumes the same conversation instead of starting fresh and
+                // losing all prior context. Skipped for resume-recovery errors:
+                // there the thread failed to load, so its id is already the
+                // (unusable) foreground session and recovery owns the flow.
+                let interrupted_session_id = dispatch_report.session_id.clone();
                 if err.to_string().contains("aborted by user") {
                     info!("codex turn aborted by operator");
+                    if let Some(session_id) = interrupted_session_id {
+                        self.session
+                            .set_foreground_session_id(&message.sender_openid, Some(session_id))
+                            .await?;
+                    }
                     return Ok(());
                 }
                 if is_resume_recovery_error(&err) {
@@ -929,6 +942,11 @@ impl App {
                     return Ok(());
                 }
                 error!("codex execution failed: {err:#}");
+                if let Some(session_id) = interrupted_session_id {
+                    self.session
+                        .set_foreground_session_id(&message.sender_openid, Some(session_id))
+                        .await?;
+                }
                 let text = self
                     .format_execution_error_message(&err, &workspace_dir)
                     .unwrap_or_else(|| format!("Codex 执行失败：{err}"));
