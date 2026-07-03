@@ -259,5 +259,7 @@ scheduler:
     reason_failed: "execution failed"
     reason_timed_out: "timed out"
     reason_no_answer: "no reply received"
+    stop_confirmed: "Stopped the current scheduled interactive task and restored your previous conversation."
+  redelivery: "Re-sending the message for scheduled task `%{title}` (original send failed: %{error}):\n\n%{text}"
   failure:
     disabled: "Scheduled task `%{title}` was disabled after %{count} consecutive failures. Check its configuration or run logs."

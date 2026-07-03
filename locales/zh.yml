@@ -259,5 +259,7 @@ scheduler:
     reason_failed: "执行失败"
     reason_timed_out: "运行超时"
     reason_no_answer: "未收到回复"
+    stop_confirmed: "已停止当前定时交互任务并恢复原对话。"
+  redelivery: "补发定时任务 `%{title}` 的消息（原发送失败：%{error}）：\n\n%{text}"
   failure:
     disabled: "定时任务 `%{title}` 已因连续失败 %{count} 次自动停用，请检查配置或运行日志。"

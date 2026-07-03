@@ -231,11 +231,12 @@ impl App {
                 "stopped",
             )
             .await?;
+            let lang = self.command_locale(&normalized.sender_openid).await;
             self.qq_client
                 .send_text(
                     &normalized.sender_openid,
                     &normalized.message_id,
-                    "已停止当前定时交互任务并恢复原对话。",
+                    &t!("scheduler.interactive.stop_confirmed", locale = lang.as_str()),
                     Some(&normalized.message_id),
                 )
                 .await?;
@@ -548,11 +549,16 @@ impl App {
                 return;
             }
         };
+        let lang = self.command_locale(openid).await;
         for delivery in deliveries {
-            let text = format!(
-                "补发定时任务 `{}` 的消息（原发送失败：{}）：\n\n{}",
-                delivery.title, delivery.error, delivery.text
-            );
+            let text = t!(
+                "scheduler.redelivery",
+                title = delivery.title.as_str(),
+                error = delivery.error.as_str(),
+                text = delivery.text.as_str(),
+                locale = lang.as_str()
+            )
+            .into_owned();
             if let Err(err) = self
                 .qq_client
                 .send_markdown(openid, message_id, &text, Some(message_id))
