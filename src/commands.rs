@@ -1096,19 +1096,25 @@ async fn handle_cron(
             Ok(CommandOutcome::Reply(CommandReply { text }))
         }
         "pause" | "resume" | "rm" | "remove" | "run-now" | "tail" => {
-            let id = args.get(1).ok_or_else(|| {
-                anyhow!(
-                    t!(
+            // These are user-input mistakes, not internal failures: return a
+            // reply like the sibling not_owned/unknown cases. An Err here
+            // propagates to the gateway task where it is only warn!-logged, so
+            // the user would get no response at all.
+            let Some(id) = args.get(1) else {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!(
                         "commands.cron.requires_job_id",
                         subcommand = subcommand,
                         locale = locale
                     )
-                    .into_owned()
-                )
-            })?;
-            let job = session.get_cron_job(id).await?.ok_or_else(|| {
-                anyhow!(t!("commands.cron.not_found", id = id, locale = locale).into_owned())
-            })?;
+                    .into_owned(),
+                }));
+            };
+            let Some(job) = session.get_cron_job(id).await? else {
+                return Ok(CommandOutcome::Reply(CommandReply {
+                    text: t!("commands.cron.not_found", id = id, locale = locale).into_owned(),
+                }));
+            };
             if job.owner_openid != openid {
                 return Ok(CommandOutcome::Reply(CommandReply {
                     text: t!("commands.cron.not_owned", locale = locale).into_owned(),
