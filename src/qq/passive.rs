@@ -71,26 +71,46 @@ impl PassiveTurnEmitter {
         self
     }
 
+    /// Always returns the report, even when a streamed send fails: the report
+    /// carries state the caller must not lose (notably the thread id from
+    /// SessionStarted, needed to persist an interrupted turn). The first send
+    /// error is returned alongside; after it, remaining updates are still
+    /// drained for their state but nothing more is sent.
     pub async fn run(
         mut self,
         mut updates: mpsc::UnboundedReceiver<ExecutionUpdate>,
-    ) -> Result<PassiveDispatchReport> {
+    ) -> (PassiveDispatchReport, Option<anyhow::Error>) {
+        let mut send_error = None;
         while let Some(update) = updates.recv().await {
             match update {
                 ExecutionUpdate::SessionStarted { session_id } => {
                     self.session_id = Some(session_id)
                 }
                 ExecutionUpdate::ToolCall { display } => self.record_tool(display),
-                ExecutionUpdate::AgentMessage { text } => self.handle_agent_message(text).await?,
+                ExecutionUpdate::AgentMessage { text } => {
+                    if send_error.is_some() {
+                        continue;
+                    }
+                    if let Err(err) = self.handle_agent_message(text).await {
+                        send_error = Some(err);
+                    }
+                }
             }
         }
-        self.flush_tail().await?;
-        Ok(PassiveDispatchReport {
-            sent_replies: self.sent_replies,
-            saw_agent_message: self.saw_agent_message,
-            tool_call_count: self.tool_call_count,
-            session_id: self.session_id.clone(),
-        })
+        if send_error.is_none()
+            && let Err(err) = self.flush_tail().await
+        {
+            send_error = Some(err);
+        }
+        (
+            PassiveDispatchReport {
+                sent_replies: self.sent_replies,
+                saw_agent_message: self.saw_agent_message,
+                tool_call_count: self.tool_call_count,
+                session_id: self.session_id.clone(),
+            },
+            send_error,
+        )
     }
 
     fn record_tool(&mut self, display: String) {
@@ -284,7 +304,8 @@ mod tests {
         })
         .unwrap();
         drop(tx);
-        let report = emitter.run(rx).await.unwrap();
+        let (report, send_error) = emitter.run(rx).await;
+        assert!(send_error.is_none());
         assert_eq!(report.session_id.as_deref(), Some("thread-xyz"));
     }
 

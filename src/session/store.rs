@@ -313,6 +313,44 @@ impl SessionStore {
         .await
     }
 
+    /// Compare-and-set variant of [`Self::bind_foreground_session_profile`]
+    /// for turns that ended without completing (/stop or a mid-flight
+    /// failure): the binding is applied only while the foreground is still
+    /// the dialog the turn started on — same session id and workspace as the
+    /// `expected` snapshot taken at turn start. If /stop, /new or the cron
+    /// sweeper swapped the foreground mid-turn, the comparison fails and
+    /// nothing is written, so the orphaned turn cannot point the foreground
+    /// at its dead thread and lose the conversation the user switched to.
+    /// Returns whether the binding was applied. The check and the write
+    /// happen under one state lock, so no swap can slip in between.
+    pub async fn bind_foreground_session_profile_if_matches(
+        &self,
+        openid: &str,
+        expected: &DialogState,
+        session_id: String,
+        profile: DialogProfile,
+    ) -> Result<bool> {
+        let expected_session_id = expected.session_id.clone();
+        let expected_workspace_dir = expected.workspace_dir.clone();
+        self.mutate_state(|state| {
+            let (applied, cached_profile) = {
+                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                if user.foreground.session_id != expected_session_id
+                    || user.foreground.workspace_dir != expected_workspace_dir
+                {
+                    return Ok(false);
+                }
+                user.foreground.session_id = Some(session_id);
+                user.foreground.profile = Some(profile);
+                let cached_profile = cached_profile_from_dialog(&user.foreground);
+                (true, cached_profile)
+            };
+            persist_cached_profile(state, cached_profile);
+            Ok(applied)
+        })
+        .await
+    }
+
     pub async fn set_foreground_session_id(
         &self,
         openid: &str,
@@ -1991,6 +2029,98 @@ mod tests {
         let snapshot = store.snapshot_for_user("u1").await.unwrap();
         assert!(snapshot.foreground.session_id.is_none());
         assert_eq!(snapshot.background.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bind_if_matches_applies_only_while_foreground_unchanged() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        // Foreground unchanged since the turn started: the binding lands,
+        // profile included.
+        let turn_start = store.snapshot_for_user("u1").await.unwrap();
+        let applied = store
+            .bind_foreground_session_profile_if_matches(
+                "u1",
+                &turn_start.foreground,
+                "interrupted-thread".to_string(),
+                DialogProfile {
+                    model_override: Some("gpt-x".into()),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    service_tier: None,
+                    context_mode: Some(ContextMode::Standard),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        assert_eq!(
+            snapshot.foreground.session_id.as_deref(),
+            Some("interrupted-thread")
+        );
+        assert_eq!(
+            snapshot
+                .foreground
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.model_override.as_deref()),
+            Some("gpt-x")
+        );
+
+        // Foreground swapped mid-turn (e.g. /stop restored the parked
+        // conversation): the stale turn must not clobber it.
+        let turn_start = store.snapshot_for_user("u2").await.unwrap();
+        store
+            .set_foreground_session_id("u2", Some("restored-thread".into()))
+            .await
+            .unwrap();
+        let applied = store
+            .bind_foreground_session_profile_if_matches(
+                "u2",
+                &turn_start.foreground,
+                "orphaned-thread".to_string(),
+                DialogProfile::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!applied);
+        let snapshot = store.snapshot_for_user("u2").await.unwrap();
+        assert_eq!(
+            snapshot.foreground.session_id.as_deref(),
+            Some("restored-thread")
+        );
+
+        // Same (None) session id but a different workspace — the foreground
+        // was replaced by a fresh dialog elsewhere (cron per-invocation
+        // stop): still refused.
+        let turn_start = store.snapshot_for_user("u3").await.unwrap();
+        let other_workspace = tempdir().unwrap();
+        store
+            .new_foreground_in_workspace("u3", other_workspace.path())
+            .await
+            .unwrap();
+        let applied = store
+            .bind_foreground_session_profile_if_matches(
+                "u3",
+                &turn_start.foreground,
+                "orphaned-thread".to_string(),
+                DialogProfile::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!applied);
+        let snapshot = store.snapshot_for_user("u3").await.unwrap();
+        assert!(snapshot.foreground.session_id.is_none());
     }
 
     #[tokio::test]

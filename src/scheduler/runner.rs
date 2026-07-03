@@ -464,15 +464,23 @@ async fn run_codex_turn(
         tokio::spawn(async move { codex.execute(request, Some(cancel_rx), Some(tx)).await });
     let execution = timeout(max_duration, handle).await;
     let execution = match execution {
-        Ok(result) => result??,
+        Ok(result) => result?,
         Err(_) => {
             let _ = cancel_tx.send(());
+            keep_interrupted_thread(job, run.session_strategy, &mut rx);
             if run.interactive.is_some() {
                 super::interactive::finish_job(app, &job.id, "timed_out")
                     .await
                     .ok();
             }
             return Err(anyhow!("timed out after {}s", max_duration.as_secs()));
+        }
+    };
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(err) => {
+            keep_interrupted_thread(job, run.session_strategy, &mut rx);
+            return Err(err);
         }
     };
     let mut streamed = String::new();
@@ -523,6 +531,41 @@ async fn run_codex_turn(
     } else {
         Ok(output)
     }
+}
+
+/// A turn that failed or timed out mid-flight has usually already announced
+/// its thread id on the update stream (SessionStarted). For a Persistent job,
+/// fold that id back into the job's session state before bailing out, so the
+/// next run (or retry) resumes the same thread instead of starting fresh and
+/// dropping the job's accumulated context. Leaves the state untouched when no
+/// thread was established.
+fn keep_interrupted_thread(
+    job: &mut CronJob,
+    strategy: SessionStrategy,
+    rx: &mut mpsc::UnboundedReceiver<ExecutionUpdate>,
+) {
+    if strategy != SessionStrategy::Persistent {
+        return;
+    }
+    let Some(session_id) = drain_session_started(rx) else {
+        return;
+    };
+    if let JobAction::CodexTurn { session_state, .. } = &mut job.action {
+        *session_state = Some(SessionState {
+            session_id: Some(session_id),
+            settings: SessionSettings::default(),
+        });
+    }
+}
+
+fn drain_session_started(rx: &mut mpsc::UnboundedReceiver<ExecutionUpdate>) -> Option<String> {
+    let mut found = None;
+    while let Ok(update) = rx.try_recv() {
+        if let ExecutionUpdate::SessionStarted { session_id } = update {
+            found = Some(session_id);
+        }
+    }
+    found
 }
 
 async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
@@ -674,7 +717,105 @@ fn truncate_for_log(output: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_exec_args, extract_codex_exec_agent_messages};
+    use super::{codex_exec_args, extract_codex_exec_agent_messages, keep_interrupted_thread};
+    use crate::codex::executor::ExecutionUpdate;
+    use crate::scheduler::store::{CronJob, CronKind, DeliverPolicy, JobAction, SessionStrategy};
+    use crate::session::state::SessionState;
+    use chrono::Utc;
+    use tokio::sync::mpsc;
+
+    fn codex_turn_job(strategy: SessionStrategy) -> CronJob {
+        let now = Utc::now();
+        CronJob {
+            id: "job-1".to_string(),
+            owner_openid: "owner".to_string(),
+            title: "sample".to_string(),
+            kind: CronKind::OneShot { at: now },
+            action: JobAction::CodexTurn {
+                prompt: "p".to_string(),
+                model: None,
+                session_state: None,
+                approval_policy: None,
+                session_strategy: strategy,
+                interactive: None,
+            },
+            workspace_dir: std::path::PathBuf::from("/tmp"),
+            deliver: DeliverPolicy::LogOnly,
+            created_at: now,
+            next_run_at: None,
+            run_now_at: None,
+            last_run_at: None,
+            last_run_status: None,
+            run_count: 0,
+            failure_streak: 0,
+            disabled: false,
+        }
+    }
+
+    fn job_session_id(job: &CronJob) -> Option<String> {
+        match &job.action {
+            JobAction::CodexTurn { session_state, .. } => session_state
+                .as_ref()
+                .and_then(|state| state.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn keep_interrupted_thread_folds_session_started_into_persistent_job() {
+        let mut job = codex_turn_job(SessionStrategy::Persistent);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ExecutionUpdate::SessionStarted {
+            session_id: "thread-abc".to_string(),
+        })
+        .unwrap();
+        tx.send(ExecutionUpdate::ToolCall {
+            display: "[Tool: Bash]".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        keep_interrupted_thread(&mut job, SessionStrategy::Persistent, &mut rx);
+
+        assert_eq!(job_session_id(&job).as_deref(), Some("thread-abc"));
+    }
+
+    #[test]
+    fn keep_interrupted_thread_leaves_state_without_session_started() {
+        let mut job = codex_turn_job(SessionStrategy::Persistent);
+        if let JobAction::CodexTurn { session_state, .. } = &mut job.action {
+            *session_state = Some(SessionState {
+                session_id: Some("previous-thread".to_string()),
+                settings: Default::default(),
+            });
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ExecutionUpdate::ToolCall {
+            display: "[Tool: Bash]".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        keep_interrupted_thread(&mut job, SessionStrategy::Persistent, &mut rx);
+
+        // No thread was established this run: the previous one stays bound.
+        assert_eq!(job_session_id(&job).as_deref(), Some("previous-thread"));
+    }
+
+    #[test]
+    fn keep_interrupted_thread_ignores_per_invocation_jobs() {
+        let mut job = codex_turn_job(SessionStrategy::PerInvocation);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ExecutionUpdate::SessionStarted {
+            session_id: "thread-abc".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        keep_interrupted_thread(&mut job, SessionStrategy::PerInvocation, &mut rx);
+
+        assert_eq!(job_session_id(&job), None);
+    }
 
     #[test]
     fn codex_exec_args_include_git_repo_check_skip_and_json_by_default() {

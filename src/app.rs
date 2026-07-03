@@ -722,18 +722,23 @@ impl App {
         self.clear_active_turn().await;
         // Do NOT hard-fail the turn on a streaming-send error: if execution
         // succeeded we still need to persist the session id and run the
-        // post-turn hooks. A default report (saw_agent_message = false) also
-        // makes the success branch below re-send the reply as a whole message,
-        // recovering from a transient streamed-send failure.
+        // post-turn hooks. Resetting the delivery counters
+        // (saw_agent_message = false) also makes the success branch below
+        // re-send the reply as a whole message, recovering from a transient
+        // streamed-send failure — while the captured thread id is kept so an
+        // interrupted turn can still be persisted below.
         let dispatch_report = match emitter.await {
-            Ok(Ok(report)) => report,
-            Ok(Err(err)) => {
+            Ok((report, None)) => report,
+            Ok((report, Some(err))) => {
                 warn!(
                     error = %err,
                     message_id = %message.message_id,
                     "failed to stream reply to QQ; continuing to persist turn state"
                 );
-                PassiveDispatchReport::default()
+                PassiveDispatchReport {
+                    session_id: report.session_id,
+                    ..PassiveDispatchReport::default()
+                }
             }
             Err(err) => {
                 warn!(error = %err, "reply emitter task panicked; continuing to persist turn state");
@@ -903,19 +908,51 @@ impl App {
             Err(err) => {
                 // The turn established a thread (id captured via the update
                 // stream) but did not complete — /stop or an upstream failure
-                // mid-flight. Persist that thread id so the next message
-                // resumes the same conversation instead of starting fresh and
-                // losing all prior context. Skipped for resume-recovery errors:
-                // there the thread failed to load, so its id is already the
-                // (unusable) foreground session and recovery owns the flow.
-                let interrupted_session_id = dispatch_report.session_id.clone();
+                // mid-flight. Persist that thread id (with the profile the
+                // turn actually ran with) so the next message resumes the same
+                // conversation instead of starting fresh and losing all prior
+                // context. Guarded: the write only lands while the foreground
+                // is still the dialog this turn started on — /stop of an
+                // interactive cron task, /new or the expiry sweeper may have
+                // swapped the foreground mid-turn, and overwriting then would
+                // orphan the conversation the user switched back to.
+                // Best-effort: a store failure only logs so the user still
+                // gets the turn's error report below. Skipped for
+                // resume-recovery errors: there the thread failed to load, so
+                // its id is already the (unusable) foreground session and
+                // recovery owns the flow.
+                if let Some(session_id) = dispatch_report.session_id.clone()
+                    && !is_resume_recovery_error(&err)
+                {
+                    match self
+                        .session
+                        .bind_foreground_session_profile_if_matches(
+                            &message.sender_openid,
+                            &user_snapshot.foreground,
+                            session_id,
+                            DialogProfile {
+                                model_override: Some(effective_model.clone()),
+                                reasoning_effort: Some(reasoning),
+                                service_tier: None,
+                                context_mode,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => info!(
+                            sender_openid = %message.sender_openid,
+                            "skipped persisting interrupted turn thread: foreground changed mid-turn"
+                        ),
+                        Err(store_err) => warn!(
+                            sender_openid = %message.sender_openid,
+                            error = %store_err,
+                            "failed to persist interrupted turn thread id"
+                        ),
+                    }
+                }
                 if err.to_string().contains("aborted by user") {
                     info!("codex turn aborted by operator");
-                    if let Some(session_id) = interrupted_session_id {
-                        self.session
-                            .set_foreground_session_id(&message.sender_openid, Some(session_id))
-                            .await?;
-                    }
                     return Ok(());
                 }
                 if is_resume_recovery_error(&err) {
@@ -942,11 +979,6 @@ impl App {
                     return Ok(());
                 }
                 error!("codex execution failed: {err:#}");
-                if let Some(session_id) = interrupted_session_id {
-                    self.session
-                        .set_foreground_session_id(&message.sender_openid, Some(session_id))
-                        .await?;
-                }
                 let text = self
                     .format_execution_error_message(&err, &workspace_dir)
                     .unwrap_or_else(|| format!("Codex 执行失败：{err}"));
