@@ -1061,9 +1061,12 @@ async fn handle_cron(
     openid: &str,
     session: &SessionStore,
 ) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let locale = lang.as_str();
     let Some(subcommand) = args.first().copied() else {
         return Ok(CommandOutcome::Reply(CommandReply {
-            text: "用法：/cron list | pause <job_id> | resume <job_id> | rm <job_id> | run-now <job_id> | tail <job_id>".to_string(),
+            text: t!("commands.cron.usage", locale = locale).into_owned(),
         }));
     };
     match subcommand {
@@ -1073,10 +1076,10 @@ async fn handle_cron(
             jobs.sort_by_key(|job| job.next_run_at);
             if jobs.is_empty() {
                 return Ok(CommandOutcome::Reply(CommandReply {
-                    text: "当前没有你的定时任务。".to_string(),
+                    text: t!("commands.cron.empty", locale = locale).into_owned(),
                 }));
             }
-            let mut text = String::from("你的定时任务：");
+            let mut text = t!("commands.cron.list_header", locale = locale).into_owned();
             for job in jobs {
                 text.push_str(&format!(
                     "\n{}  {}  next={}  runs={}  failures={}  {}",
@@ -1093,16 +1096,22 @@ async fn handle_cron(
             Ok(CommandOutcome::Reply(CommandReply { text }))
         }
         "pause" | "resume" | "rm" | "remove" | "run-now" | "tail" => {
-            let id = args
-                .get(1)
-                .ok_or_else(|| anyhow!("{subcommand} requires <job_id>"))?;
-            let job = session
-                .get_cron_job(id)
-                .await?
-                .ok_or_else(|| anyhow!("定时任务 `{id}` 不存在"))?;
+            let id = args.get(1).ok_or_else(|| {
+                anyhow!(
+                    t!(
+                        "commands.cron.requires_job_id",
+                        subcommand = subcommand,
+                        locale = locale
+                    )
+                    .into_owned()
+                )
+            })?;
+            let job = session.get_cron_job(id).await?.ok_or_else(|| {
+                anyhow!(t!("commands.cron.not_found", id = id, locale = locale).into_owned())
+            })?;
             if job.owner_openid != openid {
                 return Ok(CommandOutcome::Reply(CommandReply {
-                    text: "只能管理你自己的定时任务。".to_string(),
+                    text: t!("commands.cron.not_owned", locale = locale).into_owned(),
                 }));
             }
             match subcommand {
@@ -1114,7 +1123,12 @@ async fn handle_cron(
                         })
                         .await?;
                     Ok(CommandOutcome::Reply(CommandReply {
-                        text: format!("已暂停 `{}`。", job.title),
+                        text: t!(
+                            "commands.cron.paused",
+                            title = job.title.as_str(),
+                            locale = locale
+                        )
+                        .into_owned(),
                     }))
                 }
                 "resume" => {
@@ -1135,7 +1149,12 @@ async fn handle_cron(
                         })
                         .await?;
                     Ok(CommandOutcome::Reply(CommandReply {
-                        text: format!("已恢复 `{}`。", job.title),
+                        text: t!(
+                            "commands.cron.resumed",
+                            title = job.title.as_str(),
+                            locale = locale
+                        )
+                        .into_owned(),
                     }))
                 }
                 "rm" | "remove" => {
@@ -1148,7 +1167,12 @@ async fn handle_cron(
                     )
                     .await?;
                     Ok(CommandOutcome::Reply(CommandReply {
-                        text: format!("已删除 `{}`。", job.title),
+                        text: t!(
+                            "commands.cron.removed",
+                            title = job.title.as_str(),
+                            locale = locale
+                        )
+                        .into_owned(),
                     }))
                 }
                 "run-now" => {
@@ -1159,7 +1183,12 @@ async fn handle_cron(
                         })
                         .await?;
                     Ok(CommandOutcome::Reply(CommandReply {
-                        text: format!("已安排 `{}` 立即运行一次。", job.title),
+                        text: t!(
+                            "commands.cron.run_now",
+                            title = job.title.as_str(),
+                            locale = locale
+                        )
+                        .into_owned(),
                     }))
                 }
                 "tail" => {
@@ -1175,20 +1204,26 @@ async fn handle_cron(
                     entries.sort_by_key(|entry| entry.file_name());
                     let Some(last) = entries.last() else {
                         return Ok(CommandOutcome::Reply(CommandReply {
-                            text: "还没有运行日志。".to_string(),
+                            text: t!("commands.cron.no_logs", locale = locale).into_owned(),
                         }));
                     };
                     let raw = std::fs::read_to_string(last.path())?;
                     let preview = tail_chars(&raw, 3500);
                     Ok(CommandOutcome::Reply(CommandReply {
-                        text: format!("最近运行日志 `{}`：\n{}", last.path().display(), preview),
+                        text: t!(
+                            "commands.cron.tail_header",
+                            path = last.path().display(),
+                            preview = preview,
+                            locale = locale
+                        )
+                        .into_owned(),
                     }))
                 }
                 _ => unreachable!(),
             }
         }
         _ => Ok(CommandOutcome::Reply(CommandReply {
-            text: "未知 /cron 子命令。".to_string(),
+            text: t!("commands.cron.unknown", locale = locale).into_owned(),
         })),
     }
 }
@@ -2660,7 +2695,7 @@ fn help_text(lang: &str) -> String {
         t!("commands.help.section_approval_settings", locale = lang).into_owned(),
         t!("commands.help.entry_approvals", locale = lang).into_owned(),
         t!("commands.help.entry_plan", locale = lang).into_owned(),
-        "`/cron list|pause|resume|rm|run-now|tail` - manage scheduled tasks".to_string(),
+        t!("commands.help.entry_cron", locale = lang).into_owned(),
         t!("commands.help.entry_execute_plan", locale = lang).into_owned(),
         t!("commands.help.entry_keep_planning", locale = lang).into_owned(),
         t!("commands.help.entry_cancel_plan", locale = lang).into_owned(),

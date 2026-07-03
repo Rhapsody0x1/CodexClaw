@@ -33,6 +33,7 @@ commands:
     entry_execute_plan: "- ✅ `/execute-plan` - approve the pending plan and start executing"
     entry_keep_planning: "- 📝 `/keep-planning` - stay in Plan mode and refine the plan"
     entry_cancel_plan: "- 🗑️ `/cancel-plan` - discard the pending plan"
+    entry_cron: "- ⏰ `/cron` - manage scheduled tasks"
     entry_approve: "- 👍 `/approve` - approve the current pending approval (once)"
     entry_approve_session: "- 🔓 `/approve-session` - auto-approve similar commands for this session"
     entry_deny: "- 👎 `/deny` - decline the current approval request"
@@ -46,6 +47,21 @@ commands:
     failed: "Manual session compaction failed"
     success: "Compacted the current session context. Future turns will continue from the compact summary."
     warning: "Heads up: long threads and repeated compactions can reduce model accuracy. When possible, start a fresh `/new` session for a narrower task."
+
+  cron:
+    usage: "usage: /cron list | pause <job_id> | resume <job_id> | rm <job_id> | run-now <job_id> | tail <job_id>"
+    empty: "You don't have any scheduled tasks."
+    list_header: "Your scheduled tasks:"
+    not_owned: "You can only manage your own scheduled tasks."
+    not_found: "scheduled task `%{id}` not found"
+    paused: "Paused `%{title}`."
+    resumed: "Resumed `%{title}`."
+    removed: "Removed `%{title}`."
+    run_now: "Scheduled `%{title}` to run once now."
+    no_logs: "No run logs yet."
+    tail_header: "Recent run log `%{path}`:\n%{preview}"
+    unknown: "Unknown /cron subcommand."
+    requires_job_id: "%{subcommand} requires <job_id>"
 
   runtime:
     last_user_message: "last user message: %{preview}"
@@ -230,3 +246,16 @@ errors:
 
 warnings:
   context_near_limit: "⚠️ Estimated remaining context may be low (%{used} used / %{total}, about %{percent}% used). If anything looks off, try `/compact` to compress the session context."
+
+scheduler:
+  interactive:
+    started_with_parked: "Scheduled task `%{title}` has started. Your previous conversation was parked as `%{alias}` and will be restored when this task ends."
+    started: "Scheduled task `%{title}` has started."
+    restored: "Restored previous conversation `%{alias}`."
+    blank: "Returned to a blank conversation."
+    ended: "Scheduled task `%{title}` ended (%{reason}). %{suffix}"
+    reason_ended: "ended"
+    reason_failed: "failed"
+    reason_no_answer: "no reply"
+  failure:
+    disabled: "Scheduled task `%{title}` was disabled after %{count} consecutive failures. Check its configuration or run logs."

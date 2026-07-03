@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -93,13 +94,23 @@ pub async fn prepare_foreground(
         },
     };
     write_pending(&app.config.general.data_dir, &pending).await?;
+    let lang = owner_locale(app, &job.owner_openid).await;
+    let locale = lang.as_str();
     let banner = if let Some(alias) = pending.parked_fg_alias.as_deref() {
-        format!(
-            "定时任务 `{}` 已开始；你的原对话已暂存为 `{}`，结束后自动恢复。",
-            job.title, alias
+        t!(
+            "scheduler.interactive.started_with_parked",
+            title = job.title.as_str(),
+            alias = alias,
+            locale = locale
         )
+        .into_owned()
     } else {
-        format!("定时任务 `{}` 已开始。", job.title)
+        t!(
+            "scheduler.interactive.started",
+            title = job.title.as_str(),
+            locale = locale
+        )
+        .into_owned()
     };
     if let Err(err) = app
         .qq_client
@@ -240,15 +251,27 @@ pub async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
             .await;
     }
     remove_pending(&app.config.general.data_dir, job_id).await?;
+    let lang = owner_locale(app, &pending.owner_openid).await;
+    let locale = lang.as_str();
     let suffix = if let Some(alias) = pending.parked_fg_alias.as_deref() {
-        format!("已恢复原对话 `{alias}`。")
+        t!(
+            "scheduler.interactive.restored",
+            alias = alias,
+            locale = locale
+        )
+        .into_owned()
     } else {
-        "已回到空白对话。".to_string()
+        t!("scheduler.interactive.blank", locale = locale).into_owned()
     };
-    let text = format!(
-        "定时任务 `{}` 已结束（{}），{}",
-        pending.title, reason, suffix
-    );
+    let reason = localized_finish_reason(reason, locale);
+    let text = t!(
+        "scheduler.interactive.ended",
+        title = pending.title.as_str(),
+        reason = reason.as_str(),
+        suffix = suffix.as_str(),
+        locale = locale
+    )
+    .into_owned();
     if let Err(err) = app
         .qq_client
         .send_markdown_proactive(&pending.owner_openid, &text)
@@ -335,6 +358,23 @@ async fn remove_pending(data_dir: &Path, job_id: &str) -> Result<()> {
 
 fn pending_path(data_dir: &Path, job_id: &str) -> PathBuf {
     new_job_dir(data_dir, job_id).join("pending.json")
+}
+
+async fn owner_locale(app: &App, openid: &str) -> String {
+    app.session
+        .snapshot_for_user(openid)
+        .await
+        .map(|snapshot| snapshot.settings.language)
+        .unwrap_or_else(|_| "en".to_string())
+}
+
+fn localized_finish_reason(reason: &str, locale: &str) -> String {
+    match reason {
+        "ended" => t!("scheduler.interactive.reason_ended", locale = locale).into_owned(),
+        "failed" => t!("scheduler.interactive.reason_failed", locale = locale).into_owned(),
+        "no_answer" => t!("scheduler.interactive.reason_no_answer", locale = locale).into_owned(),
+        other => other.to_string(),
+    }
 }
 
 fn slug(raw: &str) -> String {

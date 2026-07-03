@@ -33,6 +33,7 @@ commands:
     entry_execute_plan: "- ✅ `/实施`：开始执行计划"
     entry_keep_planning: "- 📝 `/继续规划`：继续打磨计划"
     entry_cancel_plan: "- 🗑️ `/取消计划`：丢弃当前待执行计划"
+    entry_cron: "- ⏰ `/定时`：管理定时任务"
     entry_approve: "- 👍 `/同意`：放行当前的审批请求"
     entry_approve_session: "- 🔓 `/同意本会话`：在本次会话中放行同类命令"
     entry_deny: "- 👎 `/拒绝`：拒绝当前的审批请求"
@@ -46,6 +47,21 @@ commands:
     failed: "手动压缩当前会话上下文失败"
     success: "已手动压缩当前会话上下文。后续对话会基于压缩摘要继续。"
     warning: "提示：对话线程过长、反复 compact 后，模型准确性可能下降。若条件允许，建议及时 `/新建` 一个更聚焦的新会话。"
+
+  cron:
+    usage: "用法：/定时 list | pause <job_id> | resume <job_id> | rm <job_id> | run-now <job_id> | tail <job_id>"
+    empty: "当前没有你的定时任务。"
+    list_header: "你的定时任务："
+    not_owned: "只能管理你自己的定时任务。"
+    not_found: "定时任务 `%{id}` 不存在"
+    paused: "已暂停 `%{title}`。"
+    resumed: "已恢复 `%{title}`。"
+    removed: "已删除 `%{title}`。"
+    run_now: "已安排 `%{title}` 立即运行一次。"
+    no_logs: "还没有运行日志。"
+    tail_header: "最近运行日志 `%{path}`：\n%{preview}"
+    unknown: "未知 /定时 子命令。"
+    requires_job_id: "%{subcommand} 需要 <job_id>"
 
   runtime:
     last_user_message: "最近用户消息: %{preview}"
@@ -230,3 +246,16 @@ errors:
 
 warnings:
   context_near_limit: "⚠️ 估计上下文窗口可能不足（已用 %{used} / %{total}，约 %{percent}%）。出现异常时请尝试用 `/压缩` 来压缩上下文。"
+
+scheduler:
+  interactive:
+    started_with_parked: "定时任务 `%{title}` 已开始；你的原对话已暂存为 `%{alias}`，结束后自动恢复。"
+    started: "定时任务 `%{title}` 已开始。"
+    restored: "已恢复原对话 `%{alias}`。"
+    blank: "已回到空白对话。"
+    ended: "定时任务 `%{title}` 已结束（%{reason}），%{suffix}"
+    reason_ended: "已结束"
+    reason_failed: "失败"
+    reason_no_answer: "未收到回复"
+  failure:
+    disabled: "定时任务 `%{title}` 已因连续失败 %{count} 次自动停用，请检查配置或运行日志。"

@@ -2,6 +2,7 @@ use std::{process::Stdio, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use rust_i18n::t;
 use tokio::{
     io::AsyncReadExt,
     process::Command,
@@ -169,10 +170,14 @@ pub async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJ
         && job.disabled
         && job.failure_streak >= circuit_breaker_threshold
     {
-        let text = format!(
-            "定时任务 `{}` 已因连续失败 {} 次自动停用，请检查配置或运行日志。",
-            job.title, job.failure_streak
-        );
+        let lang = owner_locale(&app, &job.owner_openid).await;
+        let text = t!(
+            "scheduler.failure.disabled",
+            title = job.title.as_str(),
+            count = job.failure_streak,
+            locale = lang.as_str()
+        )
+        .into_owned();
         if let Err(err) = app
             .qq_client
             .send_markdown_proactive(&job.owner_openid, &text)
@@ -194,6 +199,14 @@ pub async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJ
         }
     }
     Ok(job)
+}
+
+async fn owner_locale(app: &App, openid: &str) -> String {
+    app.session
+        .snapshot_for_user(openid)
+        .await
+        .map(|snapshot| snapshot.settings.language)
+        .unwrap_or_else(|_| "en".to_string())
 }
 
 async fn run_job_inner(
