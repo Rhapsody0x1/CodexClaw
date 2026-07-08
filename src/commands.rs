@@ -178,6 +178,7 @@ fn maybe_handle_command_inner<'a>(
                     session,
                     default_model,
                     runtime_profile,
+                    is_busy,
                 )
                 .await;
             }
@@ -473,6 +474,12 @@ fn maybe_handle_command_inner<'a>(
     })
 }
 
+fn busy_reply(locale: &str) -> CommandOutcome {
+    CommandOutcome::Reply(CommandReply {
+        text: t!("errors.busy", locale = locale).into_owned(),
+    })
+}
+
 fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutcome {
     match outcome {
         CommandOutcome::Reply(reply) => CommandOutcome::Reply(CommandReply {
@@ -721,24 +728,14 @@ async fn handle_model(
     session: &SessionStore,
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
+    is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
-    let known_models =
-        list_codex_model_entries(runtime_profile, &interactive::model_extras(&snapshot));
-    if args.is_empty() {
-        return interactive::enter_model_prompt(
-            &snapshot,
-            openid,
-            session,
-            default_model,
-            runtime_profile,
-            lang.as_str(),
-        )
-        .await;
-    }
-    if args[0].eq_ignore_ascii_case("status") {
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
+    {
         let active_override = merged_settings(&snapshot).model_override;
         return Ok(CommandOutcome::Reply(CommandReply {
             text: t!(
@@ -750,6 +747,22 @@ async fn handle_model(
             .into_owned(),
         }));
     }
+    if is_busy {
+        return Ok(busy_reply(lang.as_str()));
+    }
+    if args.is_empty() {
+        return interactive::enter_model_prompt(
+            &snapshot,
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            lang.as_str(),
+        )
+        .await;
+    }
+    let known_models =
+        list_codex_model_entries(runtime_profile, &interactive::model_extras(&snapshot));
     let value = args.join(" ");
     let next = if matches!(value.as_str(), "default" | "inherit") {
         None
@@ -810,15 +823,14 @@ async fn handle_context(
     session: &SessionStore,
     _default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
+    is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
-    if args.is_empty() {
-        return interactive::enter_context_prompt(&snapshot, openid, session, runtime_profile)
-            .await;
-    }
-    if args[0].eq_ignore_ascii_case("status") {
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
+    {
         return Ok(CommandOutcome::Reply(CommandReply {
             text: t!(
                 "commands.context.status",
@@ -827,6 +839,13 @@ async fn handle_context(
             )
             .into_owned(),
         }));
+    }
+    if is_busy {
+        return Ok(busy_reply(lang.as_str()));
+    }
+    if args.is_empty() {
+        return interactive::enter_context_prompt(&snapshot, openid, session, runtime_profile)
+            .await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_context_input(&value).ok_or_else(|| {
@@ -853,15 +872,14 @@ async fn handle_reasoning(
     session: &SessionStore,
     _default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
+    is_busy: bool,
 ) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
-    if args.is_empty() {
-        return interactive::enter_reasoning_prompt(&snapshot, openid, session, runtime_profile)
-            .await;
-    }
-    if args[0].eq_ignore_ascii_case("status") {
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
+    {
         return Ok(CommandOutcome::Reply(CommandReply {
             text: t!(
                 "commands.reasoning.status",
@@ -870,6 +888,13 @@ async fn handle_reasoning(
             )
             .into_owned(),
         }));
+    }
+    if is_busy {
+        return Ok(busy_reply(lang.as_str()));
+    }
+    if args.is_empty() {
+        return interactive::enter_reasoning_prompt(&snapshot, openid, session, runtime_profile)
+            .await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_reasoning_input(&value).ok_or_else(|| {
@@ -3472,7 +3497,22 @@ mod interactive {
         session: &SessionStore,
         default_model: &str,
         runtime_profile: &CodexRuntimeProfile,
+        is_busy: bool,
     ) -> Result<CommandOutcome> {
+        if is_busy
+            && matches!(
+                &pending,
+                PendingSetting::Model | PendingSetting::Reasoning | PendingSetting::Context
+            )
+        {
+            let locale = session
+                .snapshot_for_user(openid)
+                .await?
+                .settings
+                .language
+                .clone();
+            return Ok(super::busy_reply(locale.as_str()));
+        }
         match pending {
             PendingSetting::Model => {
                 consume_model(text, openid, session, default_model, runtime_profile).await
@@ -4218,7 +4258,8 @@ mod tests {
         codex::runtime::CodexRuntimeProfile,
         session::{
             state::{
-                ContextMode, PendingSetting, ReasoningEffort, ServiceTier, TokenUsageSnapshot,
+                ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,
+                TokenUsageSnapshot,
             },
             store::SessionStore,
         },
@@ -4551,6 +4592,56 @@ mod tests {
         assert!(matches!(outcome, CommandOutcome::CancelCurrent(_)));
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert_eq!(snapshot.foreground.session_id.as_deref(), Some("thread"));
+    }
+
+    #[tokio::test]
+    async fn busy_profile_commands_do_not_mutate_saved_foreground_profile() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let original = DialogProfile {
+            model_override: Some("gpt-original".into()),
+            reasoning_effort: Some(ReasoningEffort::Low),
+            service_tier: None,
+            context_mode: Some(ContextMode::Standard),
+        };
+        session
+            .bind_foreground_session_profile("u1", Some("thread".into()), original.clone())
+            .await
+            .unwrap();
+        session.save_foreground("u1").await.unwrap();
+
+        for command in ["/model gpt-next", "/reasoning xhigh", "/context 1m"] {
+            let outcome = maybe_handle_command(
+                command,
+                "u1",
+                &session,
+                "default",
+                &CodexRuntimeProfile::default(),
+                true,
+            )
+            .await
+            .unwrap();
+            let CommandOutcome::Reply(reply) = outcome else {
+                panic!("expected busy reply for {command}");
+            };
+            assert!(
+                reply.text.to_lowercase().contains("already running"),
+                "unexpected busy reply: {}",
+                reply.text
+            );
+        }
+
+        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        assert_eq!(snapshot.foreground.profile.as_ref(), Some(&original));
     }
 
     #[tokio::test]
@@ -5119,6 +5210,69 @@ mod tests {
             "pending should clear on apply"
         );
         assert_eq!(snapshot.settings.model_override.as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn busy_pending_profile_input_does_not_apply_or_clear_picker() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        let original = DialogProfile {
+            model_override: Some("gpt-original".into()),
+            reasoning_effort: Some(ReasoningEffort::Low),
+            service_tier: None,
+            context_mode: Some(ContextMode::Standard),
+        };
+        session
+            .bind_foreground_session_profile("u1", Some("thread".into()), original.clone())
+            .await
+            .unwrap();
+        session.save_foreground("u1").await.unwrap();
+
+        let _ = maybe_handle_command(
+            "/model",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "gpt-next",
+            "u1",
+            &session,
+            "gpt-5.4",
+            &CodexRuntimeProfile::default(),
+            true,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = outcome else {
+            panic!("expected busy reply");
+        };
+        assert!(
+            reply.text.to_lowercase().contains("already running"),
+            "unexpected busy reply: {}",
+            reply.text
+        );
+
+        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        assert_eq!(snapshot.foreground.profile.as_ref(), Some(&original));
+        assert!(matches!(
+            snapshot.pending_setting,
+            Some(PendingSetting::Model)
+        ));
     }
 
     #[tokio::test]
