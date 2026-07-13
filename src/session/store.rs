@@ -2577,6 +2577,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_then_stop_keeps_rollout_without_parking_to_background() {
+        // Mirrors interactive cron finish for SessionStrategy::Persistent:
+        // end the dialog without a bg entry, but keep the rollout so the job's
+        // stored thread id can be resumed on the next run.
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session_path = global_home.path().join("sessions/2026/04/11");
+        tokio::fs::create_dir_all(&session_path).await.unwrap();
+        let rollout = session_path.join("rollout-2026-04-11T00-00-00-thread-keep.jsonl");
+        tokio::fs::write(&rollout, "{}").await.unwrap();
+        let store = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+        store
+            .set_foreground_session_id("u1", Some("thread-keep".into()))
+            .await
+            .unwrap();
+        assert!(store.save_foreground("u1").await.unwrap());
+        let result = store.stop_foreground("u1").await.unwrap();
+        assert!(!result.dropped_unsaved);
+        assert!(result.saved);
+        assert!(rollout.exists());
+        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        assert!(snapshot.background.is_empty());
+        assert!(snapshot.foreground.session_id.is_none());
+    }
+
+    #[tokio::test]
     async fn stop_keeps_shared_workspace_for_unsaved_temporary_dialog() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();

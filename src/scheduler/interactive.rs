@@ -224,26 +224,17 @@ pub async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
     let Some(pending) = read_pending(&app.config.general.data_dir, job_id).await? else {
         return Ok(());
     };
-    match pending.session_strategy {
-        SessionStrategy::Persistent => {
-            let alias = format!("cron-{}-history", slug(&pending.title));
-            if app
-                .session
-                .move_foreground_to_background(&pending.owner_openid, Some(&alias))
-                .await
-                .is_err()
-            {
-                let fallback = format!("{}-{}", alias, Utc::now().format("%Y%m%d%H%M%S"));
-                let _ = app
-                    .session
-                    .move_foreground_to_background(&pending.owner_openid, Some(&fallback))
-                    .await;
-            }
-        }
-        SessionStrategy::PerInvocation => {
-            let _ = app.session.stop_foreground(&pending.owner_openid).await;
-        }
+    // session_strategy only controls whether the codex thread id is kept on the
+    // job for the next run (see runner.rs). It must not park the finished cron
+    // dialog into the user's background list (Issue #5: /status showed a
+    // lingering cron-*-history entry after "stopped").
+    // Persistent still needs the on-disk rollout for resume, so mark the dialog
+    // saved before stop_foreground; otherwise an unsaved Local session would be
+    // pruned and the next invocation could not reopen the stored thread id.
+    if pending.session_strategy == SessionStrategy::Persistent {
+        let _ = app.session.save_foreground(&pending.owner_openid).await;
     }
+    let _ = app.session.stop_foreground(&pending.owner_openid).await;
     if let Some(alias) = pending.parked_fg_alias.as_deref() {
         let _ = app
             .session

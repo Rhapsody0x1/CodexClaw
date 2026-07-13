@@ -236,7 +236,10 @@ impl App {
                 .send_text(
                     &normalized.sender_openid,
                     &normalized.message_id,
-                    &t!("scheduler.interactive.stop_confirmed", locale = lang.as_str()),
+                    &t!(
+                        "scheduler.interactive.stop_confirmed",
+                        locale = lang.as_str()
+                    ),
                     Some(&normalized.message_id),
                 )
                 .await?;
@@ -1091,7 +1094,8 @@ impl App {
             }
         };
         if let Err(err) =
-            self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await
+            self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary)
+                .await
         {
             self.busy.store(false, Ordering::SeqCst);
             return Err(err);

@@ -200,8 +200,8 @@ Interactive mode allows scheduled jobs to conduct multi-turn conversations with 
 |     +-- until Codex emits end_signal or max_rounds        |
 |         is reached                                        |
 |  7. Interaction ends:                                     |
-|     +-- Foreground session stops (in Persistent mode,     |
-|     |   it switches to background)                        |
+|     +-- Foreground session stops (not parked into the     |
+|     |   user's background list)                           |
 |     +-- User's original foreground session is restored    |
 |  8. Start/end banner messages are sent to the user        |
 +-----------------------------------------------------------+
@@ -423,5 +423,5 @@ After confirmation, write a job-specific skill into the job's `workspace/.agents
 
 ### Choosing a Session Strategy
 
-- **PerInvocation** (default): Each execution is independent. Suitable for standalone repetitive tasks.
-- **Persistent**: Preserves context across executions. Suitable for continuity tasks that need to remember history (e.g., tracking project progress).
+- **PerInvocation** (default): Each execution creates a fresh codex thread. Suitable for standalone repetitive tasks.
+- **Persistent**: Persists the thread id on the job file so later runs reuse the same codex thread and keep context. The finished foreground dialog still stops and is not parked into the user's background list.
