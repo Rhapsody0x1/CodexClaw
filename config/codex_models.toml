@@ -17,10 +17,28 @@
 # convenient without broad substring matching that often becomes ambiguous.
 
 [[models]]
+name = "gpt-5.6-sol"
+aliases = ["5.6-sol", "56s", "sol", "5.6", "56"]
+description_zh = "最新旗舰 GPT-5.6 模型，复杂编程、研究与安全能力最强"
+description_en = "Latest flagship GPT-5.6 model with the strongest coding, research, and cybersecurity capability"
+
+[[models]]
+name = "gpt-5.6-terra"
+aliases = ["5.6-terra", "56t", "terra"]
+description_zh = "均衡的 GPT-5.6 日常模型，能力接近 5.5 且成本更低"
+description_en = "Balanced GPT-5.6 model for everyday work, competitive with GPT-5.5 at lower cost"
+
+[[models]]
+name = "gpt-5.6-luna"
+aliases = ["5.6-luna", "56l", "luna"]
+description_zh = "快速低成本的 GPT-5.6 模型，系列中性价比最高"
+description_en = "Fast and affordable GPT-5.6 model with the lowest cost in the family"
+
+[[models]]
 name = "gpt-5.5"
 aliases = ["5.5", "55"]
-description_zh = "最新旗舰通用模型，整体能力优先"
-description_en = "Latest flagship general-purpose model, optimized for overall capability"
+description_zh = "上一代前沿通用模型，适合复杂编程与研究工作流"
+description_en = "Previous-generation frontier model for complex coding, computer use, and research workflows"
 
 [[models]]
 name = "gpt-5.4"

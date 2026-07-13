@@ -5090,8 +5090,8 @@ mod tests {
         assert!(reply.text.contains("`gpt-5.4`"));
         assert!(reply.text.contains("aliases") || reply.text.contains("别名"));
         assert!(
-            reply.text.contains("Latest flagship general-purpose model")
-                || reply.text.contains("最新旗舰通用模型")
+            reply.text.contains("Latest flagship GPT-5.6 model")
+                || reply.text.contains("最新旗舰 GPT-5.6 模型")
         );
         let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(matches!(
