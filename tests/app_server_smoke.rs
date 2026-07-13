@@ -66,6 +66,7 @@ async fn one_shot_turn_round_trips_through_app_server() {
         add_dirs: Vec::new(),
         session_state: SessionState::default(),
         model: Some("gpt-5.4".to_string()),
+        model_provider: None,
         service_tier: None,
         context_mode: None,
         reasoning_effort: ReasoningEffort::Medium,

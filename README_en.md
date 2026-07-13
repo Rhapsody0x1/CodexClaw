@@ -54,6 +54,7 @@ Some other ramblings can be found in this [Blog](https://rhapsody0x1.github.io/p
 - **Memory Distillation** &mdash; (Experimental) Automatic background extraction of memories and skills from conversations, injected into subsequent prompts
 - **Approval Workflow** &mdash; Requests user approval via QQ before Codex executes sensitive operations, with per-session auto-approval support
 - **Self-Update** &mdash; Send `/self-update` via QQ to pull the latest code, compile, and hot-replace
+- **xAI Grok backend** &mdash; Optionally point Codex App-Server `model_provider` at `https://api.x.ai/v1` (`XAI_API_KEY`); `/model` can select Grok models; default remains the OpenAI/Codex path
 
 ## Quick Start
 

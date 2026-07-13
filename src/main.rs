@@ -54,9 +54,11 @@ fn print_usage() {
 async fn run_bot(config: AppConfig) -> Result<()> {
     tokio::fs::create_dir_all(&config.general.data_dir).await?;
     tokio::fs::create_dir_all(&config.general.codex_home_global).await?;
+    let provider_spec = config.codex_provider.enabled_spec();
     config_snapshot::bootstrap_codex_home(
         &config.general.codex_home_global,
         &config.general.system_codex_home,
+        provider_spec.as_ref(),
     )
     .await?;
 

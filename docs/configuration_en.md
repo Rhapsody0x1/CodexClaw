@@ -99,6 +99,51 @@ Controls the task scheduler. The scheduler supports cron-expression-based task t
 
 ---
 
+## `[codex_provider]` — Custom Codex model backend (xAI Grok, etc.)
+
+CodexClaw still runs the agent through **Codex App-Server** (tools, approvals, sandbox unchanged). You can rewrite the isolated `CODEX_HOME` (`general.codex_home_global`) Codex `config.toml` with a custom `model_providers` entry so the harness talks to the **xAI Grok OpenAI-compatible API** instead of only the default OpenAI/Codex account.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Write this provider into the isolated Codex `config.toml` on startup |
+| `id` | String | `"xai"` | `model_provider` id → `[model_providers.<id>]` |
+| `name` | String | `"xAI Grok"` | Display name |
+| `base_url` | String | `"https://api.x.ai/v1"` | OpenAI-compatible API root |
+| `env_key` | String | `"XAI_API_KEY"` | Env var Codex reads for the API key |
+| `wire_api` | String | `"responses"` | Codex wire protocol; xAI supports `/v1/responses` |
+| `set_as_default` | bool | `true` | Write top-level `model_provider` (and optional `model`) |
+| `default_model` | String? | `"grok-4"` | Top-level `model` when `set_as_default` is true |
+| `models` | String[] | Common Grok ids | Extra model ids (also listed in `config/codex_models.toml` for `/model`) |
+
+### Enabling xAI Grok
+
+1. Create an API key in the [xAI Console](https://console.x.ai/).
+2. Export it so the process can read it:
+
+```bash
+export XAI_API_KEY="xai-..."
+```
+
+3. Enable in `codexclaw.toml`:
+
+```toml
+[codex_provider]
+enabled = true
+```
+
+4. Optionally set the session default model:
+
+```toml
+[general]
+default_model = "grok-4"
+```
+
+5. Restart CodexClaw. Logs should include `applied codex_provider into isolated Codex home config.toml`. Use `/model grok-4` (or other Grok ids) to switch.
+
+> **Note**: With `enabled = false` (default), behavior matches the previous OpenAI/Codex path. Grok names appear in the catalog, but selecting them without enabling the provider will fail at the Codex backend.
+
+---
+
 ## Full Example
 
 Below is a complete configuration file containing all fields, which can be used as a starting template.
@@ -153,6 +198,19 @@ max_attempts             = 3
 retry_backoff_secs       = 30
 circuit_breaker_threshold = 5            # Auto-disable after 5 consecutive failures
 runs_retention           = 30
+
+# --- Optional: xAI Grok / custom OpenAI-compatible backend -------------
+# Disabled by default. When enabled, rewrites isolated CODEX_HOME config.toml.
+# [codex_provider]
+# enabled        = true
+# id             = "xai"
+# name           = "xAI Grok"
+# base_url       = "https://api.x.ai/v1"
+# env_key        = "XAI_API_KEY"
+# wire_api       = "responses"
+# set_as_default = true
+# default_model  = "grok-4"
+# models         = ["grok-4", "grok-4.5", "grok-3", "grok-3-mini"]
 ```
 
 ---

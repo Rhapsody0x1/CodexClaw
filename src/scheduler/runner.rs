@@ -438,6 +438,9 @@ async fn run_codex_turn(
     } else {
         run.prompt.clone()
     };
+    let runtime_profile = crate::codex::runtime::read_codex_runtime_profile_from_path(
+        &app.config.general.codex_home_global.join("config.toml"),
+    );
     let request = ExecutionRequest {
         prompt: prompt_text,
         workspace_dir: job.workspace_dir.clone(),
@@ -448,9 +451,11 @@ async fn run_codex_turn(
         model: run
             .model
             .clone()
+            .or_else(|| runtime_profile.configured_model.clone())
             .or_else(|| Some(app.config.general.default_model.clone())),
-        service_tier: None,
-        context_mode: None,
+        model_provider: runtime_profile.model_provider.clone(),
+        service_tier: runtime_profile.service_tier,
+        context_mode: runtime_profile.context_mode,
         reasoning_effort: app.config.general.default_reasoning_effort,
         image_paths: Vec::new(),
     };

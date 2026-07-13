@@ -7,9 +7,27 @@ CodexClaw 的安装、配置与首次运行指南。
 ## 前置条件
 
 - Rust 工具链 (edition 2024)
-- OpenAI Codex CLI 已安装并完成登录认证，确认 `codex exec --json "reply with exactly: ok"` 可正常运行
-- 系统 `~/.codex` 目录已存在，至少包含 `config.toml` 与 `auth.json`
+- OpenAI Codex CLI 已安装（默认 OpenAI 路径：完成登录认证，确认 `codex exec --json "reply with exactly: ok"` 可正常运行；或使用下方 xAI Grok 路径）
+- 系统 `~/.codex` 目录已存在，至少包含 `config.toml`（默认路径还会用到 `auth.json`）
 - QQ 开放平台账号（需完成个人认证）
+
+### 可选：用 xAI Grok 代替默认 OpenAI/Codex 后端
+
+CodexClaw 仍通过 Codex App-Server 跑 agent，但可把隔离 `CODEX_HOME` 指到 xAI 的 OpenAI 兼容 API：
+
+```bash
+export XAI_API_KEY="xai-..."
+```
+
+在 `codexclaw.toml` 中增加：
+
+```toml
+[codex_provider]
+enabled = true
+# 默认已是 https://api.x.ai/v1 + XAI_API_KEY + wire_api = "responses"
+```
+
+可选：`[general] default_model = "grok-4"`。详情见 [配置参考 — codex_provider](configuration.md#codex_provider--自定义-codex-模型后端xai-grok-等)。
 
 ## 安装
 

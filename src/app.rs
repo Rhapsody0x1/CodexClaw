@@ -357,6 +357,88 @@ impl App {
                     .await?;
                 return Ok(());
             }
+            CommandOutcome::SwitchBackend { target } => {
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let profile_path = self.runtime_profile_path();
+                let raw = std::fs::read_to_string(&profile_path).unwrap_or_default();
+                let grok_id = self.config.codex_provider.id.as_str();
+                let current =
+                    crate::codex::provider_config::detect_backend_from_config(&raw, grok_id);
+                let next = target.unwrap_or_else(|| current.toggle());
+                if next == current {
+                    let msg = t!(
+                        "commands.switch_model.already",
+                        backend = current.label(),
+                        locale = lang.as_str()
+                    )
+                    .into_owned();
+                    self.qq_client
+                        .send_text(
+                            &normalized.sender_openid,
+                            &normalized.message_id,
+                            &msg,
+                            Some(&normalized.message_id),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+
+                // Prefer a non-Grok general.default_model as the Codex-side model fallback.
+                let codex_model = if crate::codex::provider_config::looks_like_grok_model(
+                    &self.config.general.default_model,
+                ) {
+                    self.config
+                        .openai_provider
+                        .default_model
+                        .clone()
+                        .unwrap_or_else(|| "gpt-5.5".to_string())
+                } else {
+                    self.config.general.default_model.clone()
+                };
+                let grok_spec = self.config.codex_provider.to_spec();
+                let openai_spec = self.config.openai_provider.to_spec();
+                let result = crate::codex::provider_config::switch_backend_in_codex_home(
+                    &self.config.general.codex_home_global,
+                    next,
+                    &grok_spec,
+                    openai_spec.as_ref(),
+                    &codex_model,
+                )?;
+
+                // Always align active model override so temporary + saved dialogs
+                // pick up the backend default on the next turn (Grok ↔ Codex parity).
+                self.session
+                    .set_model_override_for_active(
+                        &normalized.sender_openid,
+                        Some(result.model.clone()),
+                    )
+                    .await?;
+
+                let msg = t!(
+                    "commands.switch_model.switched",
+                    from = current.label(),
+                    to = result.target.label(),
+                    model = result.model,
+                    locale = lang.as_str()
+                )
+                .into_owned();
+                tracing::info!(
+                    from = current.as_str(),
+                    to = result.target.as_str(),
+                    model = %result.model,
+                    openid = %normalized.sender_openid,
+                    "switched LLM backend via /switch_model"
+                );
+                self.qq_client
+                    .send_text(
+                        &normalized.sender_openid,
+                        &normalized.message_id,
+                        &msg,
+                        Some(&normalized.message_id),
+                    )
+                    .await?;
+                return Ok(());
+            }
             CommandOutcome::SetGlobalReasoning(value) => {
                 let lang = self.command_locale(&normalized.sender_openid).await;
                 let profile_path = self.runtime_profile_path();
@@ -687,6 +769,7 @@ impl App {
                     add_dirs,
                     session_state: runtime_state,
                     model: Some(effective_model.clone()),
+                    model_provider: runtime_profile.model_provider.clone(),
                     service_tier,
                     context_mode,
                     reasoning_effort: reasoning,
@@ -1074,6 +1157,7 @@ impl App {
             config_overrides: Vec::new(),
             add_dirs: self.compact_add_dirs(&user_snapshot.foreground.workspace_dir),
             model: Some(effective_model.clone()),
+            model_provider: runtime_profile.model_provider.clone(),
             service_tier: runtime_profile.service_tier,
             context_mode,
             reasoning_effort: reasoning,

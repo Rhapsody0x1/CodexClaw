@@ -22,6 +22,7 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "help",
     "lang",
     "model",
+    "switch_model",
     "fast",
     "context",
     "reasoning",
@@ -59,6 +60,8 @@ const PROTECTED_COMMANDS: &[&str] = &[
     "状态",
     "会话",
     "模型",
+    "切换模型",
+    "切换",
     "快速",
     "上下文",
     "思考",
@@ -109,6 +112,11 @@ pub enum CommandOutcome {
     SetGlobalReasoning(Option<ReasoningEffort>),
     SetGlobalFast(Option<ServiceTier>),
     SetGlobalContext(Option<ContextMode>),
+    /// Toggle or set LLM backend between Codex (OpenAI) and Grok (custom provider).
+    SwitchBackend {
+        /// `None` means toggle; `Some` forces a target backend.
+        target: Option<crate::codex::provider_config::BackendKind>,
+    },
     RetryResume,
     /// Resolve the user's next pending approval request with the given
     /// decision. App looks up its `pending_approvals[openid]` queue and
@@ -258,6 +266,7 @@ fn maybe_handle_command_inner<'a>(
                 )
                 .await
             }
+            "/switch_model" => handle_switch_model(&rest, openid, session, runtime_profile).await,
             "/fast" => {
                 handle_fast(
                     &rest,
@@ -470,6 +479,7 @@ fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutco
         CommandOutcome::SetGlobalReasoning(value) => CommandOutcome::SetGlobalReasoning(value),
         CommandOutcome::SetGlobalFast(value) => CommandOutcome::SetGlobalFast(value),
         CommandOutcome::SetGlobalContext(value) => CommandOutcome::SetGlobalContext(value),
+        CommandOutcome::SwitchBackend { target } => CommandOutcome::SwitchBackend { target },
         CommandOutcome::RetryResume => CommandOutcome::RetryResume,
         CommandOutcome::Approval(intent) => CommandOutcome::Approval(intent),
         CommandOutcome::Continue => CommandOutcome::Continue,
@@ -554,6 +564,9 @@ async fn expand_alias(
             }
             CommandOutcome::SetGlobalContext(value) => {
                 return Ok(CommandOutcome::SetGlobalContext(value));
+            }
+            CommandOutcome::SwitchBackend { target } => {
+                return Ok(CommandOutcome::SwitchBackend { target });
             }
             CommandOutcome::RetryResume => return Ok(CommandOutcome::RetryResume),
             CommandOutcome::Approval(intent) => return Ok(CommandOutcome::Approval(intent)),
@@ -693,6 +706,81 @@ pub async fn handle_selector_callback(
 ) -> Result<Option<CommandOutcome>> {
     let _ = (data, session, default_model, runtime_profile, is_busy);
     Ok(None)
+}
+
+async fn handle_switch_model(
+    args: &[&str],
+    openid: &str,
+    session: &SessionStore,
+    runtime_profile: &CodexRuntimeProfile,
+) -> Result<CommandOutcome> {
+    let snapshot = session.snapshot_for_user(openid).await?;
+    let lang = snapshot.settings.language.clone();
+    let current = {
+        let raw =
+            std::fs::read_to_string(session.codex_home().join("config.toml")).unwrap_or_default();
+        if raw.trim().is_empty() {
+            // Fallback when config file is missing (unit tests / fresh home).
+            if runtime_profile.model_provider.as_deref().is_some_and(|p| {
+                p.eq_ignore_ascii_case("xai")
+                    || p.eq_ignore_ascii_case("grok")
+                    || p.eq_ignore_ascii_case("x-ai")
+            }) || runtime_profile
+                .configured_model
+                .as_deref()
+                .is_some_and(crate::codex::provider_config::looks_like_grok_model)
+            {
+                crate::codex::provider_config::BackendKind::Grok
+            } else {
+                crate::codex::provider_config::BackendKind::Codex
+            }
+        } else {
+            crate::codex::provider_config::detect_backend_from_config(&raw, "xai")
+        }
+    };
+
+    if args
+        .first()
+        .is_some_and(|a| a.eq_ignore_ascii_case("status"))
+    {
+        let model = effective_model(&snapshot, "inherit", runtime_profile);
+        return Ok(CommandOutcome::Reply(CommandReply {
+            text: t!(
+                "commands.switch_model.status",
+                backend = current.label(),
+                model = model,
+                locale = lang.as_str()
+            )
+            .into_owned(),
+        }));
+    }
+
+    let target = if args.is_empty() {
+        None
+    } else {
+        let joined = args.join(" ");
+        Some(
+            crate::codex::provider_config::BackendKind::parse(&joined).ok_or_else(|| {
+                anyhow!(t!("commands.switch_model.invalid", locale = lang.as_str()).into_owned())
+            })?,
+        )
+    };
+
+    // No-op if user forces the backend already active.
+    if let Some(forced) = target {
+        if forced == current {
+            return Ok(CommandOutcome::Reply(CommandReply {
+                text: t!(
+                    "commands.switch_model.already",
+                    backend = current.label(),
+                    locale = lang.as_str()
+                )
+                .into_owned(),
+            }));
+        }
+    }
+
+    Ok(CommandOutcome::SwitchBackend { target })
 }
 
 async fn handle_model(
@@ -1851,6 +1939,34 @@ fn build_status_text(
         )
         .into_owned(),
     );
+    {
+        // Same backend classification used by /switch_model (runtime profile view).
+        let backend = if runtime_profile.model_provider.as_deref().is_some_and(|p| {
+            p.eq_ignore_ascii_case("xai")
+                || p.eq_ignore_ascii_case("grok")
+                || p.eq_ignore_ascii_case("x-ai")
+        }) || runtime_profile
+            .configured_model
+            .as_deref()
+            .is_some_and(crate::codex::provider_config::looks_like_grok_model)
+        {
+            crate::codex::provider_config::BackendKind::Grok
+        } else {
+            crate::codex::provider_config::BackendKind::Codex
+        };
+        lines.push(
+            t!(
+                "commands.status.backend",
+                backend = backend.label(),
+                provider = runtime_profile
+                    .model_provider
+                    .as_deref()
+                    .unwrap_or("default"),
+                locale = lang
+            )
+            .into_owned(),
+        );
+    }
     lines.push(
         t!(
             if effective.verbose {
@@ -2533,6 +2649,8 @@ pub(crate) fn canonicalize_core_command(command: &str) -> &str {
         "/状态" => "/status",
         "/会话" => "/sessions",
         "/模型" => "/model",
+        "/切换模型" => "/switch_model",
+        "/切换" => "/switch_model",
         "/快速" => "/fast",
         "/上下文" => "/context",
         "/思考" => "/reasoning",
@@ -2633,6 +2751,7 @@ fn help_text(lang: &str) -> String {
         String::new(),
         t!("commands.help.section_model_settings", locale = lang).into_owned(),
         t!("commands.help.entry_model", locale = lang).into_owned(),
+        t!("commands.help.entry_switch_model", locale = lang).into_owned(),
         t!("commands.help.entry_reasoning", locale = lang).into_owned(),
         t!("commands.help.entry_fast", locale = lang).into_owned(),
         t!("commands.help.entry_context", locale = lang).into_owned(),
@@ -4901,6 +5020,76 @@ mod tests {
         };
         // Must have produced some text and terminated (no panic / stack overflow)
         assert!(!reply.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn switch_model_toggle_emits_switch_backend_outcome() {
+        let data = tempdir().unwrap();
+        let global_home = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let session = SessionStore::load_or_init(
+            data.path(),
+            global_home.path(),
+            global_home.path(),
+            workspace.path(),
+        )
+        .await
+        .unwrap();
+
+        let outcome = maybe_handle_command(
+            "/switch_model",
+            "u1",
+            &session,
+            "gpt-5.5",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        match outcome {
+            CommandOutcome::SwitchBackend { target: None } => {}
+            _ => panic!("expected SwitchBackend toggle"),
+        }
+
+        let zh = maybe_handle_command(
+            "/切换模型 grok",
+            "u1",
+            &session,
+            "gpt-5.5",
+            &CodexRuntimeProfile::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        match zh {
+            CommandOutcome::SwitchBackend {
+                target: Some(crate::codex::provider_config::BackendKind::Grok),
+            } => {}
+            _ => panic!("expected SwitchBackend Grok"),
+        }
+
+        let status = maybe_handle_command(
+            "/switch_model status",
+            "u1",
+            &session,
+            "gpt-5.5",
+            &CodexRuntimeProfile {
+                configured_model: Some("gpt-5.5".into()),
+                model_provider: None,
+                ..CodexRuntimeProfile::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::Reply(reply) = status else {
+            panic!("expected status reply");
+        };
+        assert!(
+            reply.text.to_lowercase().contains("codex") || reply.text.contains("Codex"),
+            "status should mention Codex backend: {}",
+            reply.text
+        );
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ commands:
     entry_interrupt: "- ⏹️ `/中断`：打断运行中的任务"
     entry_self_update: "- 🚀 `/自更新`：部署最新版本"
     entry_model: "- 🤖 `/模型`：选择模型"
+    entry_switch_model: "- 🔀 `/切换模型`：在 Codex 与 Grok 后端之间切换"
     entry_fast: "- ⚡ `/快速`：开关快速模式"
     entry_context: "- 🧠 `/上下文`：选择上下文窗口"
     entry_reasoning: "- 🔍 `/思考`：选择思考深度"
@@ -89,6 +90,7 @@ commands:
   status:
     workspace: "工作目录: %{dir}"
     model: "模型: %{summary}"
+    backend: "后端: %{backend}（provider=`%{provider}`）"
     verbose_on: "详细输出: 开启"
     verbose_off: "详细输出: 关闭"
     bg_header: "后台会话（%{count}）："
@@ -108,6 +110,12 @@ commands:
     prompt_item_name: "- `%{name}`"
     prompt_item_description: "  - %{description}"
     prompt_item_aliases: "  - 别名：%{aliases}"
+
+  switch_model:
+    status: "当前后端：%{backend}\n当前模型：`%{model}`\n发送 `/切换模型` 可在 Codex 与 Grok 之间切换。"
+    switched: "已从 **%{from}** 切换到 **%{to}**。\n模型：`%{model}`\n（仍使用同一 Codex App-Server 进程，只是改了 provider/model 配置。）"
+    already: "已经在 **%{backend}** 后端，无需切换。"
+    invalid: "无效参数。用法：`/切换模型`（切换）| `/切换模型 status` | `/切换模型 codex` | `/切换模型 grok`"
 
   fast:
     updated: "fast 已更新为：%{value}"

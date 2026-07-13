@@ -37,3 +37,29 @@ max_attempts = 3
 retry_backoff_secs = 30
 circuit_breaker_threshold = 5
 runs_retention = 30
+
+# Optional: Grok / xAI-style backend (used at bootstrap when enabled, and by /switch_model → grok).
+# [codex_provider]
+# enabled = true
+# id = "xai"
+# name = "xAI Grok"
+# base_url = "https://api.x.ai/v1"
+# env_key = "XAI_API_KEY"
+# wire_api = "responses"
+# set_as_default = true
+# default_model = "grok-4.5"
+# models = ["grok-4", "grok-4.5", "grok-3", "grok-3-mini"]
+
+# Preferred backend when /switch_model → codex (third-party OpenAI-compatible mirror).
+# Without this, switch tries to re-activate a non-Grok provider already in config.toml;
+# if none exists it clears model_provider and may hit official api.openai.com (wrong for mirror keys).
+# [openai_provider]
+# enabled = true
+# id = "mirror"
+# name = "mirror"
+# base_url = "https://chat.soruxgpt.com/codex"
+# env_key = "OPENAI_API_KEY"
+# wire_api = "responses"
+# default_model = "gpt-5.5"
+# requires_openai_auth = false
+# preferred_auth_method = "apikey"

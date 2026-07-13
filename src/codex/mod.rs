@@ -5,4 +5,5 @@ pub mod events;
 pub mod executor;
 pub mod output;
 pub mod prompt;
+pub mod provider_config;
 pub mod runtime;

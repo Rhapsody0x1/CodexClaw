@@ -54,6 +54,7 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 - **记忆蒸馏** &mdash; (实验性) 后台自动从对话中提取记忆和 Skill，注入后续 prompt
 - **审批流程** &mdash; Codex 执行敏感操作前通过 QQ 请求用户审批，支持按会话自动放行
 - **自更新** &mdash; 通过 QQ 发送 `/self-update` 即可拉取最新代码、编译并热替换
+- **xAI Grok 后端** &mdash; 可选将 Codex App-Server 的 `model_provider` 指到 `https://api.x.ai/v1`（`XAI_API_KEY`），`/model` 可选 Grok 模型；默认仍为 OpenAI/Codex 路径
 
 ## 快速开始
 

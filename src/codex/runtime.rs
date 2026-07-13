@@ -581,4 +581,47 @@ model = "gpt-5.4"   # already canonical, must dedupe
         assert_eq!(profile.configured_model.as_deref(), Some("gpt-5.5"));
         assert_eq!(profile.context_mode, Some(ContextMode::OneM));
     }
+
+    #[test]
+    fn catalog_includes_grok_models_for_picker() {
+        let list = list_codex_model_entries_with_path(
+            &CodexRuntimeProfile::default(),
+            &[],
+            Path::new("/dev/null"),
+        );
+        assert!(
+            list.iter().any(|m| m.name == "grok-4"),
+            "expected grok-4 in canonical catalog"
+        );
+        assert!(list.iter().any(|m| m.name == "grok-3-mini"));
+        let grok = list.iter().find(|m| m.name == "grok-4").unwrap();
+        assert!(grok.aliases.iter().any(|a| a == "xai"));
+    }
+
+    #[test]
+    fn merges_grok_provider_extras_and_reads_xai_runtime_profile() {
+        let tmp = NamedTempFile::new().unwrap();
+        let applied = crate::codex::provider_config::apply_model_provider_to_config(
+            "model = \"gpt-5.4\"\n",
+            &crate::codex::provider_config::CodexProviderSpec::xai_grok(),
+        )
+        .expect("apply grok provider");
+        std::fs::write(tmp.path(), &applied).unwrap();
+
+        let profile = read_codex_runtime_profile_from_path(tmp.path());
+        assert_eq!(profile.model_provider.as_deref(), Some("xai"));
+        assert_eq!(profile.configured_model.as_deref(), Some("grok-4"));
+
+        let list = list_codex_models_with_path(
+            &profile,
+            &crate::codex::provider_config::provider_model_ids(
+                &crate::codex::provider_config::CodexProviderSpec::xai_grok(),
+            ),
+            tmp.path(),
+        );
+        assert!(list.iter().any(|m| m == "grok-4"));
+        assert!(list.iter().any(|m| m == "grok-3-mini"));
+        // OpenAI catalog models remain available when Grok is enabled.
+        assert!(list.iter().any(|m| m.starts_with("gpt-")));
+    }
 }

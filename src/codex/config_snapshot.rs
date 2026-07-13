@@ -1,9 +1,15 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use tracing::warn;
+use tracing::{info, warn};
 
-pub async fn bootstrap_codex_home(codex_home: &Path, system_codex_home: &Path) -> Result<()> {
+use super::provider_config::{CodexProviderSpec, apply_model_provider_to_codex_home};
+
+pub async fn bootstrap_codex_home(
+    codex_home: &Path,
+    system_codex_home: &Path,
+    provider: Option<&CodexProviderSpec>,
+) -> Result<()> {
     tokio::fs::create_dir_all(codex_home).await?;
 
     copy_file_if_missing(
@@ -34,6 +40,25 @@ pub async fn bootstrap_codex_home(codex_home: &Path, system_codex_home: &Path) -
     let legacy = codex_home.join("config-codex-claw.toml");
     if legacy.exists() {
         let _ = tokio::fs::remove_file(&legacy).await;
+    }
+
+    // Optional: point isolated Codex home at xAI Grok (or another OpenAI-compatible provider).
+    // Runs after the system config copy so Grok settings win over a bare OpenAI default.
+    if let Some(spec) = provider {
+        apply_model_provider_to_codex_home(codex_home, spec).with_context(|| {
+            format!(
+                "failed to apply codex_provider `{}` to {}",
+                spec.id,
+                codex_home.join("config.toml").display()
+            )
+        })?;
+        info!(
+            provider_id = %spec.id,
+            base_url = %spec.base_url,
+            env_key = %spec.env_key,
+            wire_api = %spec.wire_api,
+            "applied codex_provider into isolated Codex home config.toml"
+        );
     }
     Ok(())
 }
@@ -184,6 +209,8 @@ mod tests {
 
     use super::bootstrap_codex_home;
 
+    use super::super::provider_config::CodexProviderSpec;
+
     #[tokio::test]
     async fn bootstrap_removes_legacy_codex_claw_config() {
         let codex_home = tempdir().unwrap();
@@ -201,7 +228,7 @@ mod tests {
             .await
             .unwrap();
 
-        bootstrap_codex_home(codex_home.path(), system_home.path())
+        bootstrap_codex_home(codex_home.path(), system_home.path(), None)
             .await
             .unwrap();
         assert!(!codex_home.path().join("config-codex-claw.toml").exists());
@@ -214,5 +241,67 @@ mod tests {
         assert!(cron_skill.contains("Do not use `codex-exec` or `codex-turn`"));
         assert!(cron_skill.contains("Use `codex-exec` when"));
         assert!(cron_skill.contains("Use `codex-turn` when"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_applies_xai_grok_provider_into_isolated_home() {
+        let codex_home = tempdir().unwrap();
+        let system_home = tempdir().unwrap();
+        tokio::fs::write(
+            system_home.path().join("config.toml"),
+            "model = \"gpt-5.4\"\n",
+        )
+        .await
+        .unwrap();
+
+        let spec = CodexProviderSpec::xai_grok();
+        bootstrap_codex_home(codex_home.path(), system_home.path(), Some(&spec))
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(codex_home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("xai")
+        );
+        assert_eq!(parsed.get("model").and_then(|v| v.as_str()), Some("grok-4"));
+        let provider = parsed
+            .get("model_providers")
+            .and_then(|v| v.get("xai"))
+            .expect("xai provider");
+        assert_eq!(
+            provider.get("base_url").and_then(|v| v.as_str()),
+            Some("https://api.x.ai/v1")
+        );
+        assert_eq!(
+            provider.get("env_key").and_then(|v| v.as_str()),
+            Some("XAI_API_KEY")
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_without_provider_keeps_system_openai_model() {
+        let codex_home = tempdir().unwrap();
+        let system_home = tempdir().unwrap();
+        tokio::fs::write(
+            system_home.path().join("config.toml"),
+            "model = \"gpt-5.4\"\n",
+        )
+        .await
+        .unwrap();
+
+        bootstrap_codex_home(codex_home.path(), system_home.path(), None)
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(codex_home.path().join("config.toml"))
+            .await
+            .unwrap();
+        assert!(raw.contains("gpt-5.4"));
+        assert!(!raw.contains("api.x.ai"));
+        assert!(!raw.contains("model_provider"));
     }
 }

@@ -54,6 +54,7 @@ const THREAD_UNLOAD_TIMEOUT: Duration = Duration::from_secs(12);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfigSignature {
     model: Option<String>,
+    model_provider: Option<String>,
     reasoning_effort: String,
     context_mode: Option<ContextMode>,
     service_tier: Option<ServiceTier>,
@@ -64,6 +65,7 @@ impl RuntimeConfigSignature {
     fn from_request(req: &ExecutionRequest) -> Self {
         Self {
             model: req.model.clone(),
+            model_provider: req.model_provider.clone(),
             reasoning_effort: req.reasoning_effort.as_str().to_string(),
             context_mode: req.context_mode,
             service_tier: req.service_tier,
@@ -74,6 +76,7 @@ impl RuntimeConfigSignature {
     fn from_compact_request(req: &CompactRequest) -> Self {
         Self {
             model: req.model.clone(),
+            model_provider: req.model_provider.clone(),
             reasoning_effort: req.reasoning_effort.as_str().to_string(),
             context_mode: req.context_mode,
             service_tier: req.service_tier,
@@ -548,6 +551,7 @@ fn build_config_overrides(req: &ExecutionRequest) -> HashMap<String, JsonValue> 
     build_runtime_config_overrides(
         &req.config_overrides,
         req.model.as_deref(),
+        req.model_provider.as_deref(),
         req.service_tier,
         req.context_mode,
         req.reasoning_effort.as_str(),
@@ -558,6 +562,7 @@ fn build_compact_config_overrides(req: &CompactRequest) -> HashMap<String, JsonV
     build_runtime_config_overrides(
         &req.config_overrides,
         req.model.as_deref(),
+        req.model_provider.as_deref(),
         req.service_tier,
         req.context_mode,
         req.reasoning_effort.as_str(),
@@ -567,6 +572,7 @@ fn build_compact_config_overrides(req: &CompactRequest) -> HashMap<String, JsonV
 fn build_runtime_config_overrides(
     config_overrides: &[String],
     model: Option<&str>,
+    model_provider: Option<&str>,
     service_tier: Option<ServiceTier>,
     context_mode: Option<ContextMode>,
     reasoning_effort: &str,
@@ -584,6 +590,12 @@ fn build_runtime_config_overrides(
     }
     if let Some(model) = model {
         out.insert("model".to_string(), JsonValue::String(model.to_string()));
+    }
+    if let Some(provider) = model_provider.map(str::trim).filter(|p| !p.is_empty()) {
+        out.insert(
+            "model_provider".to_string(),
+            JsonValue::String(provider.to_string()),
+        );
     }
     out.insert(
         "model_reasoning_effort".to_string(),
@@ -1103,6 +1115,7 @@ mod tests {
             add_dirs: Vec::new(),
             session_state: crate::session::state::SessionState::default(),
             model: Some("gpt-5.5".to_string()),
+            model_provider: None,
             service_tier: Some(ServiceTier::Flex),
             context_mode: None,
             reasoning_effort: crate::session::state::ReasoningEffort::High,
@@ -1128,6 +1141,7 @@ mod tests {
             add_dirs: Vec::new(),
             session_state: crate::session::state::SessionState::default(),
             model: Some("gpt-session".to_string()),
+            model_provider: None,
             service_tier: None,
             context_mode: Some(ContextMode::OneM),
             reasoning_effort: crate::session::state::ReasoningEffort::High,
@@ -1160,6 +1174,7 @@ mod tests {
             ],
             add_dirs: Vec::new(),
             model: Some("gpt-session".to_string()),
+            model_provider: None,
             service_tier: Some(ServiceTier::Fast),
             context_mode: Some(ContextMode::OneM),
             reasoning_effort: crate::session::state::ReasoningEffort::High,
@@ -1189,6 +1204,7 @@ mod tests {
             add_dirs: Vec::new(),
             session_state: crate::session::state::SessionState::default(),
             model: Some("gpt-5.5".to_string()),
+            model_provider: None,
             service_tier: None,
             context_mode: Some(ContextMode::Standard),
             reasoning_effort: crate::session::state::ReasoningEffort::High,
@@ -1206,6 +1222,17 @@ mod tests {
         req.reasoning_effort = crate::session::state::ReasoningEffort::High;
         req.model = Some("gpt-5.4".to_string());
         assert_ne!(RuntimeConfigSignature::from_request(&req), original);
+
+        // Provider change (Grok ↔ Codex switch) must force thread reload.
+        req.model = Some("gpt-5.5".to_string());
+        let baseline = RuntimeConfigSignature::from_request(&req);
+        req.model_provider = Some("xai".to_string());
+        assert_ne!(RuntimeConfigSignature::from_request(&req), baseline);
+        let overrides = build_config_overrides(&req);
+        assert_eq!(
+            overrides.get("model_provider"),
+            Some(&JsonValue::String("xai".into()))
+        );
     }
 
     #[test]
@@ -1216,6 +1243,7 @@ mod tests {
             config_overrides: Vec::new(),
             add_dirs: Vec::new(),
             model: Some("gpt-5.5".to_string()),
+            model_provider: None,
             service_tier: None,
             context_mode: Some(ContextMode::Standard),
             reasoning_effort: crate::session::state::ReasoningEffort::High,

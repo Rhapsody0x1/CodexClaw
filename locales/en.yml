@@ -21,6 +21,7 @@ commands:
     entry_interrupt: "- ⏹️ `/interrupt` - interrupt the running task"
     entry_self_update: "- 🚀 `/self-update` - deploy the latest build"
     entry_model: "- 🤖 `/model` - choose a model"
+    entry_switch_model: "- 🔀 `/switch_model` - toggle between Codex and Grok backends"
     entry_fast: "- ⚡ `/fast` - toggle fast mode"
     entry_context: "- 🧠 `/context` - choose context window"
     entry_reasoning: "- 🔍 `/reasoning` - choose reasoning depth"
@@ -89,6 +90,7 @@ commands:
   status:
     workspace: "workdir: %{dir}"
     model: "model: %{summary}"
+    backend: "backend: %{backend} (provider=`%{provider}`)"
     verbose_on: "verbose: on"
     verbose_off: "verbose: off"
     bg_header: "background sessions (%{count}):"
@@ -108,6 +110,12 @@ commands:
     prompt_item_name: "- `%{name}`"
     prompt_item_description: "  - %{description}"
     prompt_item_aliases: "  - aliases: %{aliases}"
+
+  switch_model:
+    status: "Backend: %{backend}\nModel: `%{model}`\nSend `/switch_model` to toggle between Codex and Grok."
+    switched: "Switched from **%{from}** to **%{to}**.\nModel: `%{model}`\n(Same Codex App-Server process; only provider/model config changed.)"
+    already: "Already on the **%{backend}** backend."
+    invalid: "Invalid args. Usage: `/switch_model` (toggle) | `/switch_model status` | `/switch_model codex` | `/switch_model grok`"
 
   fast:
     updated: "fast mode updated to: %{value}"

@@ -51,3 +51,31 @@ name = "gpt-5.2"
 aliases = ["5.2", "52"]
 description_zh = "更早一代的通用模型"
 description_en = "Earlier-generation general-purpose model"
+
+# xAI Grok models (OpenAI-compatible via https://api.x.ai/v1).
+# Enable with `[codex_provider] enabled = true` and export `XAI_API_KEY`.
+# Selecting these without a Grok provider will fail at the Codex backend.
+
+[[models]]
+name = "grok-4"
+aliases = ["grok4", "xai-grok-4", "xai"]
+description_zh = "xAI Grok 4 旗舰模型（需启用 codex_provider → xAI）"
+description_en = "xAI Grok 4 flagship model (requires codex_provider → xAI)"
+
+[[models]]
+name = "grok-4.5"
+aliases = ["grok4.5", "grok45"]
+description_zh = "xAI Grok 4.5 最新旗舰模型"
+description_en = "xAI Grok 4.5 latest flagship model"
+
+[[models]]
+name = "grok-3"
+aliases = ["grok3"]
+description_zh = "xAI Grok 3 通用模型"
+description_en = "xAI Grok 3 general-purpose model"
+
+[[models]]
+name = "grok-3-mini"
+aliases = ["grok3-mini", "grok-mini"]
+description_zh = "xAI Grok 3 Mini 轻量快速模型"
+description_en = "xAI Grok 3 Mini compact and fast model"

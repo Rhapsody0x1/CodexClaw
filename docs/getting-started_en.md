@@ -7,9 +7,26 @@ Installation, configuration, and first-run guide for CodexClaw.
 ## Prerequisites
 
 - Rust toolchain (edition 2024)
-- OpenAI Codex CLI installed and authenticated; confirm that `codex exec --json "reply with exactly: ok"` runs successfully
-- The system `~/.codex` directory already exists and contains at least `config.toml` and `auth.json`
+- OpenAI Codex CLI installed (default OpenAI path: authenticated so `codex exec --json "reply with exactly: ok"` works; or use the xAI Grok path below)
+- The system `~/.codex` directory already exists and contains at least `config.toml` (default path also uses `auth.json`)
 - QQ Open Platform account (personal verification required)
+
+### Optional: use xAI Grok instead of the default OpenAI/Codex backend
+
+CodexClaw still runs the agent via Codex App-Server, but can point the isolated `CODEX_HOME` at xAI's OpenAI-compatible API:
+
+```bash
+export XAI_API_KEY="xai-..."
+```
+
+In `codexclaw.toml`:
+
+```toml
+[codex_provider]
+enabled = true
+```
+
+Optional: `[general] default_model = "grok-4"`. See [Configuration — codex_provider](configuration_en.md#codex_provider--custom-codex-model-backend-xai-grok-etc).
 
 ## Installation
 

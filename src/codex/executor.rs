@@ -37,6 +37,8 @@ pub struct ExecutionRequest {
     pub add_dirs: Vec<PathBuf>,
     pub session_state: SessionState,
     pub model: Option<String>,
+    /// Active Codex `model_provider` id (e.g. `xai` / `mirror`); forces thread reload on change.
+    pub model_provider: Option<String>,
     pub service_tier: Option<ServiceTier>,
     pub context_mode: Option<ContextMode>,
     pub reasoning_effort: ReasoningEffort,
@@ -50,6 +52,7 @@ pub struct CompactRequest {
     pub config_overrides: Vec<String>,
     pub add_dirs: Vec<PathBuf>,
     pub model: Option<String>,
+    pub model_provider: Option<String>,
     pub service_tier: Option<ServiceTier>,
     pub context_mode: Option<ContextMode>,
     pub reasoning_effort: ReasoningEffort,
