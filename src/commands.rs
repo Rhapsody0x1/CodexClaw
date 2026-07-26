@@ -119,6 +119,31 @@ pub(crate) enum CommandOutcome {
     Approval(ApprovalIntent),
 }
 
+impl CommandOutcome {
+    /// Wraps any string-ish value as a reply outcome, collapsing the
+    /// `CommandOutcome::Reply(CommandReply { text })` boilerplate.
+    fn reply(text: impl Into<String>) -> Self {
+        CommandOutcome::Reply(CommandReply { text: text.into() })
+    }
+
+    /// Localized reply for translation keys without interpolation arguments.
+    fn reply_t(key: &str, locale: &str) -> Self {
+        Self::reply(t!(key, locale = locale))
+    }
+
+    /// Applies `f` to the text payload of the text-carrying variants
+    /// (`Reply` / `CancelCurrent` / `StopCurrent`); every other variant is
+    /// passed through unchanged.
+    fn map_text(self, f: impl FnOnce(String) -> String) -> Self {
+        match self {
+            CommandOutcome::Reply(reply) => Self::reply(f(reply.text)),
+            CommandOutcome::CancelCurrent(msg) => CommandOutcome::CancelCurrent(f(msg)),
+            CommandOutcome::StopCurrent(msg) => CommandOutcome::StopCurrent(f(msg)),
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ApprovalIntent {
     Accept,
@@ -134,6 +159,31 @@ struct ProjectBucket {
     latest: Option<DateTime<Utc>>,
 }
 
+/// Shared per-dispatch context threaded through every command handler.
+///
+/// Bundles the values the dispatcher previously passed positionally, so all
+/// handler signatures stay uniform regardless of which values they use.
+#[derive(Clone, Copy)]
+struct CmdCtx<'a> {
+    openid: &'a str,
+    session: &'a SessionStore,
+    default_model: &'a str,
+    runtime_profile: &'a CodexRuntimeProfile,
+    is_busy: bool,
+}
+
+/// Cheap locale lookup for handlers that only need the language string.
+///
+/// Every handler runs after the dispatcher's initial `snapshot_for_user`, so
+/// the user record already exists and skipping the deep snapshot clone (and
+/// its ensure-user side effect) is safe here.
+async fn user_locale(session: &SessionStore, openid: &str) -> String {
+    session
+        .language_for_user(openid)
+        .await
+        .unwrap_or_else(crate::session::state::default_language)
+}
+
 pub(crate) async fn maybe_handle_command(
     text: &str,
     openid: &str,
@@ -142,28 +192,29 @@ pub(crate) async fn maybe_handle_command(
     runtime_profile: &CodexRuntimeProfile,
     is_busy: bool,
 ) -> Result<CommandOutcome> {
-    maybe_handle_command_inner(
-        text,
+    let ctx = CmdCtx {
         openid,
         session,
         default_model,
         runtime_profile,
         is_busy,
-        0,
-    )
-    .await
+    };
+    maybe_handle_command_inner(text, ctx, 0).await
 }
 
 fn maybe_handle_command_inner<'a>(
     text: &'a str,
-    openid: &'a str,
-    session: &'a SessionStore,
-    default_model: &'a str,
-    runtime_profile: &'a CodexRuntimeProfile,
-    is_busy: bool,
+    ctx: CmdCtx<'a>,
     alias_depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<CommandOutcome>> + Send + 'a>> {
     Box::pin(async move {
+        let CmdCtx {
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            is_busy,
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let lang_string = snapshot.settings.language.clone();
         let locale = lang_string.as_str();
@@ -174,16 +225,7 @@ fn maybe_handle_command_inner<'a>(
         // pending handler — never forwarded to Codex.
         if !is_slash_input {
             if let Some(pending) = pending_before {
-                return interactive::consume_pending_input(
-                    pending,
-                    text,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await;
+                return interactive::consume_pending_input(pending, text, ctx).await;
             }
             return Ok(CommandOutcome::Continue);
         }
@@ -202,10 +244,10 @@ fn maybe_handle_command_inner<'a>(
                 }
                 "/cancel" => {
                     session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!("commands.resume.recovery_cancelled", locale = locale)
-                            .into_owned(),
-                    }));
+                    return Ok(CommandOutcome::reply_t(
+                        "commands.resume.recovery_cancelled",
+                        locale,
+                    ));
                 }
                 _ => {}
             }
@@ -216,18 +258,13 @@ fn maybe_handle_command_inner<'a>(
         if command.as_str() == "/back" {
             if let Some(pending) = pending_before {
                 session.set_pending_setting(openid, None).await?;
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.back.exited",
-                        cmd = pending.command_name(locale),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }));
+                return Ok(CommandOutcome::reply(t!(
+                    "commands.back.exited",
+                    cmd = pending.command_name(locale),
+                    locale = locale
+                )));
             }
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: t!("commands.back.idle", locale = locale).into_owned(),
-            }));
+            return Ok(CommandOutcome::reply_t("commands.back.idle", locale));
         }
 
         // Non-/back slash command while in an interactive setting: quietly
@@ -259,114 +296,41 @@ fn maybe_handle_command_inner<'a>(
                 "/approve" | "/approve-session" | "/deny" | "/cancel"
             )
         {
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: pending_exit_prefix.unwrap_or_default(),
-            }));
+            return Ok(CommandOutcome::reply(
+                pending_exit_prefix.unwrap_or_default(),
+            ));
         }
 
         let outcome_result: Result<CommandOutcome> = match command.as_str() {
-            "/help" => Ok(CommandOutcome::Reply(CommandReply {
-                text: help_text(&lang_string),
-            })),
-            "/lang" => handle_lang(&rest, openid, session).await,
-            "/model" => {
-                handle_model(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/fast" => {
-                handle_fast(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/context" => {
-                handle_context(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/reasoning" => {
-                handle_reasoning(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/verbose" => {
-                handle_verbose(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/approvals" => handle_approvals(&rest, openid, session).await,
-            "/plan" => handle_plan(&rest, openid, session).await,
-            "/cron" => handle_cron(&rest, openid, session).await,
-            "/execute-plan" => handle_execute_plan(openid, session).await,
-            "/keep-planning" => handle_keep_planning(openid, session).await,
-            "/cancel-plan" => handle_cancel_plan(openid, session).await,
+            "/help" => Ok(CommandOutcome::reply(help_text(&lang_string))),
+            "/lang" => handle_lang(&rest, ctx).await,
+            "/model" => handle_model(&rest, ctx).await,
+            "/fast" => handle_fast(&rest, ctx).await,
+            "/context" => handle_context(&rest, ctx).await,
+            "/reasoning" => handle_reasoning(&rest, ctx).await,
+            "/verbose" => handle_verbose(&rest, ctx).await,
+            "/approvals" => handle_approvals(&rest, ctx).await,
+            "/plan" => handle_plan(&rest, ctx).await,
+            "/cron" => handle_cron(&rest, ctx).await,
+            "/execute-plan" => handle_execute_plan(ctx).await,
+            "/keep-planning" => handle_keep_planning(ctx).await,
+            "/cancel-plan" => handle_cancel_plan(ctx).await,
             "/approve" => Ok(CommandOutcome::Approval(ApprovalIntent::Accept)),
             "/approve-session" => Ok(CommandOutcome::Approval(ApprovalIntent::AcceptForSession)),
             "/deny" => Ok(CommandOutcome::Approval(ApprovalIntent::Decline)),
             "/cancel" => Ok(CommandOutcome::Approval(ApprovalIntent::Cancel)),
-            "/retry" => Ok(CommandOutcome::Reply(CommandReply {
-                text: t!("commands.resume.no_recovery", locale = locale).into_owned(),
-            })),
-            "/status" => Ok(CommandOutcome::Reply(CommandReply {
-                text: build_status_text(
-                    &session.snapshot_for_user(openid).await?,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                ),
-            })),
-            "/sessions" => {
-                handle_sessions(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/import" => {
-                handle_import(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
+            "/retry" => Ok(CommandOutcome::reply_t(
+                "commands.resume.no_recovery",
+                locale,
+            )),
+            "/status" => Ok(CommandOutcome::reply(build_status_text(
+                &session.snapshot_for_user(openid).await?,
+                default_model,
+                runtime_profile,
+                is_busy,
+            ))),
+            "/sessions" => handle_sessions(&rest, ctx).await,
+            "/import" => handle_import(&rest, ctx).await,
             "/new" => {
                 // Strip the user's *actual* first token, not the canonical command:
                 // `command` is the lowercased/aliased form ("/new"), but `trimmed`
@@ -374,94 +338,27 @@ fn maybe_handle_command_inner<'a>(
                 // strip_prefix(command) would fail and silently drop the <dir> arg.
                 let first_token = trimmed.split_whitespace().next().unwrap_or_default();
                 let raw_args = trimmed[first_token.len()..].trim();
-                handle_new(
-                    raw_args,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
+                handle_new(raw_args, ctx).await
             }
-            "/bg" => {
-                handle_bg(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/fg" => {
-                handle_fg(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/resume" => {
-                handle_resume(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/loadbg" => {
-                handle_loadbg(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/save" => handle_save(openid, session, default_model, runtime_profile, is_busy).await,
-            "/rename" => {
-                handle_rename(
-                    &rest,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    is_busy,
-                )
-                .await
-            }
-            "/stop" => handle_stop(openid, session, default_model, runtime_profile).await,
+            "/bg" => handle_bg(&rest, ctx).await,
+            "/fg" => handle_fg(&rest, ctx).await,
+            "/resume" => handle_resume(&rest, ctx).await,
+            "/loadbg" => handle_loadbg(&rest, ctx).await,
+            "/save" => handle_save(ctx).await,
+            "/rename" => handle_rename(&rest, ctx).await,
+            "/stop" => handle_stop(ctx).await,
             "/interrupt" => Ok(CommandOutcome::CancelCurrent(
                 t!("errors.interrupt_requested", locale = locale).into_owned(),
             )),
             "/compact" => Ok(CommandOutcome::Compact),
             "/self-update" => Ok(CommandOutcome::SelfUpdate),
-            "/alias" => handle_alias(&rest, openid, session).await,
+            "/alias" => handle_alias(&rest, ctx).await,
             other => {
                 let alias_name = other.trim_start_matches('/').to_ascii_lowercase();
                 if !alias_name.is_empty()
                     && let Some(alias) = session.get_command_alias(openid, &alias_name).await?
                 {
-                    expand_alias(
-                        &alias,
-                        openid,
-                        session,
-                        default_model,
-                        runtime_profile,
-                        is_busy,
-                        alias_depth,
-                    )
-                    .await
+                    expand_alias(&alias, ctx, alias_depth).await
                 } else {
                     Ok(CommandOutcome::Continue)
                 }
@@ -478,58 +375,25 @@ fn maybe_handle_command_inner<'a>(
 }
 
 fn busy_reply(locale: &str) -> CommandOutcome {
-    CommandOutcome::Reply(CommandReply {
-        text: t!("errors.busy", locale = locale).into_owned(),
-    })
+    CommandOutcome::reply_t("errors.busy", locale)
 }
 
 fn prepend_pending_exit(prefix: String, outcome: CommandOutcome) -> CommandOutcome {
-    match outcome {
-        CommandOutcome::Reply(reply) => CommandOutcome::Reply(CommandReply {
-            text: format!("{prefix}\n\n{}", reply.text),
-        }),
-        CommandOutcome::CancelCurrent(msg) => {
-            CommandOutcome::CancelCurrent(format!("{prefix}\n\n{msg}"))
-        }
-        CommandOutcome::StopCurrent(msg) => {
-            CommandOutcome::StopCurrent(format!("{prefix}\n\n{msg}"))
-        }
-        CommandOutcome::Compact => CommandOutcome::Compact,
-        CommandOutcome::SelfUpdate => CommandOutcome::SelfUpdate,
-        CommandOutcome::SetGlobalModel(value) => CommandOutcome::SetGlobalModel(value),
-        CommandOutcome::SetGlobalReasoning(value) => CommandOutcome::SetGlobalReasoning(value),
-        CommandOutcome::SetGlobalFast(value) => CommandOutcome::SetGlobalFast(value),
-        CommandOutcome::SetGlobalContext(value) => CommandOutcome::SetGlobalContext(value),
-        CommandOutcome::RetryResume => CommandOutcome::RetryResume,
-        CommandOutcome::Approval(intent) => CommandOutcome::Approval(intent),
-        CommandOutcome::Continue => CommandOutcome::Continue,
-    }
+    outcome.map_text(|text| format!("{prefix}\n\n{text}"))
 }
 
 async fn expand_alias(
     alias: &CommandAlias,
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
+    ctx: CmdCtx<'_>,
     alias_depth: usize,
 ) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+    let lang = user_locale(ctx.session, ctx.openid).await;
     if alias_depth >= MAX_ALIAS_DEPTH {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.alias.too_deep",
-                max = MAX_ALIAS_DEPTH,
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.alias.too_deep",
+            max = MAX_ALIAS_DEPTH,
+            locale = lang.as_str()
+        )));
     }
     let mut parts: Vec<String> = Vec::new();
     parts.push(
@@ -541,16 +405,7 @@ async fn expand_alias(
         .into_owned(),
     );
     for step in &alias.commands {
-        let outcome = maybe_handle_command_inner(
-            step,
-            openid,
-            session,
-            default_model,
-            runtime_profile,
-            is_busy,
-            alias_depth + 1,
-        )
-        .await?;
+        let outcome = maybe_handle_command_inner(step, ctx, alias_depth + 1).await?;
         match outcome {
             CommandOutcome::Reply(reply) => parts.push(reply.text),
             CommandOutcome::Continue => {
@@ -563,56 +418,33 @@ async fn expand_alias(
                     .into_owned(),
                 );
             }
-            CommandOutcome::CancelCurrent(msg) => {
-                parts.push(msg);
-                return Ok(CommandOutcome::CancelCurrent(parts.join("\n")));
+            // Cancel/Stop terminate the alias with the collected output
+            // prepended; every other outcome passes through untouched.
+            other => {
+                return Ok(other.map_text(|msg| {
+                    parts.push(msg);
+                    parts.join("\n")
+                }));
             }
-            CommandOutcome::StopCurrent(msg) => {
-                parts.push(msg);
-                return Ok(CommandOutcome::StopCurrent(parts.join("\n")));
-            }
-            CommandOutcome::Compact => return Ok(CommandOutcome::Compact),
-            CommandOutcome::SelfUpdate => return Ok(CommandOutcome::SelfUpdate),
-            CommandOutcome::SetGlobalModel(value) => {
-                return Ok(CommandOutcome::SetGlobalModel(value));
-            }
-            CommandOutcome::SetGlobalReasoning(value) => {
-                return Ok(CommandOutcome::SetGlobalReasoning(value));
-            }
-            CommandOutcome::SetGlobalFast(value) => {
-                return Ok(CommandOutcome::SetGlobalFast(value));
-            }
-            CommandOutcome::SetGlobalContext(value) => {
-                return Ok(CommandOutcome::SetGlobalContext(value));
-            }
-            CommandOutcome::RetryResume => return Ok(CommandOutcome::RetryResume),
-            CommandOutcome::Approval(intent) => return Ok(CommandOutcome::Approval(intent)),
         }
     }
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: parts.join("\n"),
-    }))
+    Ok(CommandOutcome::reply(parts.join("\n")))
 }
 
-async fn handle_alias(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_alias(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let locale = lang.as_str();
 
     let show_list = || async {
         let aliases = session.list_command_aliases(openid).await?;
         if aliases.is_empty() {
-            return Ok::<CommandOutcome, anyhow::Error>(CommandOutcome::Reply(CommandReply {
-                text: t!("commands.alias.empty", locale = locale).into_owned(),
-            }));
+            return Ok::<CommandOutcome, anyhow::Error>(CommandOutcome::reply_t(
+                "commands.alias.empty",
+                locale,
+            ));
         }
         let mut lines = vec![t!("commands.alias.list_header", locale = locale).into_owned()];
         for alias in aliases {
@@ -627,9 +459,7 @@ async fn handle_alias(
                 .into_owned(),
             );
         }
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: lines.join("\n"),
-        }))
+        Ok(CommandOutcome::reply(lines.join("\n")))
     };
 
     if args.is_empty() {
@@ -640,9 +470,7 @@ async fn handle_alias(
         "list" | "ls" => show_list().await,
         "remove" | "rm" | "delete" | "del" => {
             let Some(raw_name) = args.get(1) else {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.alias.usage", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t("commands.alias.usage", locale));
             };
             let name = raw_name.trim_start_matches('/').trim().to_ascii_lowercase();
             let removed = session.remove_command_alias(openid, &name).await?;
@@ -651,35 +479,30 @@ async fn handle_alias(
             } else {
                 "commands.alias.not_found"
             };
-            Ok(CommandOutcome::Reply(CommandReply {
-                text: t!(key, name = name, locale = locale).into_owned(),
-            }))
+            Ok(CommandOutcome::reply(t!(key, name = name, locale = locale)))
         }
         "add" => {
             let Some(raw_name) = args.get(1) else {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.alias.usage", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t("commands.alias.usage", locale));
             };
             let Ok(name) = normalize_command_alias_name(raw_name) else {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.alias.invalid_name", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t(
+                    "commands.alias.invalid_name",
+                    locale,
+                ));
             };
             if PROTECTED_COMMANDS.contains(&name.as_str()) {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.alias.protected",
-                        name = name.as_str(),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }));
+                return Ok(CommandOutcome::reply(t!(
+                    "commands.alias.protected",
+                    name = name.as_str(),
+                    locale = locale
+                )));
             }
             if args.len() < 3 {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.alias.empty_steps", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t(
+                    "commands.alias.empty_steps",
+                    locale,
+                ));
             }
             let joined = args[2..].join(" ");
             let commands: Vec<String> = joined
@@ -688,9 +511,10 @@ async fn handle_alias(
                 .filter(|piece| !piece.is_empty())
                 .collect();
             if commands.is_empty() {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.alias.empty_steps", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t(
+                    "commands.alias.empty_steps",
+                    locale,
+                ));
             }
             let alias = CommandAlias {
                 name: name.clone(),
@@ -698,30 +522,25 @@ async fn handle_alias(
                 created_at: Utc::now(),
             };
             session.add_command_alias(openid, alias).await?;
-            Ok(CommandOutcome::Reply(CommandReply {
-                text: t!(
-                    "commands.alias.added",
-                    name = name.as_str(),
-                    count = commands.len(),
-                    locale = locale
-                )
-                .into_owned(),
-            }))
+            Ok(CommandOutcome::reply(t!(
+                "commands.alias.added",
+                name = name.as_str(),
+                count = commands.len(),
+                locale = locale
+            )))
         }
-        _ => Ok(CommandOutcome::Reply(CommandReply {
-            text: t!("commands.alias.usage", locale = locale).into_owned(),
-        })),
+        _ => Ok(CommandOutcome::reply_t("commands.alias.usage", locale)),
     }
 }
 
-async fn handle_model(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_model(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        default_model,
+        runtime_profile,
+        is_busy,
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args
@@ -729,29 +548,18 @@ async fn handle_model(
         .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
     {
         let active_override = merged_settings(&snapshot).model_override;
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.model.status",
-                effective = effective_model(&snapshot, default_model, runtime_profile),
-                override_value = active_override.as_deref().unwrap_or("inherit"),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.model.status",
+            effective = effective_model(&snapshot, default_model, runtime_profile),
+            override_value = active_override.as_deref().unwrap_or("inherit"),
+            locale = lang.as_str()
+        )));
     }
     if is_busy {
         return Ok(busy_reply(lang.as_str()));
     }
     if args.is_empty() {
-        return interactive::enter_model_prompt(
-            &snapshot,
-            openid,
-            session,
-            default_model,
-            runtime_profile,
-            lang.as_str(),
-        )
-        .await;
+        return interactive::enter_model_prompt(&snapshot, ctx, lang.as_str()).await;
     }
     let known_models =
         list_codex_model_entries(runtime_profile, &interactive::model_extras(&snapshot));
@@ -770,38 +578,31 @@ async fn handle_model(
         .set_model_override_for_active(openid, next.clone())
         .await?;
     let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.model.updated",
-            model = effective_model(&snapshot, default_model, runtime_profile),
-            locale = lang.as_str()
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::reply(t!(
+        "commands.model.updated",
+        model = effective_model(&snapshot, default_model, runtime_profile),
+        locale = lang.as_str()
+    )))
 }
 
-async fn handle_fast(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        runtime_profile,
+        ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_fast_prompt(&snapshot, openid, session, runtime_profile).await;
+        return interactive::enter_fast_prompt(&snapshot, ctx).await;
     }
     if args[0].eq_ignore_ascii_case("status") {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.fast.status",
-                value = effective_fast_label(&snapshot, runtime_profile),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.fast.status",
+            value = effective_fast_label(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )));
     }
     let value = args.join(" ");
     let next = interactive::resolve_fast_input(&value)
@@ -809,35 +610,31 @@ async fn handle_fast(
     Ok(CommandOutcome::SetGlobalFast(next))
 }
 
-async fn handle_context(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_context(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        runtime_profile,
+        is_busy,
+        ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args
         .first()
         .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
     {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.context.status",
-                value = effective_context_label(&snapshot, runtime_profile),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.context.status",
+            value = effective_context_label(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )));
     }
     if is_busy {
         return Ok(busy_reply(lang.as_str()));
     }
     if args.is_empty() {
-        return interactive::enter_context_prompt(&snapshot, openid, session, runtime_profile)
-            .await;
+        return interactive::enter_context_prompt(&snapshot, ctx).await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_context_input(&value).ok_or_else(|| {
@@ -848,45 +645,38 @@ async fn handle_context(
     }
     session.set_context_mode_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.context.updated",
-            value = effective_context_label(&snapshot, runtime_profile),
-            locale = lang.as_str()
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::reply(t!(
+        "commands.context.updated",
+        value = effective_context_label(&snapshot, runtime_profile),
+        locale = lang.as_str()
+    )))
 }
 
-async fn handle_reasoning(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_reasoning(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        runtime_profile,
+        is_busy,
+        ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args
         .first()
         .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
     {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.reasoning.status",
-                value = effective_reasoning(&snapshot, runtime_profile),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.reasoning.status",
+            value = effective_reasoning(&snapshot, runtime_profile),
+            locale = lang.as_str()
+        )));
     }
     if is_busy {
         return Ok(busy_reply(lang.as_str()));
     }
     if args.is_empty() {
-        return interactive::enter_reasoning_prompt(&snapshot, openid, session, runtime_profile)
-            .await;
+        return interactive::enter_reasoning_prompt(&snapshot, ctx).await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_reasoning_input(&value).ok_or_else(|| {
@@ -897,28 +687,21 @@ async fn handle_reasoning(
     }
     session.set_reasoning_for_active(openid, next).await?;
     let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.reasoning.updated",
-            value = effective_reasoning(&snapshot, runtime_profile),
-            locale = lang.as_str()
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::reply(t!(
+        "commands.reasoning.updated",
+        value = effective_reasoning(&snapshot, runtime_profile),
+        locale = lang.as_str()
+    )))
 }
 
-async fn handle_verbose(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_verbose(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_verbose_prompt(&snapshot, openid, session).await;
+        return interactive::enter_verbose_prompt(&snapshot, ctx).await;
     }
     if args[0].eq_ignore_ascii_case("status") {
         let key = if snapshot.settings.verbose {
@@ -926,17 +709,16 @@ async fn handle_verbose(
         } else {
             "commands.verbose.status_off"
         };
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(key, locale = lang.as_str()).into_owned(),
-        }));
+        return Ok(CommandOutcome::reply_t(key, lang.as_str()));
     }
     let enabled = match args[0].to_ascii_lowercase().as_str() {
         "on" | "true" => true,
         "off" | "false" => false,
         _ => {
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: t!("commands.verbose.invalid", locale = lang.as_str()).into_owned(),
-            }));
+            return Ok(CommandOutcome::reply_t(
+                "commands.verbose.invalid",
+                lang.as_str(),
+            ));
         }
     };
     session
@@ -947,16 +729,13 @@ async fn handle_verbose(
     } else {
         "commands.verbose.updated_off"
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(key, locale = lang.as_str()).into_owned(),
-    }))
+    Ok(CommandOutcome::reply_t(key, lang.as_str()))
 }
 
-async fn handle_approvals(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-) -> Result<CommandOutcome> {
+async fn handle_approvals(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
     if args.is_empty() {
         let snapshot = session.snapshot_for_user(openid).await?;
         let lang = snapshot.settings.language.clone();
@@ -975,9 +754,7 @@ async fn handle_approvals(
         session
             .set_pending_setting(openid, Some(PendingSetting::Approvals))
             .await?;
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!("{header}\n{body}"),
-        }));
+        return Ok(CommandOutcome::reply(format!("{header}\n{body}")));
     }
     handle_approvals_arg(&args.join(" "), openid, session).await
 }
@@ -998,7 +775,7 @@ async fn handle_approvals_arg(
         } else {
             format!("approval policy: {current}")
         };
-        return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+        return Ok(CommandOutcome::reply(msg));
     }
     let next = ApprovalPolicySetting::parse(trimmed);
     let Some(next) = next else {
@@ -1007,7 +784,7 @@ async fn handle_approvals_arg(
         } else {
             format!("unrecognized approval option: {trimmed}. Try: on | strict | off")
         };
-        return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+        return Ok(CommandOutcome::reply(msg));
     };
     session
         .update_settings_for_user(openid, |state| {
@@ -1021,7 +798,7 @@ async fn handle_approvals_arg(
     } else {
         format!("approval policy updated: {label}")
     };
-    Ok(CommandOutcome::Reply(CommandReply { text: msg }))
+    Ok(CommandOutcome::reply(msg))
 }
 
 fn approval_label(setting: Option<ApprovalPolicySetting>, zh: bool) -> String {
@@ -1037,11 +814,10 @@ fn approval_label(setting: Option<ApprovalPolicySetting>, zh: bool) -> String {
     }
 }
 
-async fn handle_plan(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-) -> Result<CommandOutcome> {
+async fn handle_plan(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
     if args.is_empty() {
         let snapshot = session.snapshot_for_user(openid).await?;
         let lang = snapshot.settings.language.clone();
@@ -1066,29 +842,19 @@ async fn handle_plan(
         session
             .set_pending_setting(openid, Some(PendingSetting::Plan))
             .await?;
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: format!("{header}\n{body}"),
-        }));
+        return Ok(CommandOutcome::reply(format!("{header}\n{body}")));
     }
     handle_plan_arg(&args.join(" "), openid, session).await
 }
 
-async fn handle_cron(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-) -> Result<CommandOutcome> {
-    // Cheap locale lookup: no deep snapshot clone, and no ensure-user side
-    // effect / hard failure on the /cron path.
-    let lang = session
-        .language_for_user(openid)
-        .await
-        .unwrap_or_else(crate::session::state::default_language);
+async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let locale = lang.as_str();
     let Some(subcommand) = args.first().copied() else {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!("commands.cron.usage", locale = locale).into_owned(),
-        }));
+        return Ok(CommandOutcome::reply_t("commands.cron.usage", locale));
     };
     match subcommand {
         "list" | "ls" => {
@@ -1096,9 +862,7 @@ async fn handle_cron(
             jobs.retain(|job| job.owner_openid == openid);
             jobs.sort_by_key(|job| job.next_run_at);
             if jobs.is_empty() {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.cron.empty", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t("commands.cron.empty", locale));
             }
             let mut text = t!("commands.cron.list_header", locale = locale).into_owned();
             for job in jobs {
@@ -1112,7 +876,7 @@ async fn handle_cron(
                     job.title
                 ));
             }
-            Ok(CommandOutcome::Reply(CommandReply { text }))
+            Ok(CommandOutcome::reply(text))
         }
         "pause" | "resume" | "rm" | "remove" | "run-now" | "tail" => {
             // These are user-input mistakes, not internal failures: return a
@@ -1120,24 +884,21 @@ async fn handle_cron(
             // propagates to the gateway task where it is only warn!-logged, so
             // the user would get no response at all.
             let Some(id) = args.get(1) else {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.cron.requires_job_id",
-                        subcommand = subcommand,
-                        locale = locale
-                    )
-                    .into_owned(),
-                }));
+                return Ok(CommandOutcome::reply(t!(
+                    "commands.cron.requires_job_id",
+                    subcommand = subcommand,
+                    locale = locale
+                )));
             };
             let Some(job) = session.get_cron_job(id).await? else {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.cron.not_found", id = id, locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply(t!(
+                    "commands.cron.not_found",
+                    id = id,
+                    locale = locale
+                )));
             };
             if job.owner_openid != openid {
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!("commands.cron.not_owned", locale = locale).into_owned(),
-                }));
+                return Ok(CommandOutcome::reply_t("commands.cron.not_owned", locale));
             }
             match subcommand {
                 "pause" => {
@@ -1147,14 +908,11 @@ async fn handle_cron(
                             Ok(())
                         })
                         .await?;
-                    Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!(
-                            "commands.cron.paused",
-                            title = job.title.as_str(),
-                            locale = locale
-                        )
-                        .into_owned(),
-                    }))
+                    Ok(CommandOutcome::reply(t!(
+                        "commands.cron.paused",
+                        title = job.title.as_str(),
+                        locale = locale
+                    )))
                 }
                 "resume" => {
                     session
@@ -1169,14 +927,11 @@ async fn handle_cron(
                             Ok(())
                         })
                         .await?;
-                    Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!(
-                            "commands.cron.resumed",
-                            title = job.title.as_str(),
-                            locale = locale
-                        )
-                        .into_owned(),
-                    }))
+                    Ok(CommandOutcome::reply(t!(
+                        "commands.cron.resumed",
+                        title = job.title.as_str(),
+                        locale = locale
+                    )))
                 }
                 "rm" | "remove" => {
                     session.remove_cron_job(id).await?;
@@ -1187,14 +942,11 @@ async fn handle_cron(
                         false,
                     )
                     .await?;
-                    Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!(
-                            "commands.cron.removed",
-                            title = job.title.as_str(),
-                            locale = locale
-                        )
-                        .into_owned(),
-                    }))
+                    Ok(CommandOutcome::reply(t!(
+                        "commands.cron.removed",
+                        title = job.title.as_str(),
+                        locale = locale
+                    )))
                 }
                 "run-now" => {
                     session
@@ -1203,14 +955,11 @@ async fn handle_cron(
                             Ok(())
                         })
                         .await?;
-                    Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!(
-                            "commands.cron.run_now",
-                            title = job.title.as_str(),
-                            locale = locale
-                        )
-                        .into_owned(),
-                    }))
+                    Ok(CommandOutcome::reply(t!(
+                        "commands.cron.run_now",
+                        title = job.title.as_str(),
+                        locale = locale
+                    )))
                 }
                 "tail" => {
                     let runs_dir = job
@@ -1224,28 +973,21 @@ async fn handle_cron(
                         .collect::<Vec<_>>();
                     entries.sort_by_key(|entry| entry.file_name());
                     let Some(last) = entries.last() else {
-                        return Ok(CommandOutcome::Reply(CommandReply {
-                            text: t!("commands.cron.no_logs", locale = locale).into_owned(),
-                        }));
+                        return Ok(CommandOutcome::reply_t("commands.cron.no_logs", locale));
                     };
                     let raw = std::fs::read_to_string(last.path())?;
                     let preview = tail_chars(&raw, 3500);
-                    Ok(CommandOutcome::Reply(CommandReply {
-                        text: t!(
-                            "commands.cron.tail_header",
-                            path = last.path().display(),
-                            preview = preview,
-                            locale = locale
-                        )
-                        .into_owned(),
-                    }))
+                    Ok(CommandOutcome::reply(t!(
+                        "commands.cron.tail_header",
+                        path = last.path().display(),
+                        preview = preview,
+                        locale = locale
+                    )))
                 }
                 _ => unreachable!(),
             }
         }
-        _ => Ok(CommandOutcome::Reply(CommandReply {
-            text: t!("commands.cron.unknown", locale = locale).into_owned(),
-        })),
+        _ => Ok(CommandOutcome::reply_t("commands.cron.unknown", locale)),
     }
 }
 
@@ -1259,7 +1001,10 @@ fn tail_chars(raw: &str, max_chars: usize) -> String {
         .collect::<String>()
 }
 
-async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
+async fn handle_execute_plan(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     let zh = lang.starts_with("zh");
@@ -1269,9 +1014,7 @@ async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<Com
         } else {
             "No pending plan to execute."
         };
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: msg.to_string(),
-        }));
+        return Ok(CommandOutcome::reply(msg.to_string()));
     }
     session
         .update_settings_for_user(openid, |state| {
@@ -1287,14 +1030,14 @@ async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<Com
     } else {
         "Plan approved. Reply with a follow-up (e.g. \"go\") and I'll implement the plan."
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: confirm.to_string(),
-    }))
+    Ok(CommandOutcome::reply(confirm.to_string()))
 }
 
-async fn handle_keep_planning(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
-    let snapshot = session.snapshot_for_user(openid).await?;
-    let lang = snapshot.settings.language.clone();
+async fn handle_keep_planning(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let zh = lang.starts_with("zh");
     session
         .update_settings_for_user(openid, |state| {
@@ -1307,14 +1050,14 @@ async fn handle_keep_planning(openid: &str, session: &SessionStore) -> Result<Co
     } else {
         "Staying in plan mode. Next message continues planning."
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: msg.to_string(),
-    }))
+    Ok(CommandOutcome::reply(msg.to_string()))
 }
 
-async fn handle_cancel_plan(openid: &str, session: &SessionStore) -> Result<CommandOutcome> {
-    let snapshot = session.snapshot_for_user(openid).await?;
-    let lang = snapshot.settings.language.clone();
+async fn handle_cancel_plan(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let zh = lang.starts_with("zh");
     session
         .update_settings_for_user(openid, |state| {
@@ -1326,9 +1069,7 @@ async fn handle_cancel_plan(openid: &str, session: &SessionStore) -> Result<Comm
     } else {
         "Pending plan discarded."
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: msg.to_string(),
-    }))
+    Ok(CommandOutcome::reply(msg.to_string()))
 }
 
 async fn handle_plan_arg(
@@ -1355,9 +1096,7 @@ async fn handle_plan_arg(
             } else {
                 "Plan mode: off"
             };
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: msg.to_string(),
-            }));
+            return Ok(CommandOutcome::reply(msg.to_string()));
         }
         other => {
             let msg = if zh {
@@ -1365,7 +1104,7 @@ async fn handle_plan_arg(
             } else {
                 format!("unrecognized plan option: {other}. Try: on | off")
             };
-            return Ok(CommandOutcome::Reply(CommandReply { text: msg }));
+            return Ok(CommandOutcome::reply(msg));
         }
     };
     session
@@ -1383,19 +1122,17 @@ async fn handle_plan_arg(
     } else {
         "Plan mode off."
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: msg.to_string(),
-    }))
+    Ok(CommandOutcome::reply(msg.to_string()))
 }
 
-async fn handle_new(
-    raw_args: &str,
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
+async fn handle_new(raw_args: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        default_model,
+        runtime_profile,
+        ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     let moved = if raw_args.trim().is_empty() {
@@ -1436,25 +1173,17 @@ async fn handle_new(
         runtime_profile,
         None,
     ));
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: format!("{parked}{}", lines.join("\n")),
-    }))
+    Ok(CommandOutcome::reply(format!(
+        "{parked}{}",
+        lines.join("\n")
+    )))
 }
 
-async fn handle_bg(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_bg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let moved = session
         .move_foreground_to_background(openid, args.first().copied())
         .await?;
@@ -1468,49 +1197,25 @@ async fn handle_bg(
     } else {
         t!("commands.bg.reset_empty", locale = lang.as_str()).into_owned()
     };
-    Ok(CommandOutcome::Reply(CommandReply { text }))
+    Ok(CommandOutcome::reply(text))
 }
 
-async fn handle_fg(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let snapshot = session.snapshot_for_user(openid).await?;
+async fn handle_fg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let snapshot = ctx.session.snapshot_for_user(ctx.openid).await?;
     let lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_fg_prompt(&snapshot, openid, session).await;
+        return interactive::enter_fg_prompt(&snapshot, ctx).await;
     }
-    interactive::switch_foreground(
-        args[0],
-        openid,
-        session,
-        default_model,
-        runtime_profile,
-        lang.as_str(),
-    )
-    .await
+    interactive::switch_foreground(args[0], ctx, lang.as_str()).await
 }
 
-async fn handle_resume(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_resume(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     if args.is_empty() {
-        return interactive::enter_resume_projects_prompt(openid, session, lang.as_str()).await;
+        return interactive::enter_resume_projects_prompt(ctx, lang.as_str()).await;
     }
     let selector = args[0];
     // Try project selector first (if we have a recent projects view), otherwise
@@ -1523,14 +1228,8 @@ async fn handle_resume(
             .get(1)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
-        return interactive::enter_resume_sessions_prompt(
-            openid,
-            session,
-            project_key,
-            page,
-            lang.as_str(),
-        )
-        .await;
+        return interactive::enter_resume_sessions_prompt(ctx, project_key, page, lang.as_str())
+            .await;
     }
     let sessions = session.list_disk_sessions(SessionListScope::All).await?;
     let target = resolve_selector(
@@ -1539,25 +1238,16 @@ async fn handle_resume(
         &session.last_sessions_view(openid).await?,
         lang.as_str(),
     )?;
-    interactive::execute_resume(openid, session, default_model, runtime_profile, &target).await
+    interactive::execute_resume(ctx, &target).await
 }
 
-async fn handle_loadbg(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_loadbg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     if args.is_empty() {
-        return interactive::enter_loadbg_projects_prompt(openid, session, lang.as_str()).await;
+        return interactive::enter_loadbg_projects_prompt(ctx, lang.as_str()).await;
     }
     let selector = args[0];
     let projects_view = session.last_projects_view(openid).await?;
@@ -1569,8 +1259,7 @@ async fn handle_loadbg(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
         return interactive::enter_loadbg_sessions_prompt(
-            openid,
-            session,
+            ctx,
             project_key,
             page,
             None,
@@ -1585,80 +1274,50 @@ async fn handle_loadbg(
         &session.last_sessions_view(openid).await?,
         lang.as_str(),
     )?;
-    interactive::execute_loadbg(openid, session, &target, args.get(1).copied()).await
+    interactive::execute_loadbg(ctx, &target, args.get(1).copied()).await
 }
 
-async fn handle_save(
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_save(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let changed = session.save_foreground(openid).await?;
     let key = if changed {
         "commands.save.updated"
     } else {
         "commands.save.already_saved"
     };
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(key, locale = lang.as_str()).into_owned(),
-    }))
+    Ok(CommandOutcome::reply_t(key, lang.as_str()))
 }
 
-async fn handle_rename(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_rename(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     if args.len() != 2 {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!("commands.rename.usage", locale = lang.as_str()).into_owned(),
-        }));
+        return Ok(CommandOutcome::reply_t(
+            "commands.rename.usage",
+            lang.as_str(),
+        ));
     }
     session
         .rename_background_alias(openid, args[0], args[1])
         .await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.rename.renamed",
-            old = args[0],
-            new = args[1],
-            locale = lang.as_str()
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::reply(t!(
+        "commands.rename.renamed",
+        old = args[0],
+        new = args[1],
+        locale = lang.as_str()
+    )))
 }
 
-async fn handle_sessions(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_sessions(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     if args.is_empty() || is_scope_token(args[0]) {
         let scope = if args.is_empty() {
             SessionListScope::All
@@ -1676,7 +1335,7 @@ async fn handle_sessions(
                 .set_pending_setting(openid, Some(PendingSetting::SessionsProjects))
                 .await?;
         }
-        return Ok(CommandOutcome::Reply(CommandReply { text }));
+        return Ok(CommandOutcome::reply(text));
     }
 
     let selector = args[0];
@@ -1706,23 +1365,14 @@ async fn handle_sessions(
             }),
         )
         .await?;
-    Ok(CommandOutcome::Reply(CommandReply { text }))
+    Ok(CommandOutcome::reply(text))
 }
 
-async fn handle_import(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-    _default_model: &str,
-    _runtime_profile: &CodexRuntimeProfile,
-    _is_busy: bool,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let all = session.list_importable_sessions()?;
     let last_session_view = session.last_import_sessions_view(openid).await?;
     if let Some(selector) = args.first()
@@ -1737,17 +1387,14 @@ async fn handle_import(
             t!("commands.import.refreshed", locale = lang.as_str())
         };
         session.set_pending_setting(openid, None).await?;
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.import.result",
-                action = action.as_ref(),
-                summary = session_summary(&target, lang.as_str()),
-                workspace = profile.workspace_dir.display().to_string(),
-                model = compact_imported_profile_summary(&profile, lang.as_str()),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.import.result",
+            action = action.as_ref(),
+            summary = session_summary(&target, lang.as_str()),
+            workspace = profile.workspace_dir.display().to_string(),
+            model = compact_imported_profile_summary(&profile, lang.as_str()),
+            locale = lang.as_str()
+        )));
     }
 
     if args.is_empty() {
@@ -1765,7 +1412,7 @@ async fn handle_import(
                 .set_pending_setting(openid, Some(PendingSetting::ImportProjects))
                 .await?;
         }
-        return Ok(CommandOutcome::Reply(CommandReply { text }));
+        return Ok(CommandOutcome::reply(text));
     }
 
     let selector = args[0];
@@ -1786,17 +1433,14 @@ async fn handle_import(
                 t!("commands.import.refreshed", locale = lang.as_str())
             };
             session.set_pending_setting(openid, None).await?;
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: t!(
-                    "commands.import.result",
-                    action = action.as_ref(),
-                    summary = session_summary(&target, lang.as_str()),
-                    workspace = profile.workspace_dir.display().to_string(),
-                    model = compact_imported_profile_summary(&profile, lang.as_str()),
-                    locale = lang.as_str()
-                )
-                .into_owned(),
-            }));
+            return Ok(CommandOutcome::reply(t!(
+                "commands.import.result",
+                action = action.as_ref(),
+                summary = session_summary(&target, lang.as_str()),
+                workspace = profile.workspace_dir.display().to_string(),
+                model = compact_imported_profile_summary(&profile, lang.as_str()),
+                locale = lang.as_str()
+            )));
         }
     };
     let (_, project_path) = decode_project_key(&project_key)?;
@@ -1816,21 +1460,18 @@ async fn handle_import(
             }),
         )
         .await?;
-    Ok(CommandOutcome::Reply(CommandReply { text }))
+    Ok(CommandOutcome::reply(text))
 }
 
-async fn handle_stop(
-    openid: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-) -> Result<CommandOutcome> {
-    let lang = session
-        .snapshot_for_user(openid)
-        .await?
-        .settings
-        .language
-        .clone();
+async fn handle_stop(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid,
+        session,
+        default_model,
+        runtime_profile,
+        ..
+    } = ctx;
+    let lang = user_locale(session, openid).await;
     let locale = lang.as_str();
     let result = session.stop_foreground(openid).await?;
     let summary = if let Some(alias) = result.restored_alias.as_deref() {
@@ -2624,51 +2265,41 @@ fn canonicalize_core_command(command: &str) -> &str {
     }
 }
 
-async fn handle_lang(
-    args: &[&str],
-    openid: &str,
-    session: &SessionStore,
-) -> Result<CommandOutcome> {
+async fn handle_lang(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let current_lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_lang_prompt(&snapshot, openid, session).await;
+        return interactive::enter_lang_prompt(&snapshot, ctx).await;
     }
     if args[0].eq_ignore_ascii_case("status") {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.lang.status",
-                lang = current_lang.as_str(),
-                locale = current_lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.lang.status",
+            lang = current_lang.as_str(),
+            locale = current_lang.as_str()
+        )));
     }
     let requested = args[0];
     let normalized = normalize_lang(requested);
     if !is_supported_lang(requested) {
-        return Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.lang.unsupported",
-                lang = requested,
-                locale = current_lang.as_str()
-            )
-            .into_owned(),
-        }));
+        return Ok(CommandOutcome::reply(t!(
+            "commands.lang.unsupported",
+            lang = requested,
+            locale = current_lang.as_str()
+        )));
     }
     session
         .update_settings_for_user(openid, |state| {
             state.language = normalized.to_string();
         })
         .await?;
-    Ok(CommandOutcome::Reply(CommandReply {
-        text: t!(
-            "commands.lang.updated",
-            lang = normalized,
-            locale = normalized
-        )
-        .into_owned(),
-    }))
+    Ok(CommandOutcome::reply(t!(
+        "commands.lang.updated",
+        lang = normalized,
+        locale = normalized
+    )))
 }
 
 fn help_text(lang: &str) -> String {
@@ -3056,12 +2687,16 @@ mod interactive {
 
     pub(super) async fn enter_model_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            ..
+        } = ctx;
         let models = list_codex_model_entries(runtime_profile, &model_extras(snapshot));
         let current = effective_model(snapshot, default_model, runtime_profile);
         let mut sections = vec![vec![
@@ -3080,17 +2715,19 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Model))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: join_prompt_blocks(sections),
-        }))
+        Ok(CommandOutcome::reply(join_prompt_blocks(sections)))
     }
 
     pub(super) async fn enter_reasoning_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            runtime_profile,
+            ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         let text = format!(
             "{}\n{}\n{}",
@@ -3105,15 +2742,19 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Reasoning))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_fast_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            runtime_profile,
+            ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         let text = format!(
             "{}\n{}\n{}",
@@ -3128,15 +2769,19 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Fast))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_context_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            runtime_profile,
+            ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         let text = format!(
             "{}\n{}\n{}",
@@ -3151,14 +2796,16 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Context))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_verbose_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         let current = if snapshot.settings.verbose {
             "on"
@@ -3178,14 +2825,16 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Verbose))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_lang_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         let text = format!(
             "{}\n{}\n{}",
@@ -3200,19 +2849,19 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Lang))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_fg_prompt(
         snapshot: &UserSessionState,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let locale = snapshot.settings.language.as_str();
         if snapshot.background.is_empty() {
-            return Ok(CommandOutcome::Reply(CommandReply {
-                text: t!("commands.fg.prompt_empty", locale = locale).into_owned(),
-            }));
+            return Ok(CommandOutcome::reply_t("commands.fg.prompt_empty", locale));
         }
         let mut lines = vec![t!("commands.fg.prompt_header", locale = locale).into_owned()];
         for alias in snapshot.background.keys() {
@@ -3230,16 +2879,16 @@ mod interactive {
         session
             .set_pending_setting(openid, Some(PendingSetting::Fg))
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: lines.join("\n"),
-        }))
+        Ok(CommandOutcome::reply(lines.join("\n")))
     }
 
     pub(super) async fn enter_resume_projects_prompt(
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let projects = collect_projects(&sessions);
         let (text, project_keys) = format_projects_list(&projects, locale);
@@ -3251,16 +2900,18 @@ mod interactive {
                 .set_pending_setting(openid, Some(PendingSetting::ResumeProjects))
                 .await?;
         }
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_resume_sessions_prompt(
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let (scope, project_path) = decode_project_key(&project_key)?;
         let all_sessions = session.list_disk_sessions(scope).await?;
         let project_sessions = all_sessions
@@ -3276,14 +2927,16 @@ mod interactive {
                 Some(PendingSetting::ResumeSessions { project_key, page }),
             )
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_loadbg_projects_prompt(
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let projects = collect_projects(&sessions);
         let (text, project_keys) = format_projects_list(&projects, locale);
@@ -3295,17 +2948,19 @@ mod interactive {
                 .set_pending_setting(openid, Some(PendingSetting::LoadbgProjects))
                 .await?;
         }
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     pub(super) async fn enter_loadbg_sessions_prompt(
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
         alias: Option<String>,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let (scope, project_path) = decode_project_key(&project_key)?;
         let all_sessions = session.list_disk_sessions(scope).await?;
         let project_sessions = all_sessions
@@ -3325,19 +2980,23 @@ mod interactive {
                 }),
             )
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
     // ---- Actions -----------------------------------------------------------
 
     pub(super) async fn switch_foreground(
         alias: &str,
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
         locale: &str,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            ..
+        } = ctx;
         let switched = session.foreground_from_background(openid, alias).await?;
         let snapshot = session.snapshot_for_user(openid).await?;
         let preview = foreground_last_user_message(session, &snapshot).await?;
@@ -3353,36 +3012,32 @@ mod interactive {
             })
             .unwrap_or_default();
         session.set_pending_setting(openid, None).await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.fg.switched",
-                parked = parked,
-                alias = alias,
-                runtime = format_effective_runtime_text(
-                    &snapshot,
-                    default_model,
-                    runtime_profile,
-                    preview.as_deref()
-                ),
-                locale = locale
-            )
-            .into_owned(),
-        }))
+        Ok(CommandOutcome::reply(t!(
+            "commands.fg.switched",
+            parked = parked,
+            alias = alias,
+            runtime = format_effective_runtime_text(
+                &snapshot,
+                default_model,
+                runtime_profile,
+                preview.as_deref()
+            ),
+            locale = locale
+        )))
     }
 
     pub(super) async fn execute_resume(
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
+        ctx: CmdCtx<'_>,
         target: &DiskSessionMeta,
     ) -> Result<CommandOutcome> {
-        let lang = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let CmdCtx {
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            ..
+        } = ctx;
+        let lang = user_locale(session, openid).await;
         let switched = session.resume_disk_session(openid, target).await?;
         let imported_profile = session.imported_profile_for_session(&target.id).await?;
         let workspace_display = imported_profile
@@ -3402,49 +3057,40 @@ mod interactive {
             })
             .unwrap_or_default();
         session.set_pending_setting(openid, None).await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.resume.restored",
-                parked = parked,
-                summary = session_summary(target, lang.as_str()),
-                workspace = workspace_display,
-                runtime = format_effective_runtime_text(
-                    &snapshot,
-                    default_model,
-                    runtime_profile,
-                    target.last_user_message.as_deref(),
-                ),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }))
+        Ok(CommandOutcome::reply(t!(
+            "commands.resume.restored",
+            parked = parked,
+            summary = session_summary(target, lang.as_str()),
+            workspace = workspace_display,
+            runtime = format_effective_runtime_text(
+                &snapshot,
+                default_model,
+                runtime_profile,
+                target.last_user_message.as_deref(),
+            ),
+            locale = lang.as_str()
+        )))
     }
 
     pub(super) async fn execute_loadbg(
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         target: &DiskSessionMeta,
         alias: Option<&str>,
     ) -> Result<CommandOutcome> {
-        let lang = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let lang = user_locale(session, openid).await;
         let new_alias = session
             .load_disk_session_to_background(openid, target, alias)
             .await?;
         session.set_pending_setting(openid, None).await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.loadbg.loaded",
-                alias = new_alias.as_str(),
-                summary = session_summary(target, lang.as_str()),
-                locale = lang.as_str()
-            )
-            .into_owned(),
-        }))
+        Ok(CommandOutcome::reply(t!(
+            "commands.loadbg.loaded",
+            alias = new_alias.as_str(),
+            summary = session_summary(target, lang.as_str()),
+            locale = lang.as_str()
+        )))
     }
 
     // ---- Pending-input consumption ----------------------------------------
@@ -3452,111 +3098,74 @@ mod interactive {
     pub(super) async fn consume_pending_input(
         pending: PendingSetting,
         text: &str,
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
-        is_busy: bool,
+        ctx: CmdCtx<'_>,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            is_busy,
+            ..
+        } = ctx;
         if is_busy
             && matches!(
                 &pending,
                 PendingSetting::Model | PendingSetting::Reasoning | PendingSetting::Context
             )
         {
-            let locale = session
-                .snapshot_for_user(openid)
-                .await?
-                .settings
-                .language
-                .clone();
+            let locale = user_locale(session, openid).await;
             return Ok(super::busy_reply(locale.as_str()));
         }
         match pending {
-            PendingSetting::Model => {
-                consume_model(text, openid, session, default_model, runtime_profile).await
-            }
-            PendingSetting::Reasoning => {
-                consume_reasoning(text, openid, session, runtime_profile).await
-            }
-            PendingSetting::Fast => consume_fast(text, openid, session, runtime_profile).await,
-            PendingSetting::Context => {
-                consume_context(text, openid, session, runtime_profile).await
-            }
-            PendingSetting::Verbose => consume_verbose(text, openid, session).await,
-            PendingSetting::Lang => consume_lang(text, openid, session).await,
-            PendingSetting::SessionsProjects => {
-                consume_sessions_projects(text, openid, session).await
-            }
+            PendingSetting::Model => consume_model(text, ctx).await,
+            PendingSetting::Reasoning => consume_reasoning(text, ctx).await,
+            PendingSetting::Fast => consume_fast(text, ctx).await,
+            PendingSetting::Context => consume_context(text, ctx).await,
+            PendingSetting::Verbose => consume_verbose(text, ctx).await,
+            PendingSetting::Lang => consume_lang(text, ctx).await,
+            PendingSetting::SessionsProjects => consume_sessions_projects(text, ctx).await,
             PendingSetting::SessionsSessions { project_key, page } => {
-                consume_sessions_sessions(text, openid, session, project_key, page).await
+                consume_sessions_sessions(text, ctx, project_key, page).await
             }
-            PendingSetting::ImportProjects => consume_import_projects(text, openid, session).await,
+            PendingSetting::ImportProjects => consume_import_projects(text, ctx).await,
             PendingSetting::ImportSessions { project_key, page } => {
-                consume_import_sessions(text, openid, session, project_key, page).await
+                consume_import_sessions(text, ctx, project_key, page).await
             }
-            PendingSetting::Fg => {
-                consume_fg(text, openid, session, default_model, runtime_profile).await
-            }
-            PendingSetting::ResumeProjects => consume_resume_projects(text, openid, session).await,
+            PendingSetting::Fg => consume_fg(text, ctx).await,
+            PendingSetting::ResumeProjects => consume_resume_projects(text, ctx).await,
             PendingSetting::ResumeSessions { project_key, page } => {
-                consume_resume_sessions(
-                    text,
-                    openid,
-                    session,
-                    project_key,
-                    page,
-                    default_model,
-                    runtime_profile,
-                )
-                .await
+                consume_resume_sessions(text, ctx, project_key, page).await
             }
-            PendingSetting::LoadbgProjects => consume_loadbg_projects(text, openid, session).await,
+            PendingSetting::LoadbgProjects => consume_loadbg_projects(text, ctx).await,
             PendingSetting::LoadbgSessions {
                 project_key,
                 page,
                 alias,
-            } => consume_loadbg_sessions(text, openid, session, project_key, page, alias).await,
-            PendingSetting::Approvals => consume_approvals(text, openid, session).await,
-            PendingSetting::Plan => consume_plan(text, openid, session).await,
-            PendingSetting::ResumeRecovery => Ok(CommandOutcome::Reply(CommandReply {
-                text: t!(
-                    "commands.resume.recovery_prompt",
-                    locale = session
-                        .snapshot_for_user(openid)
-                        .await?
-                        .settings
-                        .language
-                        .as_str()
-                )
-                .into_owned(),
-            })),
+            } => consume_loadbg_sessions(text, ctx, project_key, page, alias).await,
+            PendingSetting::Approvals => consume_approvals(text, ctx).await,
+            PendingSetting::Plan => consume_plan(text, ctx).await,
+            PendingSetting::ResumeRecovery => Ok(CommandOutcome::reply_t(
+                "commands.resume.recovery_prompt",
+                user_locale(session, openid).await.as_str(),
+            )),
         }
     }
 
-    async fn consume_approvals(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        super::handle_approvals_arg(text, openid, session).await
+    async fn consume_approvals(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        super::handle_approvals_arg(text, ctx.openid, ctx.session).await
     }
 
-    async fn consume_plan(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        super::handle_plan_arg(text, openid, session).await
+    async fn consume_plan(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        super::handle_plan_arg(text, ctx.openid, ctx.session).await
     }
 
-    async fn consume_model(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
-    ) -> Result<CommandOutcome> {
+    async fn consume_model(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            default_model,
+            runtime_profile,
+            ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
@@ -3580,30 +3189,26 @@ mod interactive {
                 session.set_model_override_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.model.updated",
-                        model = effective_model(&snapshot, default_model, runtime_profile),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }))
+                Ok(CommandOutcome::reply(t!(
+                    "commands.model.updated",
+                    model = effective_model(&snapshot, default_model, runtime_profile),
+                    locale = locale
+                )))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
+                locale, input, &matches,
+            ))),
+            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_reasoning(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
-    ) -> Result<CommandOutcome> {
+    async fn consume_reasoning(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            runtime_profile,
+            ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
@@ -3622,30 +3227,23 @@ mod interactive {
                 session.set_reasoning_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.reasoning.updated",
-                        value = effective_reasoning(&snapshot, runtime_profile),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }))
+                Ok(CommandOutcome::reply(t!(
+                    "commands.reasoning.updated",
+                    value = effective_reasoning(&snapshot, runtime_profile),
+                    locale = locale
+                )))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
+                locale, input, &matches,
+            ))),
+            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_fast(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-        _runtime_profile: &CodexRuntimeProfile,
-    ) -> Result<CommandOutcome> {
+    async fn consume_fast(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
@@ -3655,18 +3253,17 @@ mod interactive {
                 session.set_pending_setting(openid, None).await?;
                 Ok(CommandOutcome::SetGlobalFast(next))
             }
-            None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_context(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-        runtime_profile: &CodexRuntimeProfile,
-    ) -> Result<CommandOutcome> {
+    async fn consume_context(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid,
+            session,
+            runtime_profile,
+            ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
@@ -3680,26 +3277,20 @@ mod interactive {
                 session.set_context_mode_for_active(openid, next).await?;
                 session.set_pending_setting(openid, None).await?;
                 let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.context.updated",
-                        value = effective_context_label(&snapshot, runtime_profile),
-                        locale = locale
-                    )
-                    .into_owned(),
-                }))
+                Ok(CommandOutcome::reply(t!(
+                    "commands.context.updated",
+                    value = effective_context_label(&snapshot, runtime_profile),
+                    locale = locale
+                )))
             }
-            None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_verbose(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
+    async fn consume_verbose(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
@@ -3717,24 +3308,19 @@ mod interactive {
                 } else {
                     "commands.verbose.updated_off"
                 };
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(key, locale = locale).into_owned(),
-                }))
+                Ok(CommandOutcome::reply_t(key, locale))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
+                locale, input, &matches,
+            ))),
+            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_lang(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
+    async fn consume_lang(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let current_locale = snapshot.settings.language.clone();
         let candidates = as_string_vec(lang_options());
@@ -3748,76 +3334,53 @@ mod interactive {
                     })
                     .await?;
                 session.set_pending_setting(openid, None).await?;
-                Ok(CommandOutcome::Reply(CommandReply {
-                    text: t!(
-                        "commands.lang.updated",
-                        lang = normalized,
-                        locale = normalized
-                    )
-                    .into_owned(),
-                }))
+                Ok(CommandOutcome::reply(t!(
+                    "commands.lang.updated",
+                    lang = normalized,
+                    locale = normalized
+                )))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(current_locale.as_str(), input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(current_locale.as_str(), input),
-            })),
+            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
+                current_locale.as_str(),
+                input,
+                &matches,
+            ))),
+            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(
+                current_locale.as_str(),
+                input,
+            ))),
         }
     }
 
-    async fn consume_fg(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
-    ) -> Result<CommandOutcome> {
+    async fn consume_fg(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let locale = snapshot.settings.language.clone();
         let locale = locale.as_str();
         let candidates: Vec<String> = snapshot.background.keys().cloned().collect();
         let input = text.trim();
         match fuzzy_match_unique(input, &candidates) {
-            FuzzyOutcome::Exact(alias) => {
-                switch_foreground(
-                    &alias,
-                    openid,
-                    session,
-                    default_model,
-                    runtime_profile,
-                    locale,
-                )
-                .await
-            }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::Reply(CommandReply {
-                text: ambiguous_reply(locale, input, &matches),
-            })),
-            FuzzyOutcome::None => Ok(CommandOutcome::Reply(CommandReply {
-                text: no_match_reply(locale, input),
-            })),
+            FuzzyOutcome::Exact(alias) => switch_foreground(&alias, ctx, locale).await,
+            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
+                locale, input, &matches,
+            ))),
+            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
     }
 
-    async fn consume_sessions_projects(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+    async fn consume_sessions_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let projects_view = session.last_projects_view(openid).await?;
         let project_key =
             match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
                 Ok(value) => value,
                 Err(err) => {
-                    return Ok(CommandOutcome::Reply(CommandReply {
-                        text: err.to_string(),
-                    }));
+                    return Ok(CommandOutcome::reply(err.to_string()));
                 }
             };
         let (scope, project_path) = decode_project_key(&project_key)?;
@@ -3838,23 +3401,20 @@ mod interactive {
                 }),
             )
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text: text_out }))
+        Ok(CommandOutcome::reply(text_out))
     }
 
     async fn consume_sessions_sessions(
         _text: &str,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
     ) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
         // /sessions is view-only; at this depth, remind the user how to act.
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let locale = user_locale(session, openid).await;
         let text = t!("commands.sessions.page_footer", locale = locale.as_str()).into_owned();
         session
             .set_pending_setting(
@@ -3862,28 +3422,20 @@ mod interactive {
                 Some(PendingSetting::SessionsSessions { project_key, page }),
             )
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text }))
+        Ok(CommandOutcome::reply(text))
     }
 
-    async fn consume_import_projects(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+    async fn consume_import_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let projects_view = session.last_import_projects_view(openid).await?;
         let project_key =
             match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
                 Ok(value) => value,
                 Err(err) => {
-                    return Ok(CommandOutcome::Reply(CommandReply {
-                        text: err.to_string(),
-                    }));
+                    return Ok(CommandOutcome::reply(err.to_string()));
                 }
             };
         let (_, project_path) = decode_project_key(&project_key)?;
@@ -3908,22 +3460,19 @@ mod interactive {
                 }),
             )
             .await?;
-        Ok(CommandOutcome::Reply(CommandReply { text: text_out }))
+        Ok(CommandOutcome::reply(text_out))
     }
 
     async fn consume_import_sessions(
         text: &str,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
     ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let all = session.list_importable_sessions()?;
         let last_view = session.last_import_sessions_view(openid).await?;
         let target = match resolve_selector(text.trim(), &all, &last_view, locale.as_str()) {
@@ -3936,9 +3485,7 @@ mod interactive {
                         Some(PendingSetting::ImportSessions { project_key, page }),
                     )
                     .await?;
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: err.to_string(),
-                }));
+                return Ok(CommandOutcome::reply(err.to_string()));
             }
         };
         let result = session.import_disk_session(&target).await?;
@@ -3949,58 +3496,42 @@ mod interactive {
             t!("commands.import.refreshed", locale = locale.as_str())
         };
         session.set_pending_setting(openid, None).await?;
-        Ok(CommandOutcome::Reply(CommandReply {
-            text: t!(
-                "commands.import.result",
-                action = action.as_ref(),
-                summary = session_summary(&target, locale.as_str()),
-                workspace = profile.workspace_dir.display().to_string(),
-                model = compact_imported_profile_summary(&profile, locale.as_str()),
-                locale = locale.as_str()
-            )
-            .into_owned(),
-        }))
+        Ok(CommandOutcome::reply(t!(
+            "commands.import.result",
+            action = action.as_ref(),
+            summary = session_summary(&target, locale.as_str()),
+            workspace = profile.workspace_dir.display().to_string(),
+            model = compact_imported_profile_summary(&profile, locale.as_str()),
+            locale = locale.as_str()
+        )))
     }
 
-    async fn consume_resume_projects(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+    async fn consume_resume_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let projects_view = session.last_projects_view(openid).await?;
         let project_key =
             match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
                 Ok(value) => value,
                 Err(err) => {
-                    return Ok(CommandOutcome::Reply(CommandReply {
-                        text: err.to_string(),
-                    }));
+                    return Ok(CommandOutcome::reply(err.to_string()));
                 }
             };
-        enter_resume_sessions_prompt(openid, session, project_key, 1, locale.as_str()).await
+        enter_resume_sessions_prompt(ctx, project_key, 1, locale.as_str()).await
     }
 
     async fn consume_resume_sessions(
         text: &str,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
-        default_model: &str,
-        runtime_profile: &CodexRuntimeProfile,
     ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let last_view = session.last_sessions_view(openid).await?;
         let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
@@ -4012,52 +3543,39 @@ mod interactive {
                         Some(PendingSetting::ResumeSessions { project_key, page }),
                     )
                     .await?;
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: err.to_string(),
-                }));
+                return Ok(CommandOutcome::reply(err.to_string()));
             }
         };
-        execute_resume(openid, session, default_model, runtime_profile, &target).await
+        execute_resume(ctx, &target).await
     }
 
-    async fn consume_loadbg_projects(
-        text: &str,
-        openid: &str,
-        session: &SessionStore,
-    ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+    async fn consume_loadbg_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let projects_view = session.last_projects_view(openid).await?;
         let project_key =
             match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
                 Ok(value) => value,
                 Err(err) => {
-                    return Ok(CommandOutcome::Reply(CommandReply {
-                        text: err.to_string(),
-                    }));
+                    return Ok(CommandOutcome::reply(err.to_string()));
                 }
             };
-        enter_loadbg_sessions_prompt(openid, session, project_key, 1, None, locale.as_str()).await
+        enter_loadbg_sessions_prompt(ctx, project_key, 1, None, locale.as_str()).await
     }
 
     async fn consume_loadbg_sessions(
         text: &str,
-        openid: &str,
-        session: &SessionStore,
+        ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
         alias: Option<String>,
     ) -> Result<CommandOutcome> {
-        let locale = session
-            .snapshot_for_user(openid)
-            .await?
-            .settings
-            .language
-            .clone();
+        let CmdCtx {
+            openid, session, ..
+        } = ctx;
+        let locale = user_locale(session, openid).await;
         let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let last_view = session.last_sessions_view(openid).await?;
         let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
@@ -4073,12 +3591,10 @@ mod interactive {
                         }),
                     )
                     .await?;
-                return Ok(CommandOutcome::Reply(CommandReply {
-                    text: err.to_string(),
-                }));
+                return Ok(CommandOutcome::reply(err.to_string()));
             }
         };
-        execute_loadbg(openid, session, &target, alias.as_deref()).await
+        execute_loadbg(ctx, &target, alias.as_deref()).await
     }
 
     #[cfg(test)]
