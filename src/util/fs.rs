@@ -13,6 +13,12 @@ use ulid::Ulid;
 /// Write `contents` to `path` so that a reader never observes a partial file:
 /// the bytes go to a unique temporary sibling, are fsynced, and only then get
 /// renamed over the target. Missing parent directories are created.
+///
+/// An existing target keeps its permission bits: `File::create` gives the
+/// temporary file umask-derived permissions, so without this an operator's
+/// deliberately tightened file (e.g. `chmod 600 state.json`) would silently
+/// loosen on the next rewrite. Note that fsync errors propagate — callers that
+/// used to swallow them get the stricter behavior on purpose.
 pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -24,6 +30,16 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
             File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
         file.write_all(contents.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
+        match std::fs::metadata(path) {
+            Ok(meta) => file
+                .set_permissions(meta.permissions())
+                .with_context(|| format!("failed to preserve permissions on {}", tmp.display()))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to stat {} for permissions", path.display()));
+            }
+        }
         file.sync_all()
             .with_context(|| format!("failed to sync {}", tmp.display()))?;
     }
@@ -211,5 +227,22 @@ mod tests {
         let mut visited = 0;
         walk_files(&dir.path().join("nope"), |_, _| visited += 1).unwrap();
         assert_eq!(visited, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_tightened_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        atomic_write(&path, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must not loosen a chmod 600 file");
     }
 }
