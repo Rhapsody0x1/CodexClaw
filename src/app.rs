@@ -34,7 +34,6 @@ use crate::{
     config::AppConfig,
     memory::{inject as memory_inject, store::MemoryStore},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
-    normalize_lang,
     qq::{
         api::QqApiClient,
         passive::{PassiveDispatchReport, PassiveTurnEmitter},
@@ -49,6 +48,7 @@ use crate::{
         store::SessionStore,
     },
     shadow::{ShadowContext, ShadowWorker},
+    util::{lang::normalize_lang, layout::DataLayout},
 };
 
 const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
@@ -647,11 +647,9 @@ impl App {
         if workspace_dir != shared_workspace_dir {
             add_dirs.push(shared_workspace_dir.clone());
         }
-        let scheduler_jobs_dir = self.config.general.data_dir.join("cron-jobs");
-        tokio::fs::create_dir_all(&scheduler_jobs_dir).await.ok();
-        add_dirs.push(self.config.general.data_dir.join("session"));
-        add_dirs.push(scheduler_jobs_dir);
-        add_dirs.push(self.config.general.data_dir.join("scheduler"));
+        let layout = DataLayout::new(&self.config.general.data_dir);
+        tokio::fs::create_dir_all(layout.cron_jobs_dir()).await.ok();
+        add_dirs.extend(layout.turn_add_dirs());
         info!(
             sender_openid = %message.sender_openid,
             message_id = %message.message_id,

@@ -15,6 +15,7 @@ use codex_claw::{
     session::store::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
     skills::index::SkillIndex,
+    util::{layout::DataLayout, path::home_dir},
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -116,11 +117,12 @@ async fn run_bot(config: AppConfig) -> Result<()> {
         config.general.data_dir.clone(),
         app_server,
     ));
-    let memory = Arc::new(MemoryStore::new(config.general.data_dir.join("memory")));
+    let layout = DataLayout::new(&config.general.data_dir);
+    let memory = Arc::new(MemoryStore::new(layout.memory_dir()));
     let skills_root = config.general.codex_home_global.join("skills");
     tokio::fs::create_dir_all(&skills_root).await.ok();
     let skill_index = Arc::new(SkillIndex::new(skills_root.clone()));
-    let shadow_workspace = config.general.data_dir.join("shadow-workspace");
+    let shadow_workspace = layout.shadow_workspace_dir();
     tokio::fs::create_dir_all(&shadow_workspace).await.ok();
     let shadow = if config.shadow.enabled {
         let memory_model = if config.shadow.memory_model.trim().is_empty() {
@@ -232,15 +234,10 @@ async fn normalize_path(path: PathBuf) -> Result<PathBuf> {
 fn expand_tilde(path: PathBuf) -> PathBuf {
     let raw = path.to_string_lossy();
     if raw == "~" {
-        return std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/root"));
+        return home_dir();
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/root"));
-        return home.join(rest);
+        return home_dir().join(rest);
     }
     path
 }

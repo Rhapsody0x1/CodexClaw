@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -11,13 +11,17 @@ use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::{Mutex, RwLock};
-use ulid::Ulid;
 
 use crate::scheduler::store::CronJob;
 use crate::session::state::{
     CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
     PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
     SessionState, TokenUsageSnapshot, UserSessionState,
+};
+use crate::util::{
+    fs::{atomic_write, read_json_opt, walk_files},
+    layout::DataLayout,
+    time::parse_utc,
 };
 
 const ALIAS_WORDS: &[&str] = &[
@@ -89,13 +93,14 @@ impl SessionStore {
         global_codex_home: &Path,
         system_codex_home: &Path,
     ) -> Result<Self> {
-        let root = data_dir.join("session");
-        let attachment_workspace_dir = root.join("workspace");
+        let layout = DataLayout::new(data_dir);
+        let root = layout.session_dir();
+        let attachment_workspace_dir = layout.shared_workspace_dir();
         let inbox_dir = attachment_workspace_dir.join("inbox");
         tokio::fs::create_dir_all(&inbox_dir).await?;
         tokio::fs::create_dir_all(global_codex_home.join("sessions")).await?;
-        let state_path = root.join("state.json");
-        let cron_jobs_path = data_dir.join("scheduler").join("jobs.json");
+        let state_path = layout.session_state_file();
+        let cron_jobs_path = layout.cron_jobs_file();
         let state = match tokio::fs::read_to_string(&state_path).await {
             Ok(raw) => serde_json::from_str::<PersistedSessionState>(&raw)
                 .with_context(|| format!("failed to parse {}", state_path.display()))?,
@@ -142,7 +147,7 @@ impl SessionStore {
             .get(openid)
             // Normalize so a legacy/hand-edited value like "zh-CN" resolves to a
             // canonical locale instead of silently falling back to English.
-            .map(|user| crate::normalize_lang(&user.settings.language).to_string())
+            .map(|user| crate::util::lang::normalize_lang(&user.settings.language).to_string())
     }
 
     pub async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
@@ -1015,46 +1020,16 @@ impl SessionStore {
         // Write atomically (temp file + fsync + rename) so an interrupted or
         // crashed write can never leave a truncated state.json that fails to
         // parse on the next startup and wipes every user's session state.
-        tokio::task::spawn_blocking(move || write_state_file(&path, &raw)).await??;
+        tokio::task::spawn_blocking(move || atomic_write(&path, &raw)).await??;
         Ok(())
     }
-}
-
-fn write_state_file(path: &Path, raw: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let tmp = path.with_file_name(format!(
-        "{}.{}.tmp",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("state.json"),
-        Ulid::new()
-    ));
-    {
-        let mut file =
-            File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
-        file.write_all(raw.as_bytes())
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path).with_context(|| {
-        format!(
-            "failed to replace {} with {}",
-            path.display(),
-            tmp.display()
-        )
-    })?;
-    Ok(())
 }
 
 fn load_legacy_state(
     data_dir: &Path,
     shared_workspace_dir: &Path,
 ) -> Result<PersistedSessionState> {
-    let legacy_path = data_dir.join("session").join("main").join("settings.json");
+    let legacy_path = DataLayout::new(data_dir).legacy_settings_file();
     let Ok(raw) = std::fs::read_to_string(&legacy_path) else {
         return Ok(PersistedSessionState::default());
     };
@@ -1290,34 +1265,11 @@ fn register_local_saved_session(user: &mut UserSessionState, session_id: &str) {
 }
 
 fn prune_session_files(codex_home: &Path, session_id: &str) -> Result<()> {
-    let sessions_root = codex_home.join("sessions");
-    if !sessions_root.exists() {
-        return Ok(());
-    }
-    let mut stack = vec![sessions_root];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .with_context(|| format!("failed to read directory {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if name.ends_with(".jsonl") && name.contains(session_id) {
-                let _ = std::fs::remove_file(&path);
-            }
+    walk_files(&codex_home.join("sessions"), |path, name| {
+        if name.ends_with(".jsonl") && name.contains(session_id) {
+            let _ = std::fs::remove_file(path);
         }
-    }
-    Ok(())
+    })
 }
 
 fn cleanup_workspace_if_empty(path: &Path) {
@@ -1350,31 +1302,11 @@ fn scan_home_sessions(codex_home: &Path) -> Result<Vec<DiskSessionMeta>> {
 }
 
 fn collect_rollout_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .with_context(|| format!("failed to read directory {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if file_type.is_file()
-                && let Some(name) = path.file_name().and_then(|value| value.to_str())
-                && name.starts_with("rollout-")
-                && name.ends_with(".jsonl")
-            {
-                out.push(path);
-            }
+    walk_files(root, |path, name| {
+        if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+            out.push(path.to_path_buf());
         }
-    }
-    Ok(())
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1717,12 +1649,6 @@ fn prepare_workspace_dir(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).or_else(|_| Ok(path.to_path_buf()))
 }
 
-fn parse_utc(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-}
-
 fn cron_jobs_lock_path(path: &Path) -> PathBuf {
     path.with_extension("json.lock")
 }
@@ -1759,43 +1685,11 @@ fn read_cron_jobs_file(
     path: &Path,
     fallback: BTreeMap<String, CronJob>,
 ) -> Result<BTreeMap<String, CronJob>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str::<BTreeMap<String, CronJob>>(&raw)
-            .with_context(|| format!("failed to parse {}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(fallback),
-        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
-    }
+    Ok(read_json_opt::<BTreeMap<String, CronJob>>(path)?.unwrap_or(fallback))
 }
 
 fn write_cron_jobs_file(path: &Path, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let raw = serde_json::to_string_pretty(jobs)?;
-    let tmp = path.with_file_name(format!(
-        "{}.{}.tmp",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("jobs.json"),
-        Ulid::new()
-    ));
-    {
-        let mut file =
-            File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
-        file.write_all(raw.as_bytes())
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path).with_context(|| {
-        format!(
-            "failed to replace {} with {}",
-            path.display(),
-            tmp.display()
-        )
-    })?;
-    Ok(())
+    atomic_write(path, &serde_json::to_string_pretty(jobs)?)
 }
 
 #[cfg(test)]

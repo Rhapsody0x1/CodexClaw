@@ -1,10 +1,13 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::{
-    config::AppConfig, session::state::ApprovalPolicySetting, session::store::SessionStore,
+    config::AppConfig,
+    session::state::ApprovalPolicySetting,
+    session::store::SessionStore,
+    util::time::{fmt_rfc3339_or, parse_utc_strict},
 };
 
 use super::{
@@ -66,9 +69,7 @@ async fn add(
             .value("at")
             .ok_or_else(|| anyhow!("once requires --at <RFC3339>"))?;
         CronKind::OneShot {
-            at: DateTime::parse_from_rfc3339(&at)
-                .with_context(|| format!("invalid --at `{at}`"))?
-                .with_timezone(&Utc),
+            at: parse_utc_strict(&at).with_context(|| format!("invalid --at `{at}`"))?,
         }
     } else {
         let cron = opts
@@ -180,9 +181,7 @@ async fn add(
         "created cron job {} `{}` next_run_at={}",
         job.id,
         job.title,
-        job.next_run_at
-            .map(|value| value.to_rfc3339())
-            .unwrap_or_else(|| "none".to_string())
+        fmt_rfc3339_or(job.next_run_at, "none")
     );
     Ok(())
 }
@@ -200,9 +199,7 @@ async fn list(session: &SessionStore, args: &[String]) -> Result<()> {
             "{}\t{}\tnext={}\truns={}\tfailures={}\t{}\t{}",
             job.id,
             if job.disabled { "disabled" } else { "enabled" },
-            job.next_run_at
-                .map(|value| value.to_rfc3339())
-                .unwrap_or_else(|| "-".to_string()),
+            fmt_rfc3339_or(job.next_run_at, "-"),
             job.run_count,
             job.failure_streak,
             job.owner_openid,
@@ -292,9 +289,7 @@ async fn tail(session: &SessionStore, args: &[String]) -> Result<()> {
             "{}\t{}\tnext={}\truns={}\tfailures={}",
             job.id,
             if job.disabled { "disabled" } else { "enabled" },
-            job.next_run_at
-                .map(|value| value.to_rfc3339())
-                .unwrap_or_else(|| "-".to_string()),
+            fmt_rfc3339_or(job.next_run_at, "-"),
             job.run_count,
             job.failure_streak
         );
@@ -304,9 +299,7 @@ async fn tail(session: &SessionStore, args: &[String]) -> Result<()> {
         "{}\t{}\tnext={}\truns={}\tfailures={}\tlast_status={:?}\n--- {} ---",
         job.id,
         if job.disabled { "disabled" } else { "enabled" },
-        job.next_run_at
-            .map(|value| value.to_rfc3339())
-            .unwrap_or_else(|| "-".to_string()),
+        fmt_rfc3339_or(job.next_run_at, "-"),
         job.run_count,
         job.failure_streak,
         job.last_run_status,

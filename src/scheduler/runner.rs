@@ -15,6 +15,7 @@ use crate::{
     codex::events::CodexEvent,
     codex::executor::{ExecutionRequest, ExecutionUpdate},
     session::state::{ApprovalPolicySetting, DialogProfile, SessionSettings, SessionState},
+    util::{layout::DataLayout, text::truncate_middle},
 };
 
 use super::{
@@ -362,7 +363,7 @@ async fn run_codex_exec(
     if !status.success() {
         return Err(anyhow!(
             "codex exec exited with {status}: {}",
-            truncate_for_log(combined.trim(), MAX_CODEX_EXEC_ERROR_CHARS)
+            truncate_middle(combined.trim(), MAX_CODEX_EXEC_ERROR_CHARS)
         ));
     }
     let agent_output = extract_codex_exec_agent_messages(&stdout);
@@ -608,12 +609,9 @@ async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
 }
 
 fn scheduler_add_dirs(app: &App) -> Vec<std::path::PathBuf> {
-    vec![
-        app.session.inbox_dir().to_path_buf(),
-        app.config.general.data_dir.join("session"),
-        app.config.general.data_dir.join("scheduler"),
-        app.config.general.data_dir.join("cron-jobs"),
-    ]
+    let mut dirs = vec![app.session.inbox_dir().to_path_buf()];
+    dirs.extend(DataLayout::new(&app.config.general.data_dir).turn_add_dirs());
+    dirs
 }
 
 fn is_interactive_job(job: &CronJob) -> bool {
@@ -688,31 +686,10 @@ fn format_run_log(
     }
     if !output.is_empty() {
         log.push_str("\n[output]\n");
-        log.push_str(&truncate_for_log(output, MAX_LOG_OUTPUT_CHARS));
+        log.push_str(&truncate_middle(output, MAX_LOG_OUTPUT_CHARS));
         log.push('\n');
     }
     log
-}
-
-fn truncate_for_log(output: &str, max_chars: usize) -> String {
-    let count = output.chars().count();
-    if count <= max_chars {
-        return output.to_string();
-    }
-    let half = max_chars / 2;
-    let head = output.chars().take(half).collect::<String>();
-    let tail = output
-        .chars()
-        .rev()
-        .take(half)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!(
-        "{head}\n\n[truncated {} chars]\n\n{tail}",
-        count - max_chars
-    )
 }
 
 #[cfg(test)]

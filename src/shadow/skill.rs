@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::shadow::memory::ShadowContext;
 use crate::skills::index::{SkillIndex, SkillMeta};
 use crate::skills::writer::{build_skill_md, normalize_slug, write_new_skill};
+use crate::util::text::extract_json_block;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -96,28 +97,6 @@ pub fn existing_skill_hints(metas: &[SkillMeta]) -> Vec<(String, String)> {
         .iter()
         .map(|m| (m.name.clone(), m.description.clone()))
         .collect()
-}
-
-fn extract_json_block(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some(fenced) = strip_fenced(trimmed) {
-        return fenced.to_string();
-    }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start < end
-    {
-        return trimmed[start..=end].to_string();
-    }
-    trimmed.to_string()
-}
-
-fn strip_fenced(s: &str) -> Option<&str> {
-    let s = s
-        .strip_prefix("```json")
-        .or_else(|| s.strip_prefix("```"))?;
-    let s = s.trim_start_matches(char::is_whitespace);
-    let end = s.rfind("```")?;
-    Some(s[..end].trim())
 }
 
 #[cfg(test)]

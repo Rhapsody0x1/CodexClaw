@@ -10,7 +10,13 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::warn;
 
-use crate::config::AppConfig;
+use crate::{
+    config::AppConfig,
+    util::{
+        layout::DataLayout, path::search_path_dirs as util_search_path_dirs,
+        text::truncate_with_marker,
+    },
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRecord {
@@ -140,7 +146,7 @@ pub async fn save_last_build_record(data_dir: &Path, record: &BuildRecord) -> Re
 }
 
 fn last_build_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("self-update").join("last-build.json")
+    DataLayout::new(data_dir).last_build_file()
 }
 
 fn resolve_program(program: &str) -> PathBuf {
@@ -175,40 +181,17 @@ fn build_command_path_env(path_env: Option<&OsString>, home: Option<&Path>) -> O
     env::join_paths(dirs).ok()
 }
 
-fn search_path_dirs(path_env: Option<&OsString>, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(path_env) = path_env {
-        for dir in env::split_paths(path_env) {
-            push_unique_dir(&mut dirs, dir);
-        }
-    }
-    if let Some(home) = home {
-        push_unique_dir(&mut dirs, home.join(".cargo").join("bin"));
-    }
-    for dir in [
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-    ] {
-        push_unique_dir(&mut dirs, dir);
-    }
-    dirs
-}
+/// Where to look for the build/install toolchain. Deliberately narrower than
+/// the codex turn search list: this resolves the programs we run ourselves.
+const BUILD_HOME_BIN_DIRS: &[&str] = &[".cargo/bin"];
+const BUILD_SYSTEM_BIN_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
-fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
-    if !dirs.iter().any(|existing| existing == &dir) {
-        dirs.push(dir);
-    }
+fn search_path_dirs(path_env: Option<&OsString>, home: Option<&Path>) -> Vec<PathBuf> {
+    util_search_path_dirs(path_env, home, BUILD_HOME_BIN_DIRS, BUILD_SYSTEM_BIN_DIRS)
 }
 
 fn truncate(input: &str, max_chars: usize) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
-    let mut value = input.chars().take(max_chars).collect::<String>();
-    value.push_str(" ...");
-    value
+    truncate_with_marker(input, max_chars, " ...")
 }
 
 /// Run a freshly built binary with `--smoke-test` and require a clean, timely

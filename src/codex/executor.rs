@@ -19,6 +19,11 @@ use crate::{
     session::state::{
         ApprovalPolicySetting, ContextMode, ReasoningEffort, ServiceTier, SessionState,
     },
+    util::{
+        layout::DataLayout,
+        path::search_path_dirs,
+        text::{humanize_tool_label, short_json, truncate_with_marker},
+    },
 };
 
 #[derive(Clone)]
@@ -84,7 +89,7 @@ impl CodexExecutor {
     pub fn new(binary: String, data_dir: PathBuf, handle: Arc<AppServerHandle>) -> Self {
         Self {
             binary: PathBuf::from(binary),
-            sqlite_home: data_dir.join("codex-sqlite"),
+            sqlite_home: DataLayout::new(data_dir).codex_sqlite_dir(),
             handle,
         }
     }
@@ -152,39 +157,27 @@ fn approval_setting_to_protocol(setting: ApprovalPolicySetting) -> ApprovalPolic
     }
 }
 
+/// Directories a codex turn should be able to find binaries in, on top of the
+/// inherited `PATH`. Wider than the self-update search list on purpose: a turn
+/// may shell out to anything the user has installed.
+const CODEX_HOME_BIN_DIRS: &[&str] = &[".cargo/bin", ".local/bin"];
+const CODEX_SYSTEM_BIN_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+];
+
 pub fn build_codex_path_env(current: Option<&OsString>, home: Option<&Path>) -> Option<OsString> {
-    let mut dirs = Vec::new();
-    if let Some(current) = current {
-        for dir in env::split_paths(current) {
-            push_unique_dir(&mut dirs, dir);
-        }
-    }
-    if let Some(home) = home {
-        push_unique_dir(&mut dirs, home.join(".cargo").join("bin"));
-        push_unique_dir(&mut dirs, home.join(".local").join("bin"));
-    }
-    for dir in [
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/opt/homebrew/sbin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/local/sbin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-        PathBuf::from("/usr/sbin"),
-        PathBuf::from("/sbin"),
-    ] {
-        push_unique_dir(&mut dirs, dir);
-    }
+    let dirs = search_path_dirs(current, home, CODEX_HOME_BIN_DIRS, CODEX_SYSTEM_BIN_DIRS);
     if dirs.is_empty() {
         return None;
     }
     env::join_paths(dirs).ok()
-}
-
-fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
-    if !dirs.iter().any(|existing| existing == &dir) {
-        dirs.push(dir);
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,40 +399,8 @@ fn format_todo_items(items: &[crate::codex::events::TodoEntry]) -> String {
         .join("\n")
 }
 
-fn short_json(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        _ => serde_json::to_string(value).unwrap_or_default(),
-    }
-}
-
 fn truncate(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
-}
-
-fn humanize_tool_label(value: &str) -> String {
-    value
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => {
-                    let mut text = first.to_uppercase().collect::<String>();
-                    text.push_str(chars.as_str());
-                    text
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    truncate_with_marker(value, max_chars, "...")
 }
 
 #[cfg(test)]
@@ -451,8 +412,8 @@ mod tests {
     use crate::codex::{
         events::{CodexItem, TodoEntry, WebSearchAction},
         executor::{
-            ToolEventPhase, build_codex_path_env, format_todo_items, humanize_tool_label,
-            tool_display_for_item, web_search_action_detail, web_search_display_from_action,
+            ToolEventPhase, build_codex_path_env, format_todo_items, tool_display_for_item,
+            web_search_action_detail, web_search_display_from_action,
             web_search_display_from_detail,
         },
     };
@@ -490,11 +451,6 @@ mod tests {
         // app_server::events::tests::command_execution_started_matches_legacy_bash_display.
         let item = empty_item("command_execution");
         assert!(tool_display_for_item(&item, ToolEventPhase::Started).is_none());
-    }
-
-    #[test]
-    fn humanizes_unknown_tool_names() {
-        assert_eq!(humanize_tool_label("file_search"), "File Search");
     }
 
     #[test]

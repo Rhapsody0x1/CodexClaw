@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::memory::store::{AddState, MemoryKind, MemoryStore};
+use crate::util::text::extract_json_block;
 
 #[derive(Debug, Clone)]
 pub struct ShadowContext {
@@ -103,28 +104,6 @@ fn apply_entry(
         AddState::EntryEmpty => report.empty += 1,
     }
     Ok(())
-}
-
-fn extract_json_block(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some(fenced) = strip_fenced(trimmed) {
-        return fenced.to_string();
-    }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start < end
-    {
-        return trimmed[start..=end].to_string();
-    }
-    trimmed.to_string()
-}
-
-fn strip_fenced(s: &str) -> Option<&str> {
-    let s = s
-        .strip_prefix("```json")
-        .or_else(|| s.strip_prefix("```"))?;
-    let s = s.trim_start_matches(char::is_whitespace);
-    let end = s.rfind("```")?;
-    Some(s[..end].trim())
 }
 
 #[cfg(test)]

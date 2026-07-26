@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::app::App;
+use crate::util::{fs::read_json_opt_async, layout::DataLayout};
 
 use super::store::{CronJob, InteractiveSpec, JobAction, SessionStrategy, new_job_dir};
 
@@ -190,7 +191,7 @@ pub async fn finish_job_for_owner(app: &App, openid: &str, reason: &str) -> Resu
 }
 
 pub async fn sweep_expired(app: &App) -> Result<()> {
-    let root = app.config.general.data_dir.join("cron-jobs");
+    let root = DataLayout::new(&app.config.general.data_dir).cron_jobs_dir();
     let mut entries = match tokio::fs::read_dir(&root).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -315,7 +316,7 @@ pub async fn pending_for_owner(
     data_dir: &Path,
     openid: &str,
 ) -> Result<Option<PendingInteraction>> {
-    let root = data_dir.join("cron-jobs");
+    let root = DataLayout::new(data_dir).cron_jobs_dir();
     let mut entries = match tokio::fs::read_dir(&root).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -323,15 +324,9 @@ pub async fn pending_for_owner(
     };
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path().join("pending.json");
-        let raw = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(err).with_context(|| format!("failed to read {}", path.display()));
-            }
+        let Some(pending) = read_json_opt_async::<PendingInteraction>(&path).await? else {
+            continue;
         };
-        let pending = serde_json::from_str::<PendingInteraction>(&raw)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
         if pending.owner_openid == openid {
             return Ok(Some(pending));
         }
@@ -340,12 +335,7 @@ pub async fn pending_for_owner(
 }
 
 async fn read_pending(data_dir: &Path, job_id: &str) -> Result<Option<PendingInteraction>> {
-    let path = pending_path(data_dir, job_id);
-    match tokio::fs::read_to_string(&path).await {
-        Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
-    }
+    read_json_opt_async(&pending_path(data_dir, job_id)).await
 }
 
 async fn write_pending(data_dir: &Path, pending: &PendingInteraction) -> Result<()> {

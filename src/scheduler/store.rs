@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::session::state::ApprovalPolicySetting;
+use crate::util::{fs::read_to_string_opt_async, layout::DataLayout, time::ts_slug};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CronJob {
@@ -161,7 +162,7 @@ pub enum RunStatus {
 }
 
 pub fn new_job_dir(data_dir: &Path, id: &str) -> PathBuf {
-    data_dir.join("cron-jobs").join(id)
+    DataLayout::new(data_dir).cron_job_dir(id)
 }
 
 pub async fn prepare_job_dirs(data_dir: &Path, id: &str) -> Result<PathBuf> {
@@ -231,9 +232,9 @@ pub async fn recycle_job_files(data_dir: &Path, codex_home_global: &Path, id: &s
             return Err(err).with_context(|| format!("failed to stat {}", job_dir.display()));
         }
     }
-    let trash_root = data_dir.join("cron-jobs-trash");
+    let trash_root = DataLayout::new(data_dir).cron_jobs_trash_dir();
     tokio::fs::create_dir_all(&trash_root).await?;
-    let target = trash_root.join(format!("{}-{}", Utc::now().format("%Y%m%dT%H%M%SZ"), id));
+    let target = trash_root.join(format!("{}-{}", ts_slug(Utc::now()), id));
     tokio::fs::rename(&job_dir, &target)
         .await
         .with_context(|| {
@@ -332,10 +333,8 @@ pub async fn take_pending_deliveries(
     openid: &str,
 ) -> Result<Vec<PendingDelivery>> {
     let path = pending_delivery_path(data_dir, openid);
-    let raw = match tokio::fs::read_to_string(&path).await {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
+    let Some(raw) = read_to_string_opt_async(&path).await? else {
+        return Ok(Vec::new());
     };
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {}
@@ -357,9 +356,8 @@ pub async fn take_pending_deliveries(
 }
 
 fn pending_delivery_path(data_dir: &Path, openid: &str) -> PathBuf {
-    data_dir
-        .join("scheduler")
-        .join("pending-deliveries")
+    DataLayout::new(data_dir)
+        .pending_deliveries_dir()
         .join(format!("{}.jsonl", sanitize_path_segment(openid)))
 }
 
@@ -387,7 +385,7 @@ pub async fn write_run_log(
         .unwrap_or(job.workspace_dir.as_path())
         .join("runs");
     tokio::fs::create_dir_all(&runs_dir).await?;
-    let name = run_at.format("%Y%m%dT%H%M%SZ.log").to_string();
+    let name = format!("{}.log", ts_slug(run_at));
     tokio::fs::write(runs_dir.join(name), body).await?;
     prune_run_logs(&runs_dir, runs_retention).await?;
     Ok(())
@@ -431,9 +429,7 @@ pub(crate) mod fixtures {
     use super::{CronJob, CronKind, DeliverPolicy, JobAction};
 
     pub(crate) fn ts(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339)
-            .unwrap()
-            .with_timezone(&Utc)
+        crate::util::time::parse_utc_strict(rfc3339).unwrap()
     }
 
     /// Baseline one-shot shell job. Callers override just the fields their

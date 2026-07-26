@@ -6,13 +6,16 @@ use rust_i18n::t;
 
 use crate::{
     codex::runtime::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
-    normalize_lang,
     session::{
         state::{
             ApprovalPolicySetting, CommandAlias, ContextMode, PendingSetting, ReasoningEffort,
             ServiceTier, UserSessionState,
         },
         store::{DiskSessionMeta, SessionListScope, SessionStore},
+    },
+    util::{
+        lang::{is_supported_lang, normalize_lang},
+        time::fmt_rfc3339_or,
     },
 };
 
@@ -1103,9 +1106,7 @@ async fn handle_cron(
                     "\n{}  {}  next={}  runs={}  failures={}  {}",
                     job.id,
                     if job.disabled { "disabled" } else { "enabled" },
-                    job.next_run_at
-                        .map(|value| value.to_rfc3339())
-                        .unwrap_or_else(|| "-".to_string()),
+                    fmt_rfc3339_or(job.next_run_at, "-"),
                     job.run_count,
                     job.failure_streak,
                     job.title
@@ -2649,11 +2650,7 @@ async fn handle_lang(
     }
     let requested = args[0];
     let normalized = normalize_lang(requested);
-    let is_known = matches!(
-        requested.trim().to_ascii_lowercase().as_str(),
-        "en" | "zh" | "zh-cn" | "zh_cn" | "cn" | "chinese"
-    ) || requested.trim() == "中文";
-    if !is_known {
+    if !is_supported_lang(requested) {
         return Ok(CommandOutcome::Reply(CommandReply {
             text: t!(
                 "commands.lang.unsupported",

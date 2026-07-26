@@ -1,3 +1,5 @@
+use crate::util::fs::{atomic_write, read_to_string_opt};
+
 pub const ENTRY_DELIMITER: &str = "\n§\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,33 +37,13 @@ pub fn serialize_entries(entries: &[String]) -> String {
 }
 
 pub fn load_entries(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
-    use anyhow::Context;
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(parse_entries(&raw)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
-    }
+    Ok(read_to_string_opt(path)?
+        .map(|raw| parse_entries(&raw))
+        .unwrap_or_default())
 }
 
 pub fn write_entries(path: &std::path::Path, entries: &[String]) -> anyhow::Result<()> {
-    use anyhow::Context;
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create dir {}", parent.display()))?;
-    }
-    let tmp = tmp_path_for(path);
-    {
-        let mut file = std::fs::File::create(&tmp)
-            .with_context(|| format!("failed to create {}", tmp.display()))?;
-        file.write_all(serialize_entries(entries).as_bytes())
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
-        file.sync_all().ok();
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    atomic_write(path, &serialize_entries(entries))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,15 +212,6 @@ impl MemoryStore {
         self.bump_version(openid);
         Ok(Some(removed))
     }
-}
-
-fn tmp_path_for(path: &std::path::Path) -> std::path::PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|s| s.to_os_string())
-        .unwrap_or_default();
-    name.push(".tmp");
-    path.with_file_name(name)
 }
 
 #[cfg(test)]

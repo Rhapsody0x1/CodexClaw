@@ -12,10 +12,4 @@ pub mod self_update;
 pub mod session;
 pub mod shadow;
 pub mod skills;
-
-pub fn normalize_lang(raw: &str) -> &'static str {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "zh" | "zh-cn" | "zh_cn" | "cn" | "chinese" | "中文" => "zh",
-        _ => "en",
-    }
-}
+pub mod util;

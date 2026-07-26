@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::session::state::ReasoningEffort;
+use crate::util::{layout::DataLayout, path::home_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -253,7 +254,7 @@ fn default_system_codex_home() -> PathBuf {
 }
 
 fn default_workspace_dir() -> PathBuf {
-    default_data_dir().join("session").join("workspace")
+    DataLayout::new(default_data_dir()).shared_workspace_dir()
 }
 
 fn default_codex_binary() -> String {
@@ -286,10 +287,4 @@ fn default_token_url() -> String {
 
 fn default_codex_claw_root() -> PathBuf {
     home_dir().join(".codex-claw")
-}
-
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/root"))
 }

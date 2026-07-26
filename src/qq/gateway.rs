@@ -19,6 +19,7 @@ use crate::{
         HELLO_EVENT, HelloPayload, IDENTIFY_EVENT, INTENT_GROUP_AND_C2C, INVALID_SESSION_EVENT,
         RECONNECT_EVENT, RESUME_EVENT, ReadyPayload,
     },
+    util::layout::DataLayout,
 };
 
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
@@ -44,9 +45,9 @@ struct GatewaySessionStore {
 
 impl GatewaySessionStore {
     async fn load_or_init(data_dir: &Path) -> Result<Self> {
-        let dir = data_dir.join("qq");
-        tokio::fs::create_dir_all(&dir).await?;
-        let path = dir.join("gateway-session.json");
+        let layout = DataLayout::new(data_dir);
+        tokio::fs::create_dir_all(layout.qq_dir()).await?;
+        let path = layout.gateway_session_file();
         let state = match tokio::fs::read_to_string(&path).await {
             Ok(raw) => serde_json::from_str::<GatewaySessionState>(&raw)
                 .with_context(|| format!("failed to parse {}", path.display()))?,

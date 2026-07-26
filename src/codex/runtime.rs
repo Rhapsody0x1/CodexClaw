@@ -1,14 +1,17 @@
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env, fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::session::state::{ContextMode, ReasoningEffort, ServiceTier};
+use crate::util::{
+    fs::{atomic_write, read_to_string_opt},
+    path::home_dir,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexRuntimeProfile {
@@ -297,12 +300,7 @@ fn list_codex_models_with_path(
 fn codex_config_path() -> PathBuf {
     let codex_home = env::var("CODEX_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/root"))
-                .join(".codex")
-        });
+        .unwrap_or_else(|_| home_dir().join(".codex"));
     codex_home.join("config.toml")
 }
 
@@ -311,13 +309,7 @@ fn write_top_level_config_value(
     key: &str,
     value: Option<String>,
 ) -> Result<()> {
-    let raw = match fs::read_to_string(config_path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(err) => {
-            return Err(err).with_context(|| format!("failed to read {}", config_path.display()));
-        }
-    };
+    let raw = read_to_string_opt(config_path)?.unwrap_or_default();
     let updated = rewrite_top_level_key(&raw, key, value.as_deref());
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
@@ -406,25 +398,6 @@ fn is_top_level_key_line(line: &str, key: &str) -> bool {
         return false;
     };
     matches!(rest.chars().next(), Some(' ') | Some('\t') | Some('='))
-}
-
-fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp = parent.join(format!(
-        ".{}.tmp-{}-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("config"),
-        std::process::id(),
-        nonce
-    ));
-    fs::write(&tmp, contents).with_context(|| format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
-    Ok(())
 }
 
 struct RawCodexModelEntry<'a> {
