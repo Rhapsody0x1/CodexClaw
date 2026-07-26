@@ -12,7 +12,7 @@ use tokio::{
 
 use crate::{
     app::App,
-    codex::{CodexEvent, ExecutionRequest, ExecutionUpdate},
+    codex::{ExecutionRequest, ExecutionUpdate, agent_messages_from_stdout},
     session::state::{ApprovalPolicySetting, DialogProfile, SessionSettings, SessionState},
     util::{layout::DataLayout, text::truncate_middle},
 };
@@ -365,7 +365,7 @@ async fn run_codex_exec(
             truncate_middle(combined.trim(), MAX_CODEX_EXEC_ERROR_CHARS)
         ));
     }
-    let agent_output = extract_codex_exec_agent_messages(&stdout);
+    let agent_output = agent_messages_from_stdout(&stdout);
     if agent_output.trim().is_empty() {
         Ok(String::from_utf8_lossy(&stdout).trim().to_string())
     } else {
@@ -388,24 +388,6 @@ fn codex_exec_args(model: Option<&str>, extra_args: &[String], prompt: &str) -> 
     args.extend(extra_args.iter().cloned());
     args.push(prompt.to_string());
     args
-}
-
-fn extract_codex_exec_agent_messages(stdout: &[u8]) -> String {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .filter_map(|line| {
-            let event = serde_json::from_str::<CodexEvent>(line.trim()).ok()?;
-            let CodexEvent::ItemCompleted { item } = event else {
-                return None;
-            };
-            if item.item_type == "agent_message" {
-                item.text
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn run_codex_turn(
@@ -693,7 +675,7 @@ fn format_run_log(
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_exec_args, extract_codex_exec_agent_messages, keep_interrupted_thread};
+    use super::{agent_messages_from_stdout, codex_exec_args, keep_interrupted_thread};
     use crate::codex::ExecutionUpdate;
     use crate::model::cron::fixtures::shell_job;
     use crate::scheduler::store::{CronJob, JobAction, SessionStrategy};
@@ -836,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_codex_exec_agent_messages_ignores_events_and_stderr_noise() {
+    fn codex_exec_stdout_extraction_ignores_events_and_stderr_noise() {
         let stdout = r#"{"type":"thread.started","thread_id":"x"}
 {"type":"item.completed","item":{"id":"a","type":"reasoning","text":"hidden"}}
 {"type":"item.completed","item":{"id":"b","type":"agent_message","text":"早餐正文"}}
@@ -845,7 +827,7 @@ not json
 "#;
 
         assert_eq!(
-            extract_codex_exec_agent_messages(stdout.as_bytes()),
+            agent_messages_from_stdout(stdout.as_bytes()),
             "早餐正文".to_string()
         );
     }

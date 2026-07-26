@@ -7,27 +7,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::codex::CodexEvent;
-
-pub fn extract_agent_messages_from_lines<I: IntoIterator<Item = String>>(lines: I) -> String {
-    let mut parts = Vec::new();
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<CodexEvent>(trimmed) else {
-            continue;
-        };
-        if let CodexEvent::ItemCompleted { item } = event
-            && item.item_type == "agent_message"
-            && let Some(text) = item.text
-        {
-            parts.push(text);
-        }
-    }
-    parts.join("\n")
-}
+use crate::codex::agent_messages_from_lines;
 
 pub struct OneshotConfig<'a> {
     pub codex_binary: &'a str,
@@ -125,7 +105,7 @@ pub async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
     if !status.success() {
         return Err(anyhow!("codex shadow exited with status {status}"));
     }
-    Ok(extract_agent_messages_from_lines(lines))
+    Ok(agent_messages_from_lines(lines))
 }
 
 #[cfg(test)]
@@ -142,7 +122,7 @@ mod tests {
                 .to_string(),
             r#"{"type":"turn.completed"}"#.to_string(),
         ];
-        let result = extract_agent_messages_from_lines(lines);
+        let result = agent_messages_from_lines(lines);
         assert_eq!(result, "first\nsecond");
     }
 
@@ -154,7 +134,7 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"b","type":"agent_message","text":"kept"}}"#
                 .to_string(),
         ];
-        assert_eq!(extract_agent_messages_from_lines(lines), "kept".to_string());
+        assert_eq!(agent_messages_from_lines(lines), "kept".to_string());
     }
 
     #[test]
@@ -165,12 +145,12 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"ok"}}"#
                 .to_string(),
         ];
-        assert_eq!(extract_agent_messages_from_lines(lines), "ok".to_string());
+        assert_eq!(agent_messages_from_lines(lines), "ok".to_string());
     }
 
     #[test]
     fn extract_agent_messages_empty_on_no_items() {
         let lines = vec![r#"{"type":"thread.started","thread_id":"x"}"#.to_string()];
-        assert_eq!(extract_agent_messages_from_lines(lines), "".to_string());
+        assert_eq!(agent_messages_from_lines(lines), "".to_string());
     }
 }
