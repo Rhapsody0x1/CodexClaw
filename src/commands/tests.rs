@@ -398,7 +398,7 @@ async fn help_output_is_fully_localized() {
     let cases = [
         Case {
             lang: "en",
-            help_command: "/help",
+            help_command: "/help all",
             title: "# Command Guide",
             headings: &[
                 "## Basic Commands",
@@ -410,7 +410,7 @@ async fn help_output_is_fully_localized() {
         },
         Case {
             lang: "zh",
-            help_command: "/帮助",
+            help_command: "/帮助 全部",
             title: "# 命令指南",
             headings: &["## 基础命令", "## 模型设置命令", "## 会话管理命令"],
             commands: &["`/模型`", "`/压缩`"],
@@ -428,9 +428,9 @@ async fn help_output_is_fully_localized() {
             lang_reply.text
         );
 
-        // Both the canonical `/help` and the localized alias must render
-        // the same localized guide.
-        for command in ["/help", case.help_command] {
+        // Both the canonical `/help all` and the localized alias must
+        // render the same localized full guide.
+        for command in ["/help all", case.help_command] {
             let reply = env.reply(command).await;
             assert!(
                 reply.text.starts_with(case.title),
@@ -884,7 +884,7 @@ async fn help_groups_commands_in_requested_order() {
     let env = TestEnv::with_default_model("gpt-5.4").await;
     env.set_lang("zh").await;
 
-    let reply = env.reply("/帮助").await;
+    let reply = env.reply("/帮助 全部").await;
 
     assert_ordered(
         "sections",

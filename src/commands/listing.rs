@@ -1,6 +1,9 @@
 use super::*;
 
-use crate::util::{path::fmt_path, time::fmt_relative_or};
+use crate::util::{
+    path::fmt_path,
+    time::{fmt_relative, fmt_relative_or},
+};
 
 pub(super) use crate::util::text::format_tokens_compact;
 
@@ -18,14 +21,18 @@ pub(super) fn build_status_text(
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
     is_busy: bool,
+    display_tz: chrono_tz::Tz,
+    shared_workspace: &std::path::Path,
+    disk_meta: &std::collections::HashMap<String, (Option<DateTime<Utc>>, Option<String>)>,
 ) -> String {
     let effective = state.effective_settings();
     let lang = state.settings.language.as_str();
+    let now = Utc::now();
     let mut lines: Vec<String> = Vec::new();
     lines.push(
         t!(
             "commands.status.workspace",
-            dir = state.foreground.workspace_dir.display().to_string(),
+            dir = fmt_path(&state.foreground.workspace_dir, shared_workspace, lang),
             locale = lang
         )
         .into_owned(),
@@ -50,21 +57,6 @@ pub(super) fn build_status_text(
         .into_owned(),
     );
     lines.push(context_usage_line(state, runtime_profile, lang));
-    if state.background.is_empty() {
-        lines.push(t!("commands.status.bg_none", locale = lang).into_owned());
-    } else {
-        lines.push(
-            t!(
-                "commands.status.bg_header",
-                count = state.background.len(),
-                locale = lang
-            )
-            .into_owned(),
-        );
-        for alias in state.background.keys() {
-            lines.push(format!("  - {alias}"));
-        }
-    }
     lines.push(
         t!(
             if is_busy {
@@ -76,7 +68,71 @@ pub(super) fn build_status_text(
         )
         .into_owned(),
     );
-    lines.push(t!("commands.status.lang", lang = lang, locale = lang).into_owned());
+    if state.background.is_empty() {
+        lines.push(t!("commands.status.bg_none", locale = lang).into_owned());
+    } else {
+        lines.push(
+            t!(
+                "commands.status.bg_header",
+                count = state.background.len(),
+                locale = lang
+            )
+            .into_owned(),
+        );
+        // Most recently parked first — the same order /stop restores and
+        // bare /fg returns to, so row 1 is always "where /fg goes".
+        let mut index = 0usize;
+        for alias in state.background_order.iter().rev() {
+            let Some(dialog) = state.background.get(alias) else {
+                continue;
+            };
+            index += 1;
+            let mut meta = Vec::new();
+            let time = dialog
+                .last_usage
+                .as_ref()
+                .map(|usage| usage.updated_at)
+                .or_else(|| {
+                    dialog
+                        .session_id
+                        .as_deref()
+                        .and_then(|id| disk_meta.get(id))
+                        .and_then(|(updated, _)| *updated)
+                });
+            if let Some(time) = time {
+                meta.push(fmt_relative(time, now, display_tz, lang));
+            }
+            if let Some(summary) = dialog
+                .session_id
+                .as_deref()
+                .and_then(|id| disk_meta.get(id))
+                .and_then(|(_, title)| title.as_deref())
+            {
+                meta.push(single_line(summary, 16));
+            }
+            let meta = if meta.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", meta.join(" · "))
+            };
+            lines.push(format!("{index}. {alias}{meta}"));
+        }
+    }
+    lines.push(
+        t!(
+            "commands.status.lang",
+            lang = t!(
+                if lang.starts_with("zh") {
+                    "commands.lang.name_zh"
+                } else {
+                    "commands.lang.name_en"
+                },
+                locale = lang
+            ),
+            locale = lang
+        )
+        .into_owned(),
+    );
     lines.join("\n")
 }
 
@@ -570,8 +626,11 @@ pub(super) fn resolve_selector(
     }
 }
 
-pub(super) fn help_text(lang: &str) -> String {
+pub(super) fn help_text(lang: &str, full: bool) -> String {
     let lang = normalize_lang(lang);
+    if !full {
+        return t!("commands.help.compact", locale = lang).into_owned();
+    }
     let lines = vec![
         t!("commands.help.header", locale = lang).into_owned(),
         String::new(),

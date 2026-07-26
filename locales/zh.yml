@@ -10,6 +10,31 @@ time:
   tomorrow_at: "明天 %{time}"
 commands:
   help:
+    compact: |-
+      🤖 命令指南
+
+      💬 对话
+      `/新建` · `/停止` · `/中断`
+      `/后台` · `/前台` · `/会话`
+
+      ⚙️ 设置
+      `/模型` · `/思考` · `/上下文`
+      `/快速` · `/详细` · `/语言`
+
+      ✅ 审批与计划
+      `/审批` · `/同意` · `/拒绝` · `/取消`
+      `/计划` · `/实施` · `/继续规划`
+
+      ⏰ 定时任务
+      `/定时 list` · `rm` · `run-now` · `tail`
+      直接说"每天 8 点提醒我…"也可以
+
+      📦 更多
+      `/压缩` `/保存` `/恢复` `/导入`
+      `/载入后台` `/重命名` `/别名` `/状态`
+
+      命令不带参数可看用法
+      `/帮助 全部` 查看完整说明
     header: "# 命令指南"
     section_basic: "## 基础命令"
     section_model_settings: "## 模型设置命令"
@@ -43,7 +68,7 @@ commands:
     entry_execute_plan: "- ✅ `/实施`：开始执行计划"
     entry_keep_planning: "- 📝 `/继续规划`：继续打磨计划"
     entry_cancel_plan: "- 🗑️ `/取消计划`：丢弃当前待执行计划"
-    entry_cron: "- ⏰ `/定时 list|pause|resume|rm|run-now|tail`：管理定时任务"
+    entry_cron: "- ⏰ `/定时`：管理定时任务（可用编号操作）"
     entry_approve: "- 👍 `/同意`：放行当前的审批请求"
     entry_approve_session: "- 🔓 `/同意本会话`：在本次会话中放行同类命令"
     entry_deny: "- 👎 `/拒绝`：拒绝当前的审批请求"
@@ -241,6 +266,8 @@ commands:
     page_footer: "输入会话编号导入，或 `/返回` 退出。"
 
   lang:
+    name_zh: "中文"
+    name_en: "English"
     updated: "语言已切换为：%{lang}"
     status: "当前语言：%{lang}"
     unsupported: "不支持的语言 `%{lang}`。可选：en, zh"

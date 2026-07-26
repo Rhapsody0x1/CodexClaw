@@ -10,6 +10,31 @@ time:
   tomorrow_at: "tomorrow %{time}"
 commands:
   help:
+    compact: |-
+      🤖 Command guide
+
+      💬 Conversations
+      `/new` · `/stop` · `/interrupt`
+      `/bg` · `/fg` · `/sessions`
+
+      ⚙️ Settings
+      `/model` · `/reasoning` · `/context`
+      `/fast` · `/verbose` · `/lang`
+
+      ✅ Approvals & plans
+      `/approvals` · `/approve` · `/deny` · `/cancel`
+      `/plan` · `/execute-plan` · `/keep-planning`
+
+      ⏰ Scheduled tasks
+      `/cron list` · `rm` · `run-now` · `tail`
+      Or just say "remind me every day at 8"
+
+      📦 More
+      `/compact` `/save` `/resume` `/import`
+      `/loadbg` `/rename` `/alias` `/status`
+
+      Bare commands show their usage
+      `/help all` for the full guide
     header: "# Command Guide"
     section_basic: "## Basic Commands"
     section_model_settings: "## Model Settings"
@@ -43,7 +68,7 @@ commands:
     entry_execute_plan: "- ✅ `/execute-plan` - approve the pending plan and start executing"
     entry_keep_planning: "- 📝 `/keep-planning` - stay in Plan mode and refine the plan"
     entry_cancel_plan: "- 🗑️ `/cancel-plan` - discard the pending plan"
-    entry_cron: "- ⏰ `/cron list|pause|resume|rm|run-now|tail` - manage scheduled tasks"
+    entry_cron: "- ⏰ `/cron`: manage scheduled tasks (rows by number)"
     entry_approve: "- 👍 `/approve` - approve the current pending approval (once)"
     entry_approve_session: "- 🔓 `/approve-session` - auto-approve similar commands for this session"
     entry_deny: "- 👎 `/deny` - decline the current approval request"
@@ -241,6 +266,8 @@ commands:
     page_footer: "Type a session number to import, or `/back` to exit."
 
   lang:
+    name_zh: "中文"
+    name_en: "English"
     updated: "language updated to: %{lang}"
     status: "current language: %{lang}"
     unsupported: "unsupported language `%{lang}`. Supported: en, zh"

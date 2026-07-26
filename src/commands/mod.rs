@@ -13,10 +13,7 @@ use crate::{
             ServiceTier, UserSessionState,
         },
     },
-    util::{
-        lang::{is_supported_lang, normalize_lang},
-        time::fmt_rfc3339_or,
-    },
+    util::lang::{is_supported_lang, normalize_lang},
 };
 
 mod alias;
@@ -238,7 +235,12 @@ fn maybe_handle_command_inner<'a>(
         }
 
         let outcome_result: Result<CommandOutcome> = match command.as_str() {
-            "/help" => Ok(CommandOutcome::reply(help_text(&lang_string))),
+            "/help" => {
+                let full = rest
+                    .first()
+                    .is_some_and(|arg| matches!(*arg, "all" | "full" | "全部" | "完整"));
+                Ok(CommandOutcome::reply(help_text(&lang_string, full)))
+            }
             "/lang" => handle_lang(&rest, ctx).await,
             "/model" => handle_model(&rest, ctx).await,
             "/fast" => handle_fast(&rest, ctx).await,
@@ -259,12 +261,31 @@ fn maybe_handle_command_inner<'a>(
                 "commands.resume.no_recovery",
                 locale,
             )),
-            "/status" => Ok(CommandOutcome::reply(build_status_text(
-                &session.snapshot_for_user(openid).await?,
-                default_model,
-                runtime_profile,
-                is_busy,
-            ))),
+            "/status" => {
+                let snapshot = session.snapshot_for_user(openid).await?;
+                // Pre-fetch disk metadata so background rows can show when a
+                // parked dialog was last touched and what it was about.
+                let disk_meta = if snapshot.background.is_empty() {
+                    std::collections::HashMap::new()
+                } else {
+                    session
+                        .list_disk_sessions(crate::session::SessionListScope::All)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|meta| (meta.id.clone(), (meta.updated_at, meta.title)))
+                        .collect()
+                };
+                Ok(CommandOutcome::reply(build_status_text(
+                    &snapshot,
+                    default_model,
+                    runtime_profile,
+                    is_busy,
+                    ctx.display_tz,
+                    session.attachment_workspace_dir(),
+                    &disk_meta,
+                )))
+            }
             "/sessions" => handle_sessions(&rest, ctx).await,
             "/import" => handle_import(&rest, ctx).await,
             "/new" => {
