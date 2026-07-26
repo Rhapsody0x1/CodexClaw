@@ -4344,6 +4344,25 @@ mod tests {
         }
     }
 
+    /// Assert every needle occurs in `text` and that they occur in the listed
+    /// order. Panics name the offending needle so a failure is locatable.
+    #[track_caller]
+    fn assert_ordered(group: &str, text: &str, needles: &[&str]) {
+        let mut previous: Option<(&str, usize)> = None;
+        for needle in needles {
+            let at = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{group}: missing {needle}"));
+            if let Some((before, before_at)) = previous {
+                assert!(
+                    before_at < at,
+                    "{group}: {before} must come before {needle}"
+                );
+            }
+            previous = Some((needle, at));
+        }
+    }
+
     #[tokio::test]
     async fn resume_recovery_retry_enters_retry_outcome_and_clears_pending() {
         let env = TestEnv::new().await;
@@ -4584,40 +4603,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lang_switch_affects_help_output() {
-        let env = TestEnv::new().await;
+    async fn help_output_is_fully_localized() {
+        // Headings, command names and the `/help` alias itself must all follow
+        // the active language, with no leakage from the other one.
+        struct Case {
+            lang: &'static str,
+            help_command: &'static str,
+            title: &'static str,
+            headings: &'static [&'static str],
+            commands: &'static [&'static str],
+            absent_commands: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                lang: "en",
+                help_command: "/help",
+                title: "# Command Guide",
+                headings: &[
+                    "## Basic Commands",
+                    "## Model Settings",
+                    "## Session Management",
+                ],
+                commands: &["`/model`", "`/compact`"],
+                absent_commands: &["`/模型`", "`/压缩`"],
+            },
+            Case {
+                lang: "zh",
+                help_command: "/帮助",
+                title: "# 命令指南",
+                headings: &["## 基础命令", "## 模型设置命令", "## 会话管理命令"],
+                commands: &["`/模型`", "`/压缩`"],
+                absent_commands: &["`/model`", "`/compact`"],
+            },
+        ];
 
-        // Default (en) help
-        let reply = env.reply("/help").await;
-        assert!(reply.text.starts_with("# Command Guide"));
-        assert!(reply.text.contains("## Basic Commands"));
-        assert!(reply.text.contains("## Model Settings"));
-        assert!(reply.text.contains("## Session Management"));
+        for case in cases {
+            let env = TestEnv::new().await;
+            let lang_reply = env.reply(&format!("/lang {}", case.lang)).await;
+            assert!(
+                lang_reply.text.contains(case.lang),
+                "case: {} — /lang reply did not confirm the language: {}",
+                case.lang,
+                lang_reply.text
+            );
 
-        // Switch to zh, verify Chinese
-        let reply = env.reply("/lang zh").await;
-        assert!(reply.text.contains("zh"));
-
-        // Chinese command alias: /帮助
-        let reply = env.reply("/帮助").await;
-        assert!(reply.text.starts_with("# 命令指南"));
-        assert!(reply.text.contains("## 基础命令"));
-        assert!(reply.text.contains("## 模型设置命令"));
-        assert!(reply.text.contains("## 会话管理命令"));
+            // Both the canonical `/help` and the localized alias must render
+            // the same localized guide.
+            for command in ["/help", case.help_command] {
+                let reply = env.reply(command).await;
+                assert!(
+                    reply.text.starts_with(case.title),
+                    "case: {} via {command} — unexpected title: {}",
+                    case.lang,
+                    reply.text
+                );
+                for heading in case.headings {
+                    assert!(
+                        reply.text.contains(heading),
+                        "case: {} via {command} — missing heading {heading}",
+                        case.lang
+                    );
+                }
+                for name in case.commands {
+                    assert!(
+                        reply.text.contains(name),
+                        "case: {} via {command} — missing command {name}",
+                        case.lang
+                    );
+                }
+                for name in case.absent_commands {
+                    assert!(
+                        !reply.text.contains(name),
+                        "case: {} via {command} — leaked other-language command {name}",
+                        case.lang
+                    );
+                }
+            }
+        }
     }
 
+    const EXPERT_ALIAS: &str = "/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on";
+
     #[tokio::test]
-    async fn alias_add_and_expand_executes_each_step() {
+    async fn alias_add_stores_every_step() {
         let env = TestEnv::new().await;
 
-        let reply = env
-            .reply("/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on")
-            .await;
+        let reply = env.reply(EXPERT_ALIAS).await;
         assert!(reply.text.contains("expert"));
 
         let aliases = env.session.list_command_aliases(USER).await.unwrap();
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].commands.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn alias_expansion_executes_each_step() {
+        let env = TestEnv::new().await;
+        let _ = env.run(EXPERT_ALIAS).await;
 
         env.session
             .set_foreground_session_id(USER, Some("thread-1".into()))
@@ -4633,20 +4715,27 @@ mod tests {
             .unwrap();
 
         let reply = env.reply("/expert").await;
-        // verbose step should have flipped user state
+
         let snapshot = env.snapshot().await;
         let profile = snapshot.foreground.profile.expect("saved dialog profile");
-        assert!(snapshot.settings.verbose);
+        assert!(snapshot.settings.verbose, "the /verbose step must apply");
         assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::Xhigh));
         assert_eq!(profile.model_override.as_deref(), Some("gpt-5.4"));
         assert!(reply.text.contains("expert"));
+    }
 
-        // Protected name rejected
-        let reply = env.reply("/alias add help /status").await;
-        assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
+    #[tokio::test]
+    async fn alias_add_rejects_built_in_command_names() {
+        let env = TestEnv::new().await;
 
-        let reply = env.reply("/alias add compact /status").await;
-        assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
+        for name in ["help", "compact"] {
+            let reply = env.reply(&format!("/alias add {name} /status")).await;
+            assert!(
+                reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"),
+                "case: {name} — unexpected reply: {}",
+                reply.text
+            );
+        }
     }
 
     #[tokio::test]
@@ -4787,20 +4876,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn back_exits_pending_and_reports_idle_otherwise() {
+    async fn back_when_idle_reports_no_interactive_setting() {
         let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        // idle /back → "not in any interactive setting"
         let reply = env.reply("/back").await;
-        assert!(
-            reply.text.to_lowercase().contains("not currently") || reply.text.contains("当前没有")
-        );
 
-        // Enter reasoning pending, then /back exits it.
+        assert!(
+            reply.text.to_lowercase().contains("not currently") || reply.text.contains("当前没有"),
+            "unexpected idle /back reply: {}",
+            reply.text
+        );
+    }
+
+    #[tokio::test]
+    async fn back_exits_the_pending_setting_and_names_it() {
+        let env = TestEnv::with_default_model("gpt-5.4").await;
         let _ = env.run("/reasoning").await;
         assert!(env.snapshot().await.pending_setting.is_some());
 
         let reply = env.reply("/back").await;
+
         assert!(reply.text.contains("/reasoning"));
         assert!(env.snapshot().await.pending_setting.is_none());
     }
@@ -4860,22 +4955,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chinese_command_aliases_route_correctly() {
+    async fn chinese_model_alias_enters_the_same_pending_as_model() {
         let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        // /模型 should enter the same interactive Model pending as /model.
         let outcome = env.run("/模型").await;
+
         assert!(matches!(outcome, CommandOutcome::Reply(_)));
         assert!(matches!(
             env.snapshot().await.pending_setting,
             Some(PendingSetting::Model)
         ));
+    }
 
+    #[tokio::test]
+    async fn chinese_back_alias_clears_pending_and_names_the_chinese_command() {
+        let env = TestEnv::with_default_model("gpt-5.4").await;
         let _ = env.run("/语言 zh").await;
         let _ = env.run("/模型").await;
 
-        // /返回 clears.
         let reply = env.reply("/返回").await;
+
         assert!(reply.text.contains("/模型"));
         assert!(!reply.text.contains("/model"));
         assert!(env.snapshot().await.pending_setting.is_none());
@@ -4975,104 +5074,54 @@ mod tests {
 
         let reply = env.reply("/帮助").await;
 
-        let model_section = reply
-            .text
-            .find("## 模型设置命令")
-            .expect("missing model settings section");
-        let approval_section = reply
-            .text
-            .find("## 审批设置命令")
-            .expect("missing approval settings section");
-        let session_section = reply
-            .text
-            .find("## 会话管理命令")
-            .expect("missing session management section");
-        let advanced_section = reply
-            .text
-            .find("## 高级命令")
-            .expect("missing advanced section");
-        let model_index = reply.text.find("`/模型`").expect("missing /模型");
-        let reasoning_index = reply.text.find("`/思考`").expect("missing /思考");
-        let fast_index = reply.text.find("`/快速`").expect("missing /快速");
-        let context_index = reply.text.find("`/上下文`").expect("missing /上下文");
-        let approvals_index = reply.text.find("`/审批`").expect("missing /审批");
-        let plan_index = reply.text.find("`/计划`").expect("missing /计划");
-        let execute_plan_index = reply.text.find("`/实施`").expect("missing /实施");
-        let keep_planning_index = reply.text.find("`/继续规划`").expect("missing /继续规划");
-        let cancel_plan_index = reply.text.find("`/取消计划`").expect("missing /取消计划");
-        let approve_index = reply.text.find("`/同意`").expect("missing /同意");
-        let approve_session_index = reply
-            .text
-            .find("`/同意本会话`")
-            .expect("missing /同意本会话");
-        let deny_index = reply.text.find("`/拒绝`").expect("missing /拒绝");
-        let cancel_index = reply.text.find("`/取消`").expect("missing /取消");
-        let sessions_index = reply.text.find("`/会话`").expect("missing /会话");
-        let import_index = reply.text.find("`/导入`").expect("missing /导入");
-        let resume_index = reply.text.find("`/恢复`").expect("missing /恢复");
-        let save_index = reply.text.find("`/保存`").expect("missing /保存");
-        let fg_index = reply.text.find("`/前台`").expect("missing /前台");
-        let bg_index = reply.text.find("`/后台`").expect("missing /后台");
-        let loadbg_index = reply.text.find("`/载入后台`").expect("missing /载入后台");
-        let rename_index = reply.text.find("`/重命名`").expect("missing /重命名");
-        let alias_index = reply.text.find("`/别名`").expect("missing /别名");
-        let verbose_index = reply.text.find("`/详细`").expect("missing /详细");
-        let compact_index = reply.text.find("`/压缩`").expect("missing /压缩");
-        let self_update_index = reply.text.find("`/自更新`").expect("missing /自更新");
-
-        assert!(
-            model_section < approval_section
-                && approval_section < session_section
-                && session_section < advanced_section
+        assert_ordered(
+            "sections",
+            &reply.text,
+            &[
+                "## 模型设置命令",
+                "## 审批设置命令",
+                "## 会话管理命令",
+                "## 高级命令",
+            ],
         );
-        assert!(
-            model_index < reasoning_index
-                && reasoning_index < fast_index
-                && fast_index < context_index
+        assert_ordered(
+            "model settings",
+            &reply.text,
+            &["`/模型`", "`/思考`", "`/快速`", "`/上下文`"],
         );
-        assert!(
-            approvals_index < plan_index
-                && plan_index < execute_plan_index
-                && execute_plan_index < keep_planning_index
-                && keep_planning_index < cancel_plan_index
-                && cancel_plan_index < approve_index
-                && approve_index < approve_session_index
-                && approve_session_index < deny_index
-                && deny_index < cancel_index
+        assert_ordered(
+            "approval settings",
+            &reply.text,
+            &[
+                "`/审批`",
+                "`/计划`",
+                "`/实施`",
+                "`/继续规划`",
+                "`/取消计划`",
+                "`/同意`",
+                "`/同意本会话`",
+                "`/拒绝`",
+                "`/取消`",
+            ],
         );
-        assert!(
-            sessions_index < import_index
-                && import_index < resume_index
-                && resume_index < save_index
+        assert_ordered(
+            "session management",
+            &reply.text,
+            &["`/会话`", "`/导入`", "`/恢复`", "`/保存`"],
         );
-        assert!(
-            compact_index < fg_index
-                && fg_index < bg_index
-                && bg_index < loadbg_index
-                && loadbg_index < rename_index
-                && rename_index < alias_index
-                && alias_index < verbose_index
-                && verbose_index < self_update_index
+        assert_ordered(
+            "advanced",
+            &reply.text,
+            &[
+                "`/压缩`",
+                "`/前台`",
+                "`/后台`",
+                "`/载入后台`",
+                "`/重命名`",
+                "`/别名`",
+                "`/详细`",
+                "`/自更新`",
+            ],
         );
-    }
-
-    #[tokio::test]
-    async fn help_entry_rendered_in_active_language_only() {
-        let env = TestEnv::with_default_model("gpt-5.4").await;
-
-        // English: /help should show English command names, no Chinese.
-        let reply = env.reply("/help").await;
-        assert!(reply.text.contains("`/model`"));
-        assert!(!reply.text.contains("`/模型`"));
-        assert!(reply.text.contains("`/compact`"));
-        assert!(!reply.text.contains("`/压缩`"));
-
-        // Switch to zh and the same /help should mirror the behavior.
-        let _ = env.run("/lang zh").await;
-        let reply = env.reply("/help").await;
-        assert!(reply.text.contains("`/模型`"));
-        assert!(!reply.text.contains("`/model`"));
-        assert!(reply.text.contains("`/压缩`"));
-        assert!(!reply.text.contains("`/compact`"));
     }
 }
