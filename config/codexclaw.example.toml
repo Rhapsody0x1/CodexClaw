@@ -1,4 +1,5 @@
 [general]
+# timezone = "Asia/Shanghai"   # IANA tz for user-facing timestamps
 data_dir = "~/.codex-claw/data"
 system_codex_home = "~/.codex"
 codex_home_global = "~/.codex-claw/.codex"
