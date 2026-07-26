@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::dialogs::Dialogs;
 use super::jobs_file;
-use crate::model::cron::CronJob;
+use crate::model::cron::{CronJob, JobAction, SessionStrategy};
 use crate::session::rollout::{
     cache_imported_profile, copy_session_index_entry, copy_session_rollout,
     dialog_from_disk_session, extract_session_profile, insert_prefer_recent, prune_session_files,
@@ -835,8 +835,46 @@ impl SessionStore {
             Ok(by_id.into_values().collect::<Vec<_>>())
         })
         .await??;
+        self.retain_listable_cron_sessions(&mut values).await?;
         values.sort_by_key(|value| std::cmp::Reverse(value.updated_at));
         Ok(values)
+    }
+
+    /// Cron jobs run in `data/cron-jobs/<job_id>/workspace`, and every
+    /// per-invocation run leaves its own rollout — without a filter a daily
+    /// job manufactures one `/sessions` row per day. Only sessions belonging
+    /// to a *persistent* CodexTurn job stay listed: that strategy keeps one
+    /// resumable thread across runs, which is exactly the "worth replaying"
+    /// case (e.g. a daily exercise dialog). Sessions of removed or
+    /// per-invocation jobs are hidden; `/cron tail` remains their home.
+    async fn retain_listable_cron_sessions(&self, values: &mut Vec<DiskSessionMeta>) -> Result<()> {
+        let cron_root = DataLayout::new(self.data_dir()).cron_jobs_dir();
+        if !values
+            .iter()
+            .any(|session| session.cwd.starts_with(&cron_root))
+        {
+            return Ok(());
+        }
+        let jobs = self.read_cron_jobs_from_disk().await?;
+        values.retain(|session| {
+            let Ok(relative) = session.cwd.strip_prefix(&cron_root) else {
+                return true;
+            };
+            let Some(job_id) = relative.components().next() else {
+                return true;
+            };
+            let job_id = job_id.as_os_str().to_string_lossy();
+            jobs.get(job_id.as_ref()).is_some_and(|job| {
+                matches!(
+                    &job.action,
+                    JobAction::CodexTurn {
+                        session_strategy: SessionStrategy::Persistent,
+                        ..
+                    }
+                )
+            })
+        });
+        Ok(())
     }
 
     pub(crate) fn list_importable_sessions(&self) -> Result<Vec<DiskSessionMeta>> {
@@ -1426,6 +1464,68 @@ mod tests {
         assert!(
             snapshot.foreground.session_id.is_none(),
             "the reset foreground must stay unbound"
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_sessions_listed_only_for_persistent_jobs() {
+        use crate::model::cron::{JobAction, SessionStrategy, fixtures::shell_job};
+
+        let env = TestEnv::new().await;
+        let cron_root = env.store.data_dir().join("cron-jobs");
+        for (job_id, thread) in [("job-per", "thread-per"), ("job-persist", "thread-persist")] {
+            let cwd = cron_root.join(job_id).join("workspace");
+            env.write_rollout(
+                &format!("rollout-2026-07-26T00-00-00-{thread}.jsonl"),
+                &format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\",\"timestamp\":\"2026-07-26T00:00:00Z\",\"cwd\":\"{}\"}}}}\n",
+                    cwd.display()
+                ),
+            )
+            .await;
+        }
+        let mut per = shell_job(
+            "job-per",
+            cron_root.join("job-per/workspace"),
+            chrono::Utc::now(),
+        );
+        per.action = JobAction::CodexTurn {
+            prompt: "p".into(),
+            model: None,
+            session_state: None,
+            approval_policy: None,
+            session_strategy: SessionStrategy::PerInvocation,
+            interactive: None,
+        };
+        env.store.upsert_cron_job(per).await.unwrap();
+        let mut persist = shell_job(
+            "job-persist",
+            cron_root.join("job-persist/workspace"),
+            chrono::Utc::now(),
+        );
+        persist.action = JobAction::CodexTurn {
+            prompt: "p".into(),
+            model: None,
+            session_state: None,
+            approval_policy: None,
+            session_strategy: SessionStrategy::Persistent,
+            interactive: None,
+        };
+        env.store.upsert_cron_job(persist).await.unwrap();
+
+        let sessions = env
+            .store
+            .list_disk_sessions(SessionListScope::All)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(&"thread-persist"),
+            "persistent job sessions are worth resuming: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"thread-per"),
+            "per-invocation cron runs must not pollute /sessions: {ids:?}"
         );
     }
 
