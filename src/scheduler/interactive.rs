@@ -98,24 +98,7 @@ pub(crate) async fn prepare_foreground(
         )
         .into_owned()
     };
-    if let Err(err) = app
-        .qq_client
-        .send_markdown_proactive(&job.owner_openid, &banner)
-        .await
-    {
-        super::store::queue_pending_delivery(
-            &app.config.general.data_dir,
-            &job.owner_openid,
-            &super::store::PendingDelivery {
-                job_id: job.id.clone(),
-                title: job.title.clone(),
-                text: banner,
-                failed_at: Utc::now(),
-                error: err.to_string(),
-            },
-        )
-        .await?;
-    }
+    super::runner::push_or_queue(app, &job.owner_openid, &job.id, &job.title, banner).await?;
     Ok(pending)
 }
 
@@ -264,24 +247,14 @@ pub(crate) async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<
             .into_owned()
         }
     };
-    if let Err(err) = app
-        .qq_client
-        .send_markdown_proactive(&pending.owner_openid, &text)
-        .await
-    {
-        super::store::queue_pending_delivery(
-            &app.config.general.data_dir,
-            &pending.owner_openid,
-            &super::store::PendingDelivery {
-                job_id: pending.job_id.clone(),
-                title: pending.title.clone(),
-                text,
-                failed_at: Utc::now(),
-                error: err.to_string(),
-            },
-        )
-        .await?;
-    }
+    super::runner::push_or_queue(
+        app,
+        &pending.owner_openid,
+        &pending.job_id,
+        &pending.title,
+        text,
+    )
+    .await?;
     Ok(())
 }
 

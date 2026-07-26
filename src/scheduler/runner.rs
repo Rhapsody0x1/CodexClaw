@@ -44,6 +44,30 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
         .is_some_and(|run_now_at| run_now_at <= started_at);
     let timer = Instant::now();
     let max_duration = std::time::Duration::from_secs(app.config.scheduler.max_turn_secs);
+    let outcome = execute_with_retries(&app, &mut job, max_duration, timer).await;
+    let next_run_at = compute_next_run(&job, manual_run)?;
+    let job = commit_run_result(&app, job, &outcome, started_at, manual_run, next_run_at).await?;
+    notify_circuit_breaker(&app, &job, &outcome.status).await;
+    Ok(job)
+}
+
+/// What the attempt loop settled on: the final status plus the material for
+/// the run log.
+struct RetriesOutcome {
+    status: RunStatus,
+    attempt_logs: Vec<String>,
+    output: String,
+}
+
+/// Run the job's action up to `max_attempts` times, retrying transient-looking
+/// failures with exponential backoff (`retry_backoff_secs * 2^(attempt-1)`,
+/// exponent capped at 5).
+async fn execute_with_retries(
+    app: &std::sync::Arc<App>,
+    job: &mut CronJob,
+    max_duration: std::time::Duration,
+    timer: Instant,
+) -> RetriesOutcome {
     let max_attempts = app.config.scheduler.max_attempts.max(1);
     let mut attempt_logs = Vec::new();
     let mut final_output = String::new();
@@ -54,7 +78,7 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
     for attempt in 1..=max_attempts {
         final_attempt = attempt;
         let attempt_started = Utc::now();
-        let result = run_job_inner(app.clone(), &mut job, max_duration).await;
+        let result = run_job_inner(app.clone(), job, max_duration).await;
         match result {
             Ok(output) => {
                 final_output = output;
@@ -68,8 +92,8 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
             }
             Err(err) => {
                 let error = err.to_string();
-                if is_interactive_job(&job) {
-                    super::interactive::finish_job(&app, &job.id, "failed")
+                if is_interactive_job(job) {
+                    super::interactive::finish_job(app, &job.id, "failed")
                         .await
                         .ok();
                 }
@@ -105,20 +129,42 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
             attempt: final_attempt,
         }
     };
+    RetriesOutcome {
+        status,
+        attempt_logs,
+        output: final_output,
+    }
+}
 
-    let next_run_at = if manual_run {
-        job.next_run_at
+/// A manual `run-now` keeps whatever was already scheduled; a scheduled
+/// one-shot is done; a recurring job advances to its next occurrence.
+fn compute_next_run(job: &CronJob, manual_run: bool) -> Result<Option<chrono::DateTime<Utc>>> {
+    if manual_run {
+        Ok(job.next_run_at)
     } else if matches!(job.kind, CronKind::OneShot { .. }) {
-        None
+        Ok(None)
     } else {
-        cron_expr::next_after(&job.kind, Utc::now())?
-    };
+        cron_expr::next_after(&job.kind, Utc::now())
+    }
+}
+
+/// Persist the run's outcome into the job table (counters, failure streak,
+/// circuit breaker, one-shot completion), write the run log, and recycle a
+/// completed scheduled one-shot's files.
+async fn commit_run_result(
+    app: &std::sync::Arc<App>,
+    job: CronJob,
+    outcome: &RetriesOutcome,
+    started_at: chrono::DateTime<Utc>,
+    manual_run: bool,
+    next_run_at: Option<chrono::DateTime<Utc>>,
+) -> Result<CronJob> {
     let scheduled_one_shot_complete = !manual_run && matches!(job.kind, CronKind::OneShot { .. });
     let circuit_breaker_threshold = app.config.scheduler.circuit_breaker_threshold.max(1);
-    let updated = app
+    let job = app
         .session
         .update_cron_job(&job.id, {
-            let status = status.clone();
+            let status = outcome.status.clone();
             let action = job.action.clone();
             move |current| {
                 if let (JobAction::CodexTurn { session_state, .. }, JobAction::CodexTurn { .. }) =
@@ -150,9 +196,14 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
         })
         .await?
         .unwrap_or(job.clone());
-    job = updated;
 
-    let log = format_run_log(&job, started_at, &status, &attempt_logs, &final_output);
+    let log = format_run_log(
+        &job,
+        started_at,
+        &outcome.status,
+        &outcome.attempt_logs,
+        &outcome.output,
+    );
     write_run_log(&job, started_at, &log, app.config.scheduler.runs_retention)
         .await
         .ok();
@@ -165,40 +216,31 @@ pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Resul
         .await
         .ok();
     }
-
-    if matches!(status, RunStatus::Failure { .. })
-        && job.disabled
-        && job.failure_streak >= circuit_breaker_threshold
-    {
-        let lang = app.command_locale(&job.owner_openid).await;
-        let text = t!(
-            "scheduler.failure.disabled",
-            title = job.title.as_str(),
-            count = job.failure_streak,
-            locale = lang.as_str()
-        )
-        .into_owned();
-        if let Err(err) = app
-            .qq_client
-            .send_markdown_proactive(&job.owner_openid, &text)
-            .await
-        {
-            super::store::queue_pending_delivery(
-                &app.config.general.data_dir,
-                &job.owner_openid,
-                &super::store::PendingDelivery {
-                    job_id: job.id.clone(),
-                    title: job.title.clone(),
-                    text,
-                    failed_at: Utc::now(),
-                    error: err.to_string(),
-                },
-            )
-            .await
-            .ok();
-        }
-    }
     Ok(job)
+}
+
+/// If this run's failure tripped the circuit breaker (the commit above just
+/// disabled the job), tell the owner; a failed queue write is swallowed here
+/// because the run result itself is already persisted.
+async fn notify_circuit_breaker(app: &App, job: &CronJob, status: &RunStatus) {
+    let circuit_breaker_threshold = app.config.scheduler.circuit_breaker_threshold.max(1);
+    if !(matches!(status, RunStatus::Failure { .. })
+        && job.disabled
+        && job.failure_streak >= circuit_breaker_threshold)
+    {
+        return;
+    }
+    let lang = app.command_locale(&job.owner_openid).await;
+    let text = t!(
+        "scheduler.failure.disabled",
+        title = job.title.as_str(),
+        count = job.failure_streak,
+        locale = lang.as_str()
+    )
+    .into_owned();
+    push_or_queue(app, &job.owner_openid, &job.id, &job.title, text)
+        .await
+        .ok();
 }
 
 async fn run_job_inner(
@@ -564,27 +606,36 @@ async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
     let Some(text) = payload else {
         return Ok(());
     };
-    match app
-        .qq_client
-        .send_markdown_proactive(&job.owner_openid, &text)
-        .await
-    {
+    push_or_queue(app, &job.owner_openid, &job.id, &job.title, text).await
+}
+
+/// Push `text` to the owner proactively; when the QQ send fails, queue it as a
+/// `PendingDelivery` to be replayed on the user's next turn. The returned
+/// `Result` is the queueing outcome: callers deliberately differ on whether
+/// they propagate it (`?`) or swallow it (`.ok()`).
+pub(crate) async fn push_or_queue(
+    app: &App,
+    openid: &str,
+    job_id: &str,
+    title: &str,
+    text: String,
+) -> Result<()> {
+    match app.qq_client.send_markdown_proactive(openid, &text).await {
         Ok(()) => Ok(()),
         Err(err) => {
             let error = err.to_string();
             super::store::queue_pending_delivery(
                 &app.config.general.data_dir,
-                &job.owner_openid,
+                openid,
                 &super::store::PendingDelivery {
-                    job_id: job.id.clone(),
-                    title: job.title.clone(),
+                    job_id: job_id.to_string(),
+                    title: title.to_string(),
                     text,
                     failed_at: Utc::now(),
                     error,
                 },
             )
-            .await?;
-            Ok(())
+            .await
         }
     }
 }

@@ -110,33 +110,7 @@ impl Scheduler {
         let mut due = match app.session.list_cron_jobs().await {
             Ok(jobs) => jobs
                 .into_iter()
-                .filter(|job| {
-                    if job.run_now_at.is_some_and(|run_now_at| run_now_at <= now) {
-                        return true;
-                    }
-                    if job.disabled {
-                        return false;
-                    }
-                    let next = match job.next_run_at {
-                        Some(next) => Some(next),
-                        // Distinguish a genuine Err from Ok(None): the old code
-                        // swallowed Err via .ok(), so a job with an invalid or
-                        // uncomputable schedule looked enabled but silently
-                        // never ran and never warned. Surface the error instead.
-                        None => match cron_expr::next_after(&job.kind, now) {
-                            Ok(next) => next,
-                            Err(err) => {
-                                warn!(
-                                    job_id = %job.id,
-                                    error = %err,
-                                    "cron job has an invalid schedule and will not run until fixed"
-                                );
-                                None
-                            }
-                        },
-                    };
-                    next.is_some_and(|next| next <= now)
-                })
+                .filter(|job| is_due(job, now))
                 .collect::<Vec<_>>(),
             Err(err) => {
                 warn!(error = %err, "failed to load cron jobs");
@@ -173,5 +147,104 @@ impl Scheduler {
             Ok(job) => info!(job_id = %job.id, "cron job completed"),
             Err(err) => error!(job_id = %job_id, error = %err, "cron job failed"),
         }
+    }
+}
+
+/// Whether the tick loop should fire `job` now: a due `run-now` request always
+/// wins (even on a disabled job); otherwise the job must be enabled with a due
+/// `next_run_at` (computed from the schedule when unset).
+fn is_due(job: &store::CronJob, now: chrono::DateTime<Utc>) -> bool {
+    if job.run_now_at.is_some_and(|run_now_at| run_now_at <= now) {
+        return true;
+    }
+    if job.disabled {
+        return false;
+    }
+    let next = match job.next_run_at {
+        Some(next) => Some(next),
+        // Distinguish a genuine Err from Ok(None): the old code swallowed Err
+        // via .ok(), so a job with an invalid or uncomputable schedule looked
+        // enabled but silently never ran and never warned. Surface the error
+        // instead.
+        None => match cron_expr::next_after(&job.kind, now) {
+            Ok(next) => next,
+            Err(err) => {
+                warn!(
+                    job_id = %job.id,
+                    error = %err,
+                    "cron job has an invalid schedule and will not run until fixed"
+                );
+                None
+            }
+        },
+    };
+    next.is_some_and(|next| next <= now)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+
+    use super::*;
+    use crate::model::cron::fixtures::{shell_job, ts};
+    use crate::scheduler::store::CronKind;
+
+    #[test]
+    fn run_now_fires_even_a_disabled_job() {
+        let now = ts("2026-05-10T10:00:00Z");
+        let mut job = shell_job("job-1", "/tmp".into(), now + Duration::hours(1));
+        job.disabled = true;
+        job.run_now_at = Some(now);
+        assert!(is_due(&job, now));
+
+        // A run-now stamped in the future does not fire yet, and the disabled
+        // job stays parked.
+        job.run_now_at = Some(now + Duration::seconds(1));
+        assert!(!is_due(&job, now));
+    }
+
+    #[test]
+    fn disabled_jobs_are_never_due_without_run_now() {
+        let now = ts("2026-05-10T10:00:00Z");
+        let mut job = shell_job("job-1", "/tmp".into(), now - Duration::hours(1));
+        job.disabled = true;
+        assert!(!is_due(&job, now));
+    }
+
+    #[test]
+    fn next_run_at_decides_when_present() {
+        let now = ts("2026-05-10T10:00:00Z");
+        let mut job = shell_job("job-1", "/tmp".into(), now);
+        job.next_run_at = Some(now);
+        assert!(is_due(&job, now));
+        job.next_run_at = Some(now + Duration::seconds(1));
+        assert!(!is_due(&job, now));
+    }
+
+    #[test]
+    fn one_shot_without_next_run_follows_the_schedule() {
+        let now = ts("2026-05-10T10:00:00Z");
+        // A one-shot whose `at` already passed has no next occurrence: its
+        // single run is spent, so it must not fire again.
+        let mut job = shell_job("job-1", "/tmp".into(), now - Duration::hours(1));
+        job.next_run_at = None;
+        assert!(!is_due(&job, now));
+
+        // One scheduled for later is not due yet either (`at > now`).
+        let mut job = shell_job("job-2", "/tmp".into(), now + Duration::hours(1));
+        job.next_run_at = None;
+        assert!(!is_due(&job, now));
+    }
+
+    #[test]
+    fn invalid_schedule_is_not_due() {
+        let now = ts("2026-05-10T10:00:00Z");
+        let mut job = shell_job("job-1", "/tmp".into(), now);
+        job.kind = CronKind::Recurring {
+            cron: "not a cron".to_string(),
+            tz: "UTC".to_string(),
+        };
+        job.next_run_at = None;
+        assert!(!is_due(&job, now));
     }
 }
