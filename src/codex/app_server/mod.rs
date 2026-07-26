@@ -5,13 +5,13 @@
 //! as independent threads. Exposes [`AppServerHandle`] — the façade used by
 //! `CodexExecutor` — which the existing call sites already speak to.
 
-pub mod approvals;
-pub mod client;
-pub mod events;
-pub mod protocol;
-pub mod session;
-pub mod supervisor;
-pub mod transport;
+pub(crate) mod approvals;
+pub(crate) mod client;
+pub(crate) mod events;
+pub(crate) mod protocol;
+pub(crate) mod session;
+pub(crate) mod supervisor;
+pub(crate) mod transport;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -20,20 +20,22 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::codex::types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate};
 
-pub use approvals::{
-    ApprovalBroker, ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, ElicitationEvent,
+pub use protocol::ClientInfo;
+pub use session::TurnPolicy;
+
+pub(crate) use approvals::{
+    ApprovalBroker, ApprovalOutcome, ApprovalRequest, CommandApprovalEvent,
     FileChangeApprovalEvent, PermissionsApprovalEvent,
 };
-pub use protocol::{ApprovalPolicy, ClientInfo};
-pub use session::{AppServerSession, RuntimeConfigSignature, TurnPolicy};
-pub use supervisor::AppServerSupervisor;
+pub(crate) use session::{AppServerSession, RuntimeConfigSignature};
+pub(crate) use supervisor::AppServerSupervisor;
 
 /// Façade the rest of the project uses: holds the supervisor + broker and
 /// exposes a single `execute` method mirroring the legacy executor contract.
 #[derive(Clone)]
 pub struct AppServerHandle {
-    pub supervisor: Arc<AppServerSupervisor>,
-    pub approvals: Arc<ApprovalBroker>,
+    pub(crate) supervisor: Arc<AppServerSupervisor>,
+    pub(crate) approvals: Arc<ApprovalBroker>,
     runtime_configs: Arc<Mutex<HashMap<String, RuntimeConfigSignature>>>,
 }
 
@@ -69,7 +71,7 @@ impl AppServerHandle {
             .await
     }
 
-    pub async fn compact_thread(
+    pub(crate) async fn compact_thread(
         &self,
         request: CompactRequest,
         cancel_rx: Option<oneshot::Receiver<()>>,

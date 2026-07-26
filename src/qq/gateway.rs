@@ -28,7 +28,7 @@ use crate::{
 /// decoded `C2C_MESSAGE_CREATE` event is forwarded here. The gateway never
 /// awaits the handling of an event, so the consumer must spawn per event to
 /// preserve the original detached-task concurrency.
-pub type C2CEventSender = mpsc::UnboundedSender<C2CMessageEvent>;
+type C2CEventSender = mpsc::UnboundedSender<C2CMessageEvent>;
 
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 /// Floor for the server-provided heartbeat interval. Guards against a zero

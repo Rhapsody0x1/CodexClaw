@@ -30,41 +30,45 @@ const ALIAS_WORDS: &[&str] = &[
     "river", "flint", "atlas", "bloom", "cloud", "maple", "cobalt", "quill", "harbor",
 ];
 
+/// `Local`/`Global` are matched by the list formatters but nothing constructs
+/// them yet — every caller asks for `All`. Kept because the scope is still the
+/// encoding used for the project key on the wire.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionListScope {
+pub(crate) enum SessionListScope {
     All,
     Local,
     Global,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiskSessionMeta {
-    pub id: String,
-    pub cwd: PathBuf,
-    pub title: Option<String>,
-    pub last_user_message: Option<String>,
-    pub updated_at: Option<DateTime<Utc>>,
-    pub origin: DialogOrigin,
-    pub rollout_path: PathBuf,
+pub(crate) struct DiskSessionMeta {
+    pub(crate) id: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) title: Option<String>,
+    pub(crate) last_user_message: Option<String>,
+    pub(crate) updated_at: Option<DateTime<Utc>>,
+    pub(crate) origin: DialogOrigin,
+    pub(crate) rollout_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-pub struct SwitchResult {
-    pub parked_alias: Option<String>,
+pub(crate) struct SwitchResult {
+    pub(crate) parked_alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct StopResult {
-    pub had_session: bool,
-    pub saved: bool,
-    pub dropped_unsaved: bool,
-    pub restored_alias: Option<String>,
+pub(crate) struct StopResult {
+    pub(crate) had_session: bool,
+    pub(crate) saved: bool,
+    pub(crate) dropped_unsaved: bool,
+    pub(crate) restored_alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ImportResult {
-    pub copied: bool,
-    pub profile: ImportedSessionProfile,
+pub(crate) struct ImportResult {
+    pub(crate) copied: bool,
+    pub(crate) profile: ImportedSessionProfile,
 }
 
 pub struct SessionStore {
@@ -139,7 +143,7 @@ impl SessionStore {
     /// lock, without deep-cloning the whole UserSessionState and without the
     /// ensure-user side effect of snapshot_for_user. Returns None for a user
     /// with no session record yet (callers fall back to the default language).
-    pub async fn language_for_user(&self, openid: &str) -> Option<String> {
+    pub(crate) async fn language_for_user(&self, openid: &str) -> Option<String> {
         self.state
             .read()
             .await
@@ -150,7 +154,7 @@ impl SessionStore {
             .map(|user| crate::util::lang::normalize_lang(&user.settings.language).to_string())
     }
 
-    pub async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
+    pub(crate) async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
         if let Some(snapshot) = self.state.read().await.users.get(openid).cloned() {
             return Ok(snapshot);
         }
@@ -161,7 +165,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn update_settings_for_user<F>(
+    pub(crate) async fn update_settings_for_user<F>(
         &self,
         openid: &str,
         mutator: F,
@@ -177,7 +181,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_model_override_for_active(
+    pub(crate) async fn set_model_override_for_active(
         &self,
         openid: &str,
         value: Option<String>,
@@ -204,7 +208,10 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_service_tier_for_active(
+    /// Production currently never changes the service tier per dialog; only the
+    /// settings round-trip test exercises this path.
+    #[allow(dead_code)]
+    pub(crate) async fn set_service_tier_for_active(
         &self,
         openid: &str,
         value: Option<ServiceTier>,
@@ -231,7 +238,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_context_mode_for_active(
+    pub(crate) async fn set_context_mode_for_active(
         &self,
         openid: &str,
         value: Option<ContextMode>,
@@ -258,7 +265,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_reasoning_for_active(
+    pub(crate) async fn set_reasoning_for_active(
         &self,
         openid: &str,
         value: Option<ReasoningEffort>,
@@ -285,7 +292,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn bind_foreground_session_profile(
+    pub(crate) async fn bind_foreground_session_profile(
         &self,
         openid: &str,
         session_id: Option<String>,
@@ -317,7 +324,7 @@ impl SessionStore {
     /// at its dead thread and lose the conversation the user switched to.
     /// Returns whether the binding was applied. The check and the write
     /// happen under one state lock, so no swap can slip in between.
-    pub async fn bind_foreground_session_profile_if_matches(
+    pub(crate) async fn bind_foreground_session_profile_if_matches(
         &self,
         openid: &str,
         expected: &DialogState,
@@ -345,7 +352,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_foreground_session_id(
+    pub(crate) async fn set_foreground_session_id(
         &self,
         openid: &str,
         session_id: Option<String>,
@@ -358,7 +365,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_foreground_usage(
+    pub(crate) async fn set_foreground_usage(
         &self,
         openid: &str,
         usage: TokenUsageSnapshot,
@@ -371,7 +378,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_pending_setting(
+    pub(crate) async fn set_pending_setting(
         &self,
         openid: &str,
         pending: Option<PendingSetting>,
@@ -384,7 +391,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn add_command_alias(
+    pub(crate) async fn add_command_alias(
         &self,
         openid: &str,
         alias: CommandAlias,
@@ -398,7 +405,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn remove_command_alias(&self, openid: &str, name: &str) -> Result<bool> {
+    pub(crate) async fn remove_command_alias(&self, openid: &str, name: &str) -> Result<bool> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             Ok(user.command_aliases.remove(name).is_some())
@@ -406,7 +413,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn get_command_alias(
+    pub(crate) async fn get_command_alias(
         &self,
         openid: &str,
         name: &str,
@@ -418,7 +425,7 @@ impl SessionStore {
             .and_then(|user| user.command_aliases.get(name).cloned()))
     }
 
-    pub async fn list_command_aliases(&self, openid: &str) -> Result<Vec<CommandAlias>> {
+    pub(crate) async fn list_command_aliases(&self, openid: &str) -> Result<Vec<CommandAlias>> {
         let state = self.state.read().await;
         Ok(state
             .users
@@ -427,7 +434,7 @@ impl SessionStore {
             .unwrap_or_default())
     }
 
-    pub async fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
+    pub(crate) async fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
         Ok(self
             .read_cron_jobs_from_disk()
             .await?
@@ -436,11 +443,11 @@ impl SessionStore {
             .collect())
     }
 
-    pub async fn get_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
+    pub(crate) async fn get_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
         Ok(self.read_cron_jobs_from_disk().await?.get(job_id).cloned())
     }
 
-    pub async fn upsert_cron_job(&self, job: CronJob) -> Result<()> {
+    pub(crate) async fn upsert_cron_job(&self, job: CronJob) -> Result<()> {
         self.mutate_cron_jobs_on_disk(move |jobs| {
             jobs.insert(job.id.clone(), job);
             Ok(())
@@ -448,13 +455,17 @@ impl SessionStore {
         .await
     }
 
-    pub async fn remove_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
+    pub(crate) async fn remove_cron_job(&self, job_id: &str) -> Result<Option<CronJob>> {
         let job_id = job_id.to_string();
         self.mutate_cron_jobs_on_disk(move |jobs| Ok(jobs.remove(&job_id)))
             .await
     }
 
-    pub async fn update_cron_job<F>(&self, job_id: &str, updater: F) -> Result<Option<CronJob>>
+    pub(crate) async fn update_cron_job<F>(
+        &self,
+        job_id: &str,
+        updater: F,
+    ) -> Result<Option<CronJob>>
     where
         F: FnOnce(&mut CronJob) -> Result<()> + Send + 'static,
     {
@@ -469,7 +480,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
+    pub(crate) async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
@@ -480,7 +491,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn new_foreground_in_workspace(
+    pub(crate) async fn new_foreground_in_workspace(
         &self,
         openid: &str,
         workspace_dir: &Path,
@@ -496,7 +507,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn move_foreground_to_background(
+    pub(crate) async fn move_foreground_to_background(
         &self,
         openid: &str,
         requested_alias: Option<&str>,
@@ -514,7 +525,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn foreground_from_background(
+    pub(crate) async fn foreground_from_background(
         &self,
         openid: &str,
         alias: &str,
@@ -553,7 +564,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn resume_disk_session(
+    pub(crate) async fn resume_disk_session(
         &self,
         openid: &str,
         target: &DiskSessionMeta,
@@ -596,7 +607,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn load_disk_session_to_background(
+    pub(crate) async fn load_disk_session_to_background(
         &self,
         openid: &str,
         target: &DiskSessionMeta,
@@ -642,7 +653,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn rename_background_alias(
+    pub(crate) async fn rename_background_alias(
         &self,
         openid: &str,
         old_alias: &str,
@@ -664,7 +675,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn save_foreground(&self, openid: &str) -> Result<bool> {
+    pub(crate) async fn save_foreground(&self, openid: &str) -> Result<bool> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             if user.foreground.saved {
@@ -681,7 +692,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn stop_foreground(&self, openid: &str) -> Result<StopResult> {
+    pub(crate) async fn stop_foreground(&self, openid: &str) -> Result<StopResult> {
         let current = self.snapshot_for_user(openid).await?.foreground;
         let had_session = current.session_id.is_some();
         let saved = current.saved;
@@ -758,7 +769,11 @@ impl SessionStore {
         })
     }
 
-    pub async fn set_last_sessions_view(&self, openid: &str, ids: Vec<String>) -> Result<()> {
+    pub(crate) async fn set_last_sessions_view(
+        &self,
+        openid: &str,
+        ids: Vec<String>,
+    ) -> Result<()> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             user.last_sessions_view = ids;
@@ -767,7 +782,11 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_last_projects_view(&self, openid: &str, ids: Vec<String>) -> Result<()> {
+    pub(crate) async fn set_last_projects_view(
+        &self,
+        openid: &str,
+        ids: Vec<String>,
+    ) -> Result<()> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             user.last_projects_view = ids;
@@ -776,7 +795,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_last_import_sessions_view(
+    pub(crate) async fn set_last_import_sessions_view(
         &self,
         openid: &str,
         ids: Vec<String>,
@@ -789,7 +808,7 @@ impl SessionStore {
         .await
     }
 
-    pub async fn set_last_import_projects_view(
+    pub(crate) async fn set_last_import_projects_view(
         &self,
         openid: &str,
         ids: Vec<String>,
@@ -802,29 +821,29 @@ impl SessionStore {
         .await
     }
 
-    pub async fn last_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
+    pub(crate) async fn last_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
         Ok(self.snapshot_for_user(openid).await?.last_sessions_view)
     }
 
-    pub async fn last_projects_view(&self, openid: &str) -> Result<Vec<String>> {
+    pub(crate) async fn last_projects_view(&self, openid: &str) -> Result<Vec<String>> {
         Ok(self.snapshot_for_user(openid).await?.last_projects_view)
     }
 
-    pub async fn last_import_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
+    pub(crate) async fn last_import_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
         Ok(self
             .snapshot_for_user(openid)
             .await?
             .last_import_sessions_view)
     }
 
-    pub async fn last_import_projects_view(&self, openid: &str) -> Result<Vec<String>> {
+    pub(crate) async fn last_import_projects_view(&self, openid: &str) -> Result<Vec<String>> {
         Ok(self
             .snapshot_for_user(openid)
             .await?
             .last_import_projects_view)
     }
 
-    pub async fn list_disk_sessions(
+    pub(crate) async fn list_disk_sessions(
         &self,
         scope: SessionListScope,
     ) -> Result<Vec<DiskSessionMeta>> {
@@ -855,13 +874,16 @@ impl SessionStore {
         Ok(values)
     }
 
-    pub fn list_importable_sessions(&self) -> Result<Vec<DiskSessionMeta>> {
+    pub(crate) fn list_importable_sessions(&self) -> Result<Vec<DiskSessionMeta>> {
         let mut values = scan_home_sessions(&self.system_codex_home)?;
         values.sort_by_key(|value| std::cmp::Reverse(value.updated_at));
         Ok(values)
     }
 
-    pub async fn import_disk_session(&self, target: &DiskSessionMeta) -> Result<ImportResult> {
+    pub(crate) async fn import_disk_session(
+        &self,
+        target: &DiskSessionMeta,
+    ) -> Result<ImportResult> {
         let copied = copy_session_rollout(
             &self.system_codex_home,
             &self.global_codex_home,
@@ -883,7 +905,7 @@ impl SessionStore {
         Ok(ImportResult { copied, profile })
     }
 
-    pub async fn imported_profile_for_session(
+    pub(crate) async fn imported_profile_for_session(
         &self,
         session_id: &str,
     ) -> Result<Option<ImportedSessionProfile>> {
@@ -911,23 +933,23 @@ impl SessionStore {
         Ok(count)
     }
 
-    pub fn codex_home(&self) -> &Path {
+    pub(crate) fn codex_home(&self) -> &Path {
         &self.global_codex_home
     }
 
-    pub fn data_dir(&self) -> &Path {
+    pub(crate) fn data_dir(&self) -> &Path {
         self.root.parent().unwrap_or(&self.root)
     }
 
-    pub fn inbox_dir(&self) -> &Path {
+    pub(crate) fn inbox_dir(&self) -> &Path {
         &self.inbox_dir
     }
 
-    pub fn attachment_workspace_dir(&self) -> &Path {
+    pub(crate) fn attachment_workspace_dir(&self) -> &Path {
         &self.attachment_workspace_dir
     }
 
-    pub fn default_workspace_dir(&self) -> &Path {
+    pub(crate) fn default_workspace_dir(&self) -> &Path {
         &self.default_workspace_dir
     }
 

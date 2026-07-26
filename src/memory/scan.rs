@@ -1,5 +1,5 @@
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ScanError {
+pub(crate) enum ScanError {
     #[error("matched forbidden pattern: {0}")]
     MatchedPattern(String),
 }
@@ -18,7 +18,7 @@ const FORBIDDEN_PATTERNS: &[&str] = &[
     "wget ",
 ];
 
-pub fn threat_scan(content: &str) -> Result<(), ScanError> {
+pub(crate) fn threat_scan(content: &str) -> Result<(), ScanError> {
     let lower = content.to_lowercase();
     for pattern in FORBIDDEN_PATTERNS {
         if lower.contains(pattern) {

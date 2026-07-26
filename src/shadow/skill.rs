@@ -9,7 +9,7 @@ use crate::util::text::extract_json_block;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "snake_case")]
-pub enum SkillResponse {
+pub(crate) enum SkillResponse {
     None,
     Create {
         name: String,
@@ -19,21 +19,21 @@ pub enum SkillResponse {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SkillApplyReport {
-    pub created: Option<std::path::PathBuf>,
-    pub skipped_none: bool,
-    pub skipped_invalid_slug: bool,
-    pub skipped_validation: Option<String>,
-    pub write_error: Option<String>,
+pub(crate) struct SkillApplyReport {
+    pub(crate) created: Option<std::path::PathBuf>,
+    pub(crate) skipped_none: bool,
+    pub(crate) skipped_invalid_slug: bool,
+    pub(crate) skipped_validation: Option<String>,
+    pub(crate) write_error: Option<String>,
 }
 
-pub fn parse_skill_response(raw: &str) -> anyhow::Result<SkillResponse> {
+pub(crate) fn parse_skill_response(raw: &str) -> anyhow::Result<SkillResponse> {
     let cleaned = extract_json_block(raw);
     let parsed = serde_json::from_str::<SkillResponse>(&cleaned)?;
     Ok(parsed)
 }
 
-pub fn skill_threshold_met(ctx: &ShadowContext, cfg: &SkillShadowConfig) -> bool {
+pub(crate) fn skill_threshold_met(ctx: &ShadowContext, cfg: &SkillShadowConfig) -> bool {
     ctx.modified_file_count >= cfg.files_threshold || ctx.tool_call_count >= cfg.tool_threshold
 }
 
@@ -52,7 +52,7 @@ impl Default for SkillShadowConfig {
     }
 }
 
-pub fn apply_skill_response(
+pub(crate) fn apply_skill_response(
     skills_root: &Path,
     index: &SkillIndex,
     response: &SkillResponse,
@@ -92,7 +92,7 @@ pub fn apply_skill_response(
     report
 }
 
-pub fn existing_skill_hints(metas: &[SkillMeta]) -> Vec<(String, String)> {
+pub(crate) fn existing_skill_hints(metas: &[SkillMeta]) -> Vec<(String, String)> {
     metas
         .iter()
         .map(|m| (m.name.clone(), m.description.clone()))

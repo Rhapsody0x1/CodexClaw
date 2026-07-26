@@ -52,7 +52,7 @@ const THREAD_UNLOAD_TIMEOUT: Duration = Duration::from_secs(12);
 /// Track what we last loaded so a session-level `/model`, `/reasoning`, or
 /// `/context` change can force a reload before the next turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeConfigSignature {
+pub(crate) struct RuntimeConfigSignature {
     model: Option<String>,
     reasoning_effort: String,
     context_mode: Option<ContextMode>,
@@ -90,10 +90,10 @@ impl RuntimeConfigSignature {
 /// overrides the config for that turn.
 #[derive(Debug, Clone, Default)]
 pub struct TurnPolicy {
-    pub approval_policy: Option<ApprovalPolicy>,
-    pub approvals_reviewer: Option<ApprovalsReviewer>,
-    pub sandbox_policy: Option<SandboxPolicy>,
-    pub plan_mode: bool,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
+    pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
+    pub(crate) sandbox_policy: Option<SandboxPolicy>,
+    pub(crate) plan_mode: bool,
 }
 
 impl TurnPolicy {
@@ -105,7 +105,7 @@ impl TurnPolicy {
 
     /// Plan mode: read-only sandbox + no approvals (the agent only observes),
     /// with `collaboration_mode = Plan` applied at turn/start.
-    pub fn plan_mode() -> Self {
+    pub(crate) fn plan_mode() -> Self {
         Self {
             approval_policy: Some(ApprovalPolicy::Never),
             approvals_reviewer: None,
@@ -117,7 +117,7 @@ impl TurnPolicy {
     }
 
     /// Explicit approval policy override without touching sandbox.
-    pub fn with_approval_policy(policy: ApprovalPolicy) -> Self {
+    pub(crate) fn with_approval_policy(policy: ApprovalPolicy) -> Self {
         Self {
             approval_policy: Some(policy),
             approvals_reviewer: None,
@@ -126,7 +126,7 @@ impl TurnPolicy {
         }
     }
 
-    pub fn with_approvals_reviewer(reviewer: ApprovalsReviewer) -> Self {
+    pub(crate) fn with_approvals_reviewer(reviewer: ApprovalsReviewer) -> Self {
         Self {
             approval_policy: None,
             approvals_reviewer: Some(reviewer),
@@ -136,13 +136,13 @@ impl TurnPolicy {
     }
 }
 
-pub struct AppServerSession {
+pub(crate) struct AppServerSession {
     supervisor: Arc<AppServerSupervisor>,
     runtime_configs: Arc<Mutex<HashMap<String, RuntimeConfigSignature>>>,
 }
 
 impl AppServerSession {
-    pub fn new(
+    pub(crate) fn new(
         supervisor: Arc<AppServerSupervisor>,
         runtime_configs: Arc<Mutex<HashMap<String, RuntimeConfigSignature>>>,
     ) -> Self {
@@ -154,7 +154,7 @@ impl AppServerSession {
 
     /// Execute one turn against the app-server. Preserves the public contract
     /// of the legacy `CodexExecutor::execute` so callers don't change.
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         request: ExecutionRequest,
         policy: TurnPolicy,
@@ -259,7 +259,7 @@ impl AppServerSession {
         }
     }
 
-    pub async fn compact_thread(
+    pub(crate) async fn compact_thread(
         &self,
         request: CompactRequest,
         cancel_rx: Option<oneshot::Receiver<()>>,

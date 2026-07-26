@@ -11,39 +11,39 @@ use serde::{Deserialize, Serialize};
 use crate::model::settings::{ApprovalPolicySetting, SessionState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CronJob {
-    pub id: String,
-    pub owner_openid: String,
-    pub title: String,
-    pub kind: CronKind,
-    pub action: JobAction,
-    pub workspace_dir: PathBuf,
+pub(crate) struct CronJob {
+    pub(crate) id: String,
+    pub(crate) owner_openid: String,
+    pub(crate) title: String,
+    pub(crate) kind: CronKind,
+    pub(crate) action: JobAction,
+    pub(crate) workspace_dir: PathBuf,
     #[serde(default)]
-    pub deliver: DeliverPolicy,
-    pub created_at: DateTime<Utc>,
-    pub next_run_at: Option<DateTime<Utc>>,
+    pub(crate) deliver: DeliverPolicy,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) next_run_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub run_now_at: Option<DateTime<Utc>>,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub last_run_status: Option<RunStatus>,
+    pub(crate) run_now_at: Option<DateTime<Utc>>,
+    pub(crate) last_run_at: Option<DateTime<Utc>>,
+    pub(crate) last_run_status: Option<RunStatus>,
     #[serde(default)]
-    pub run_count: u64,
+    pub(crate) run_count: u64,
     #[serde(default)]
-    pub failure_streak: u32,
+    pub(crate) failure_streak: u32,
     #[serde(default)]
-    pub disabled: bool,
+    pub(crate) disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-pub enum CronKind {
+pub(crate) enum CronKind {
     Recurring { cron: String, tz: String },
     OneShot { at: DateTime<Utc> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-pub enum JobAction {
+pub(crate) enum JobAction {
     Reminder {
         message: String,
     },
@@ -75,22 +75,22 @@ pub enum JobAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InteractiveSpec {
+pub(crate) struct InteractiveSpec {
     #[serde(default = "default_reply_ttl_secs")]
-    pub reply_ttl_secs: u64,
+    pub(crate) reply_ttl_secs: u64,
     #[serde(default = "default_end_signal")]
-    pub end_signal: String,
+    pub(crate) end_signal: String,
     #[serde(default = "default_max_rounds_hard_cap")]
-    pub max_rounds_hard_cap: u32,
+    pub(crate) max_rounds_hard_cap: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingDelivery {
-    pub job_id: String,
-    pub title: String,
-    pub text: String,
-    pub failed_at: DateTime<Utc>,
-    pub error: String,
+pub(crate) struct PendingDelivery {
+    pub(crate) job_id: String,
+    pub(crate) title: String,
+    pub(crate) text: String,
+    pub(crate) failed_at: DateTime<Utc>,
+    pub(crate) error: String,
 }
 
 impl Default for InteractiveSpec {
@@ -117,7 +117,7 @@ fn default_max_rounds_hard_cap() -> u32 {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum SessionStrategy {
+pub(crate) enum SessionStrategy {
     #[default]
     PerInvocation,
     Persistent,
@@ -125,7 +125,7 @@ pub enum SessionStrategy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-pub enum DeliverPolicy {
+pub(crate) enum DeliverPolicy {
     #[default]
     PushToOwner,
     /// Part of the on-disk `jobs.json` format. The CLI has no flag that
@@ -143,7 +143,7 @@ pub enum DeliverPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-pub enum RunStatus {
+pub(crate) enum RunStatus {
     Success {
         duration_ms: u64,
         output_chars: usize,

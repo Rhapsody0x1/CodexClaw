@@ -13,13 +13,13 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolEventPhase {
+pub(crate) enum ToolEventPhase {
     Started,
     Updated,
     Completed,
 }
 
-pub fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<String> {
+pub(crate) fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<String> {
     match item.item_type.as_str() {
         "command_execution" if phase == ToolEventPhase::Started => item
             .command
@@ -188,7 +188,7 @@ fn format_patch_changes(changes: &[FileUpdateChange]) -> String {
         .join(", ")
 }
 
-pub fn format_todo_items(items: &[TodoEntry]) -> String {
+pub(crate) fn format_todo_items(items: &[TodoEntry]) -> String {
     items
         .iter()
         .take(6)

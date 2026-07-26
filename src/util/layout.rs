@@ -6,7 +6,7 @@
 //! duplicated between the foreground and cron paths with nothing to keep the
 //! two copies in sync.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct DataLayout {
@@ -20,51 +20,54 @@ impl DataLayout {
         }
     }
 
-    pub fn root(&self) -> &Path {
+    /// Only the tests need the bare root back out; every production caller goes
+    /// through one of the named accessors below.
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
     }
 
     /// Session state, shared workspace and attachment inbox.
-    pub fn session_dir(&self) -> PathBuf {
+    pub(crate) fn session_dir(&self) -> PathBuf {
         self.root.join("session")
     }
 
-    pub fn session_state_file(&self) -> PathBuf {
+    pub(crate) fn session_state_file(&self) -> PathBuf {
         self.session_dir().join("state.json")
     }
 
     /// Pre-multi-user settings file, still read once on first start-up.
-    pub fn legacy_settings_file(&self) -> PathBuf {
+    pub(crate) fn legacy_settings_file(&self) -> PathBuf {
         self.session_dir().join("main").join("settings.json")
     }
 
-    pub fn shared_workspace_dir(&self) -> PathBuf {
+    pub(crate) fn shared_workspace_dir(&self) -> PathBuf {
         self.session_dir().join("workspace")
     }
 
     /// Scheduler bookkeeping: the job table and queued deliveries.
-    pub fn scheduler_dir(&self) -> PathBuf {
+    fn scheduler_dir(&self) -> PathBuf {
         self.root.join("scheduler")
     }
 
-    pub fn cron_jobs_file(&self) -> PathBuf {
+    pub(crate) fn cron_jobs_file(&self) -> PathBuf {
         self.scheduler_dir().join("jobs.json")
     }
 
-    pub fn pending_deliveries_dir(&self) -> PathBuf {
+    pub(crate) fn pending_deliveries_dir(&self) -> PathBuf {
         self.scheduler_dir().join("pending-deliveries")
     }
 
     /// Per-job working directories.
-    pub fn cron_jobs_dir(&self) -> PathBuf {
+    pub(crate) fn cron_jobs_dir(&self) -> PathBuf {
         self.root.join("cron-jobs")
     }
 
-    pub fn cron_job_dir(&self, id: &str) -> PathBuf {
+    pub(crate) fn cron_job_dir(&self, id: &str) -> PathBuf {
         self.cron_jobs_dir().join(id)
     }
 
-    pub fn cron_jobs_trash_dir(&self) -> PathBuf {
+    pub(crate) fn cron_jobs_trash_dir(&self) -> PathBuf {
         self.root.join("cron-jobs-trash")
     }
 
@@ -76,23 +79,19 @@ impl DataLayout {
         self.root.join("shadow-workspace")
     }
 
-    pub fn codex_sqlite_dir(&self) -> PathBuf {
-        self.root.join("codex-sqlite")
-    }
-
-    pub fn qq_dir(&self) -> PathBuf {
+    pub(crate) fn qq_dir(&self) -> PathBuf {
         self.root.join("qq")
     }
 
-    pub fn gateway_session_file(&self) -> PathBuf {
+    pub(crate) fn gateway_session_file(&self) -> PathBuf {
         self.qq_dir().join("gateway-session.json")
     }
 
-    pub fn self_update_dir(&self) -> PathBuf {
+    fn self_update_dir(&self) -> PathBuf {
         self.root.join("self-update")
     }
 
-    pub fn last_build_file(&self) -> PathBuf {
+    pub(crate) fn last_build_file(&self) -> PathBuf {
         self.self_update_dir().join("last-build.json")
     }
 
@@ -100,7 +99,7 @@ impl DataLayout {
     /// workspace, so a turn can read its session state and reach the cron job
     /// tree. Shared by the foreground and the scheduler paths: adding a
     /// directory here reaches both.
-    pub fn turn_add_dirs(&self) -> Vec<PathBuf> {
+    pub(crate) fn turn_add_dirs(&self) -> Vec<PathBuf> {
         vec![
             self.session_dir(),
             self.cron_jobs_dir(),
@@ -111,6 +110,8 @@ impl DataLayout {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -148,7 +149,6 @@ mod tests {
             layout.shadow_workspace_dir(),
             Path::new("/data/shadow-workspace")
         );
-        assert_eq!(layout.codex_sqlite_dir(), Path::new("/data/codex-sqlite"));
         assert_eq!(
             layout.gateway_session_file(),
             Path::new("/data/qq/gateway-session.json")

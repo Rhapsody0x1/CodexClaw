@@ -4,12 +4,12 @@ use crate::memory::store::{AddState, MemoryKind, MemoryStore};
 use crate::util::text::extract_json_block;
 
 #[derive(Debug, Clone)]
-pub struct ShadowContext {
-    pub openid: String,
-    pub last_user_text: String,
-    pub last_assistant_text: String,
-    pub tool_call_count: usize,
-    pub modified_file_count: usize,
+pub(crate) struct ShadowContext {
+    pub(crate) openid: String,
+    pub(crate) last_user_text: String,
+    pub(crate) last_assistant_text: String,
+    pub(crate) tool_call_count: usize,
+    pub(crate) modified_file_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -31,44 +31,44 @@ impl Default for ShadowConfig {
     }
 }
 
-pub fn memory_threshold_met(ctx: &ShadowContext, cfg: &ShadowConfig) -> bool {
+pub(crate) fn memory_threshold_met(ctx: &ShadowContext, cfg: &ShadowConfig) -> bool {
     ctx.tool_call_count >= 1
         || ctx.modified_file_count >= 1
         || ctx.last_user_text.chars().count() >= cfg.min_user_msg_chars
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ApplyReport {
-    pub added: usize,
-    pub duplicate: usize,
-    pub rejected: usize,
-    pub over_budget: usize,
-    pub too_long: usize,
-    pub empty: usize,
-    pub non_add_actions: usize,
+pub(crate) struct ApplyReport {
+    pub(crate) added: usize,
+    pub(crate) duplicate: usize,
+    pub(crate) rejected: usize,
+    pub(crate) over_budget: usize,
+    pub(crate) too_long: usize,
+    pub(crate) empty: usize,
+    pub(crate) non_add_actions: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct DistillEntry {
-    pub action: String,
-    pub content: String,
+pub(crate) struct DistillEntry {
+    pub(crate) action: String,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
-pub struct DistillResponse {
+pub(crate) struct DistillResponse {
     #[serde(default)]
-    pub memory: Vec<DistillEntry>,
+    pub(crate) memory: Vec<DistillEntry>,
     #[serde(default)]
-    pub user: Vec<DistillEntry>,
+    pub(crate) user: Vec<DistillEntry>,
 }
 
-pub fn parse_memory_response(raw: &str) -> anyhow::Result<DistillResponse> {
+pub(crate) fn parse_memory_response(raw: &str) -> anyhow::Result<DistillResponse> {
     let cleaned = extract_json_block(raw);
     let parsed = serde_json::from_str::<DistillResponse>(&cleaned)?;
     Ok(parsed)
 }
 
-pub fn apply_memory_response(
+pub(crate) fn apply_memory_response(
     store: &MemoryStore,
     openid: &str,
     response: &DistillResponse,

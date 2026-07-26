@@ -7,18 +7,18 @@ use std::path::{Path, PathBuf};
 use shlex::split;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedOutput {
-    pub text: String,
-    pub directives: Vec<Directive>,
+pub(crate) struct ParsedOutput {
+    pub(crate) text: String,
+    pub(crate) directives: Vec<Directive>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Directive {
+pub(crate) enum Directive {
     Image { path: PathBuf },
     File { path: PathBuf, name: Option<String> },
 }
 
-pub fn parse_output(raw: &str, workspace_dir: &Path) -> ParsedOutput {
+pub(crate) fn parse_output(raw: &str, workspace_dir: &Path) -> ParsedOutput {
     let Some(start) = raw.rfind("```qqbot") else {
         return ParsedOutput {
             text: raw.trim().to_string(),

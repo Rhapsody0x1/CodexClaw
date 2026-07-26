@@ -25,7 +25,7 @@ const CHANNEL_CAP: usize = 1024;
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
-pub struct AppServerSupervisor {
+pub(crate) struct AppServerSupervisor {
     codex_binary: PathBuf,
     codex_home: PathBuf,
     sqlite_home: PathBuf,
@@ -39,7 +39,7 @@ pub struct AppServerSupervisor {
 }
 
 impl AppServerSupervisor {
-    pub fn new(
+    pub(crate) fn new(
         codex_binary: PathBuf,
         codex_home: PathBuf,
         sqlite_home: PathBuf,
@@ -64,7 +64,7 @@ impl AppServerSupervisor {
 
     /// Launch the supervisor loop. Spawns the child, performs `initialize`,
     /// and kicks off a background task that respawns on EOF.
-    pub async fn start(self: &Arc<Self>) -> Result<()> {
+    pub(crate) async fn start(self: &Arc<Self>) -> Result<()> {
         let (client, exit_rx) = self.spawn_and_initialize().await?;
         *self.client.write().await = Some(client);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -174,7 +174,7 @@ impl AppServerSupervisor {
         Ok((client, exit_rx))
     }
 
-    pub async fn client(&self) -> Result<Arc<JsonRpcClient>> {
+    pub(crate) async fn client(&self) -> Result<Arc<JsonRpcClient>> {
         self.client
             .read()
             .await
@@ -182,17 +182,19 @@ impl AppServerSupervisor {
             .context("app-server client not ready")
     }
 
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<Notification> {
+    pub(crate) fn subscribe_notifications(&self) -> broadcast::Receiver<Notification> {
         self.notifications_tx.subscribe()
     }
 
     /// Take the single receiver for server-initiated requests. Should only be
     /// called by the `ApprovalBroker` at startup.
-    pub async fn take_server_request_receiver(&self) -> Option<mpsc::Receiver<ServerRequest>> {
+    pub(crate) async fn take_server_request_receiver(
+        &self,
+    ) -> Option<mpsc::Receiver<ServerRequest>> {
         self.server_requests_rx.lock().await.take()
     }
 
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }

@@ -8,14 +8,14 @@ use std::{
 
 /// The user's home directory, falling back to `/root` — the container image the
 /// bot ships in runs as root without `HOME` set in some launchers.
-pub fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/root"))
 }
 
 /// Append `dir` unless it is already present, preserving first-seen order.
-pub(crate) fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     if !dirs.iter().any(|existing| existing == &dir) {
         dirs.push(dir);
     }

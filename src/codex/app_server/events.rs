@@ -25,17 +25,17 @@ use super::protocol::{
 /// State accumulated across a single turn so we can reconstruct aggregated
 /// outputs and decide what to emit.
 #[derive(Debug, Default)]
-pub struct TurnState {
-    pub thread_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub agent_text_parts: Vec<String>,
-    pub changed_files: Vec<std::path::PathBuf>,
-    pub token_usage: Option<TokenUsagePayload>,
-    pub last_plan_signature: Option<String>,
+pub(crate) struct TurnState {
+    pub(crate) thread_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) agent_text_parts: Vec<String>,
+    pub(crate) changed_files: Vec<std::path::PathBuf>,
+    pub(crate) token_usage: Option<TokenUsagePayload>,
+    pub(crate) last_plan_signature: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub enum TurnOutcome {
+pub(crate) enum TurnOutcome {
     Completed,
     Failed(String),
     Interrupted,
@@ -45,7 +45,7 @@ pub enum TurnOutcome {
 // Public translator entry points
 // ---------------------------------------------------------------------------
 
-pub fn translate_item_started(
+pub(crate) fn translate_item_started(
     state: &mut TurnState,
     notif: &ItemNotification,
 ) -> Vec<ExecutionUpdate> {
@@ -63,7 +63,7 @@ pub fn translate_item_started(
     }
 }
 
-pub fn translate_item_updated(
+pub(crate) fn translate_item_updated(
     _state: &mut TurnState,
     notif: &ItemNotification,
 ) -> Vec<ExecutionUpdate> {
@@ -75,7 +75,7 @@ pub fn translate_item_updated(
     }
 }
 
-pub fn translate_item_completed(
+pub(crate) fn translate_item_completed(
     state: &mut TurnState,
     notif: &ItemNotification,
 ) -> Vec<ExecutionUpdate> {
@@ -104,7 +104,7 @@ pub fn translate_item_completed(
     }
 }
 
-pub fn translate_turn_plan_updated(
+pub(crate) fn translate_turn_plan_updated(
     state: &mut TurnState,
     notif: &TurnPlanUpdatedNotification,
 ) -> Vec<ExecutionUpdate> {
@@ -127,14 +127,17 @@ pub fn translate_turn_plan_updated(
     }]
 }
 
-pub fn translate_token_usage(
+pub(crate) fn translate_token_usage(
     state: &mut TurnState,
     notif: &super::protocol::TokenUsageUpdatedNotification,
 ) {
     state.token_usage = Some(notif.token_usage.clone());
 }
 
-pub fn translate_turn_completed(_state: &mut TurnState, turn: &TurnCompleted) -> TurnOutcome {
+pub(crate) fn translate_turn_completed(
+    _state: &mut TurnState,
+    turn: &TurnCompleted,
+) -> TurnOutcome {
     let status = turn.status.as_str();
     match status {
         "completed" => TurnOutcome::Completed,
@@ -150,7 +153,7 @@ pub fn translate_turn_completed(_state: &mut TurnState, turn: &TurnCompleted) ->
     }
 }
 
-pub fn translate_error_notification(error: &JsonValue, will_retry: bool) -> TurnOutcome {
+pub(crate) fn translate_error_notification(error: &JsonValue, will_retry: bool) -> TurnOutcome {
     if will_retry {
         return TurnOutcome::Completed;
     }
@@ -162,7 +165,7 @@ pub fn translate_error_notification(error: &JsonValue, will_retry: bool) -> Turn
     TurnOutcome::Failed(message)
 }
 
-pub fn translate_model_rerouted(
+pub(crate) fn translate_model_rerouted(
     notif: &super::protocol::ModelReroutedNotification,
 ) -> Option<ExecutionUpdate> {
     let to_model = notif.to_model.as_deref()?;
@@ -171,7 +174,7 @@ pub fn translate_model_rerouted(
     })
 }
 
-pub fn translate_compacted(
+pub(crate) fn translate_compacted(
     _state: &mut TurnState,
     _notif: &super::protocol::CompactedNotification,
 ) -> ExecutionUpdate {

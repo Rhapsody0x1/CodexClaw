@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use super::protocol::{JsonRpcError, Message};
 
-pub struct StdioTransport {
+pub(crate) struct StdioTransport {
     /// Held by the writer side.
     stdin: Mutex<ChildStdin>,
     stdout: Mutex<Option<BufReader<ChildStdout>>>,
@@ -27,7 +27,7 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     /// Spawn `codex app-server --listen stdio://` with the given environment.
-    pub fn spawn(
+    pub(crate) fn spawn(
         codex_binary: &std::path::Path,
         codex_home: &std::path::Path,
         sqlite_home: &std::path::Path,
@@ -60,19 +60,19 @@ impl StdioTransport {
         })
     }
 
-    pub async fn take_stdout(&self) -> Option<BufReader<ChildStdout>> {
+    pub(crate) async fn take_stdout(&self) -> Option<BufReader<ChildStdout>> {
         self.stdout.lock().await.take()
     }
 
-    pub async fn take_stderr(&self) -> Option<ChildStderr> {
+    pub(crate) async fn take_stderr(&self) -> Option<ChildStderr> {
         self.stderr.lock().await.take()
     }
 
-    pub async fn take_child(&self) -> Option<Child> {
+    pub(crate) async fn take_child(&self) -> Option<Child> {
         self.child.lock().await.take()
     }
 
-    pub async fn write_message(&self, value: serde_json::Value) -> Result<()> {
+    pub(crate) async fn write_message(&self, value: serde_json::Value) -> Result<()> {
         let mut line = serde_json::to_vec(&value).context("serialize JSON-RPC message")?;
         line.push(b'\n');
         let mut stdin = self.stdin.lock().await;
@@ -83,7 +83,7 @@ impl StdioTransport {
 }
 
 /// Try to parse a single stdout line into a `Message`.
-pub fn parse_line(line: &str) -> Result<Message, ParseError> {
+fn parse_line(line: &str) -> Result<Message, ParseError> {
     let value: serde_json::Value = serde_json::from_str(line).map_err(ParseError::Invalid)?;
     let obj = value.as_object().ok_or(ParseError::NotObject)?;
     let method = obj
@@ -127,7 +127,7 @@ pub fn parse_line(line: &str) -> Result<Message, ParseError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ParseError {
+pub(crate) enum ParseError {
     #[error("invalid JSON: {0}")]
     Invalid(serde_json::Error),
     #[error("message not a JSON object")]
@@ -140,7 +140,7 @@ pub enum ParseError {
 
 /// Spawn a task that reads stdout line-by-line and invokes `handler` for each
 /// parsed message. Returns when EOF is reached or the handler errors.
-pub fn spawn_reader<F>(
+pub(crate) fn spawn_reader<F>(
     reader: BufReader<ChildStdout>,
     mut handler: F,
 ) -> tokio::task::JoinHandle<()>
@@ -172,7 +172,7 @@ where
 }
 
 /// Spawn a task that drains stderr into tracing (one line per record).
-pub fn spawn_stderr_logger(stderr: ChildStderr) -> tokio::task::JoinHandle<()> {
+pub(crate) fn spawn_stderr_logger(stderr: ChildStderr) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {

@@ -46,11 +46,11 @@ const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
 
 pub struct App {
     pub config: AppConfig,
-    pub session: Arc<SessionStore>,
+    pub(crate) session: Arc<SessionStore>,
     pub qq_client: Arc<QqApiClient>,
     pub codex: Arc<CodexExecutor>,
-    pub memory: Arc<MemoryStore>,
-    pub shadow: Option<Arc<ShadowWorker>>,
+    pub(crate) memory: Arc<MemoryStore>,
+    pub(crate) shadow: Option<Arc<ShadowWorker>>,
     busy: AtomicBool,
     active_turn: Mutex<Option<oneshot::Sender<()>>>,
     /// The QQ openid whose turn currently holds `busy`. Used to route
@@ -1513,7 +1513,7 @@ fn summarize_file_changes(payload: &serde_json::Value) -> String {
 
 /// Pull a `<proposed_plan>...</proposed_plan>` block out of a plan-mode turn's
 /// final output. Tolerates extra whitespace and unwrapped code fences.
-pub fn extract_proposed_plan(text: &str) -> Option<String> {
+pub(crate) fn extract_proposed_plan(text: &str) -> Option<String> {
     const OPEN: &str = "<proposed_plan>";
     const CLOSE: &str = "</proposed_plan>";
     let start = text.find(OPEN)? + OPEN.len();
@@ -1528,7 +1528,7 @@ pub fn extract_proposed_plan(text: &str) -> Option<String> {
 
 /// Follow-up QQ prompt shown after a plan-mode turn emits a `<proposed_plan>`
 /// block.
-pub fn build_plan_followup_prompt(lang: &str) -> String {
+pub(crate) fn build_plan_followup_prompt(lang: &str) -> String {
     let zh = lang.starts_with("zh");
     if zh {
         "Codex 已生成执行计划。接下来请选择：\n\
@@ -1671,7 +1671,8 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use crate::codex::{TokenUsage, TokenUsageInfo};
+    use crate::codex::TokenUsageInfo;
+    use crate::codex::events::TokenUsage;
     use crate::qq::{MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 

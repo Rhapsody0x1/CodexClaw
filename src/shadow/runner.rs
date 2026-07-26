@@ -9,17 +9,17 @@ use tokio::{
 
 use crate::codex::agent_messages_from_lines;
 
-pub struct OneshotConfig<'a> {
-    pub codex_binary: &'a str,
-    pub workspace_dir: &'a Path,
-    pub codex_home: &'a Path,
-    pub model: Option<&'a str>,
-    pub reasoning: Option<&'a str>,
-    pub prompt: &'a str,
-    pub deadline: Duration,
+pub(crate) struct OneshotConfig<'a> {
+    pub(crate) codex_binary: &'a str,
+    pub(crate) workspace_dir: &'a Path,
+    pub(crate) codex_home: &'a Path,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) reasoning: Option<&'a str>,
+    pub(crate) prompt: &'a str,
+    pub(crate) deadline: Duration,
 }
 
-pub async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
+pub(crate) async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
     let mut cmd = Command::new(cfg.codex_binary);
     cmd.arg("exec")
         .arg("--sandbox")

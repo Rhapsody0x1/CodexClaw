@@ -1,6 +1,6 @@
 use crate::memory::store::Snapshot;
 
-pub fn render(snapshot: &Snapshot) -> Option<String> {
+pub(crate) fn render(snapshot: &Snapshot) -> Option<String> {
     if snapshot.memory.is_empty() && snapshot.user.is_empty() {
         return None;
     }

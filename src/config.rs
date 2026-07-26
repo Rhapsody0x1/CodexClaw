@@ -215,7 +215,7 @@ impl AppConfig {
         Self::load_from_path(&path)
     }
 
-    pub fn load_from_path(path: &Path) -> Result<Self> {
+    fn load_from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file at {}", path.display()))?;
         let config = toml::from_str::<Self>(&raw)
@@ -224,7 +224,7 @@ impl AppConfig {
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             !self.qq.app_id.trim().is_empty(),
             "qq.app_id must not be empty"
@@ -239,6 +239,56 @@ impl AppConfig {
         );
         Ok(())
     }
+
+    /// Turn every configured path into an existing absolute path: expand `~`,
+    /// resolve against the current directory, create the parent and
+    /// canonicalize. `self_binary_path` is special-cased because a relative
+    /// value there is meant to be read against `self_repo_dir`, not the cwd.
+    pub async fn normalize_paths(&mut self) -> Result<()> {
+        self.general.data_dir = normalize_path(self.general.data_dir.clone()).await?;
+        self.general.codex_home_global =
+            normalize_path(self.general.codex_home_global.clone()).await?;
+        self.general.system_codex_home =
+            normalize_path(self.general.system_codex_home.clone()).await?;
+        self.general.default_workspace_dir =
+            normalize_path(self.general.default_workspace_dir.clone()).await?;
+        self.general.self_repo_dir = normalize_path(self.general.self_repo_dir.clone()).await?;
+        self.general.self_binary_path = if self.general.self_binary_path.is_absolute() {
+            self.general.self_binary_path.clone()
+        } else {
+            normalize_path(
+                self.general
+                    .self_repo_dir
+                    .join(&self.general.self_binary_path),
+            )
+            .await?
+        };
+        Ok(())
+    }
+}
+
+async fn normalize_path(path: PathBuf) -> Result<PathBuf> {
+    let expanded = expand_tilde(path);
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()?.join(expanded)
+    };
+    tokio::fs::create_dir_all(absolute.parent().unwrap_or_else(|| Path::new(".")))
+        .await
+        .ok();
+    std::fs::canonicalize(&absolute).or(Ok(absolute))
+}
+
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    path
 }
 
 fn default_data_dir() -> PathBuf {

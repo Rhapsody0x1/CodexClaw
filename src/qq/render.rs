@@ -24,17 +24,17 @@ struct ToolSummary {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PassiveDispatchReport {
-    pub sent_replies: usize,
-    pub saw_agent_message: bool,
-    pub tool_call_count: usize,
+pub(crate) struct PassiveDispatchReport {
+    pub(crate) sent_replies: usize,
+    pub(crate) saw_agent_message: bool,
+    pub(crate) tool_call_count: usize,
     /// The turn's codex thread id, captured from the update stream as soon as
     /// the thread is established — available even when the turn is interrupted
     /// or fails before completing, so the caller can still persist it.
-    pub session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
 }
 
-pub struct PassiveTurnEmitter {
+pub(crate) struct PassiveTurnEmitter {
     qq_client: Arc<QqApiClient>,
     openid: String,
     message_id: String,
@@ -49,7 +49,7 @@ pub struct PassiveTurnEmitter {
 }
 
 impl PassiveTurnEmitter {
-    pub fn new(
+    pub(crate) fn new(
         qq_client: Arc<QqApiClient>,
         openid: String,
         message_id: String,
@@ -71,7 +71,7 @@ impl PassiveTurnEmitter {
         }
     }
 
-    pub fn with_strip_signal(mut self, signal: Option<String>) -> Self {
+    pub(crate) fn with_strip_signal(mut self, signal: Option<String>) -> Self {
         self.strip_signal = signal;
         self
     }
@@ -81,7 +81,7 @@ impl PassiveTurnEmitter {
     /// SessionStarted, needed to persist an interrupted turn). The first send
     /// error is returned alongside; after it, remaining updates are still
     /// drained for their state but nothing more is sent.
-    pub async fn run(
+    pub(crate) async fn run(
         mut self,
         mut updates: mpsc::UnboundedReceiver<ExecutionUpdate>,
     ) -> (PassiveDispatchReport, Option<anyhow::Error>) {

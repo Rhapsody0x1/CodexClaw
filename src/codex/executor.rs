@@ -1,9 +1,4 @@
-use std::{
-    env,
-    ffi::OsString,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{env, ffi::OsString, path::Path, sync::Arc};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
@@ -17,23 +12,17 @@ use crate::{
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
     model::settings::ApprovalPolicySetting,
-    util::{layout::DataLayout, path::search_path_dirs},
+    util::path::search_path_dirs,
 };
 
 #[derive(Clone)]
 pub struct CodexExecutor {
-    pub binary: PathBuf,
-    pub sqlite_home: PathBuf,
     handle: Arc<AppServerHandle>,
 }
 
 impl CodexExecutor {
-    pub fn new(binary: String, data_dir: PathBuf, handle: Arc<AppServerHandle>) -> Self {
-        Self {
-            binary: PathBuf::from(binary),
-            sqlite_home: DataLayout::new(data_dir).codex_sqlite_dir(),
-            handle,
-        }
+    pub fn new(handle: Arc<AppServerHandle>) -> Self {
+        Self { handle }
     }
 
     pub fn handle(&self) -> Arc<AppServerHandle> {
@@ -43,7 +32,7 @@ impl CodexExecutor {
     /// Execute one turn against the shared app-server. Chooses a per-turn
     /// [`TurnPolicy`] from the current session settings (plan mode + approval
     /// policy override).
-    pub async fn execute(
+    pub(crate) async fn execute(
         &self,
         request: ExecutionRequest,
         cancel_rx: Option<oneshot::Receiver<()>>,
@@ -55,7 +44,7 @@ impl CodexExecutor {
             .await
     }
 
-    pub async fn compact_session(
+    pub(crate) async fn compact_session(
         &self,
         request: CompactRequest,
         cancel_rx: Option<oneshot::Receiver<()>>,
@@ -75,7 +64,7 @@ impl CodexExecutor {
 /// We only override when:
 /// - plan mode is active → force `ReadOnly` + `Never` approvals + Plan collab;
 /// - the user explicitly set an approval override via `/approvals`.
-pub fn build_turn_policy(request: &ExecutionRequest) -> TurnPolicy {
+fn build_turn_policy(request: &ExecutionRequest) -> TurnPolicy {
     if request.session_state.settings.plan_mode {
         return TurnPolicy::plan_mode();
     }

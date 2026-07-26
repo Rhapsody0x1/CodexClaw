@@ -6,6 +6,15 @@
 //!
 //! Field names and enum tagging match the wire format emitted by the installed
 //! `codex app-server` binary (verified empirically with `/tmp/codex-probe`).
+//!
+//! `dead_code` is allowed for the whole module on purpose. These types are a
+//! transcription of somebody else's schema, so their shape is dictated by the
+//! wire format rather than by what this crate happens to read today: response
+//! fields we do not consume still document what the server sends, and request
+//! fields must stay even when nothing sets them, because dropping one changes
+//! the JSON we emit. Types that are *entirely* unreferenced are still deleted —
+//! the allow covers reserved fields and variants, not orphaned definitions.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -19,7 +28,7 @@ use serde_json::Value as JsonValue;
 /// The app-server omits the `jsonrpc` field from responses/notifications and
 /// accepts messages with or without it, so we serialize it as optional.
 #[derive(Debug, Clone)]
-pub enum Message {
+pub(crate) enum Message {
     /// Client → server (or server → client) request expecting a response.
     Request {
         id: JsonValue,
@@ -36,11 +45,11 @@ pub enum Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcError {
-    pub code: i64,
-    pub message: String,
+pub(crate) struct JsonRpcError {
+    pub(crate) code: i64,
+    pub(crate) message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<JsonValue>,
+    pub(crate) data: Option<JsonValue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,10 +58,10 @@ pub struct JsonRpcError {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InitializeParams {
-    pub client_info: ClientInfo,
+pub(crate) struct InitializeParams {
+    pub(crate) client_info: ClientInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<InitializeCapabilities>,
+    pub(crate) capabilities: Option<InitializeCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,22 +74,22 @@ pub struct ClientInfo {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InitializeCapabilities {
+pub(crate) struct InitializeCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub experimental_api: Option<bool>,
+    pub(crate) experimental_api: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct InitializeResponse {
+pub(crate) struct InitializeResponse {
     #[serde(default)]
-    pub user_agent: Option<String>,
+    pub(crate) user_agent: Option<String>,
     #[serde(default)]
-    pub codex_home: Option<String>,
+    pub(crate) codex_home: Option<String>,
     #[serde(default)]
-    pub platform_family: Option<String>,
+    pub(crate) platform_family: Option<String>,
     #[serde(default)]
-    pub platform_os: Option<String>,
+    pub(crate) platform_os: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,84 +98,84 @@ pub struct InitializeResponse {
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadStartParams {
+pub(crate) struct ThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval_policy: Option<ApprovalPolicy>,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<SandboxMode>,
+    pub(crate) sandbox: Option<SandboxMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<String>,
+    pub(crate) permissions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_workspace_roots: Option<Vec<String>>,
+    pub(crate) runtime_workspace_roots: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<Option<String>>,
+    pub(crate) service_tier: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config: HashMap<String, JsonValue>,
+    pub(crate) config: HashMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadStartResponse {
-    pub thread: Thread,
+pub(crate) struct ThreadStartResponse {
+    pub(crate) thread: Thread,
     #[serde(default)]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub approval_policy: Option<ApprovalPolicy>,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadResumeParams {
-    pub thread_id: String,
+pub(crate) struct ThreadResumeParams {
+    pub(crate) thread_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval_policy: Option<ApprovalPolicy>,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<SandboxMode>,
+    pub(crate) sandbox: Option<SandboxMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<String>,
+    pub(crate) permissions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_workspace_roots: Option<Vec<String>>,
+    pub(crate) runtime_workspace_roots: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<Option<String>>,
+    pub(crate) service_tier: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config: HashMap<String, JsonValue>,
+    pub(crate) config: HashMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadResumeResponse {
-    pub thread: Thread,
+pub(crate) struct ThreadResumeResponse {
+    pub(crate) thread: Thread,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadUnsubscribeParams {
-    pub thread_id: String,
+pub(crate) struct ThreadUnsubscribeParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadUnsubscribeResponse {
-    pub status: ThreadUnsubscribeStatus,
+pub(crate) struct ThreadUnsubscribeResponse {
+    pub(crate) status: ThreadUnsubscribeStatus,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ThreadUnsubscribeStatus {
+pub(crate) enum ThreadUnsubscribeStatus {
     NotLoaded,
     NotSubscribed,
     Unsubscribed,
@@ -174,76 +183,76 @@ pub enum ThreadUnsubscribeStatus {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Thread {
-    pub id: String,
+pub(crate) struct Thread {
+    pub(crate) id: String,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub ephemeral: bool,
+    pub(crate) ephemeral: bool,
     #[serde(default)]
-    pub path: Option<String>,
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnStartParams {
-    pub thread_id: String,
-    pub input: Vec<TurnInputItem>,
+pub(crate) struct TurnStartParams {
+    pub(crate) thread_id: String,
+    pub(crate) input: Vec<TurnInputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval_policy: Option<ApprovalPolicy>,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_policy: Option<SandboxPolicy>,
+    pub(crate) sandbox_policy: Option<SandboxPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<String>,
+    pub(crate) permissions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_workspace_roots: Option<Vec<String>>,
+    pub(crate) runtime_workspace_roots: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub(crate) effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<Option<String>>,
+    pub(crate) service_tier: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub collaboration_mode: Option<CollaborationMode>,
+    pub(crate) collaboration_mode: Option<CollaborationMode>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum TurnInputItem {
+pub(crate) enum TurnInputItem {
     Text { text: String },
     LocalImage { path: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnStartResponse {
-    pub turn: Turn,
+pub(crate) struct TurnStartResponse {
+    pub(crate) turn: Turn,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct Turn {
-    pub id: String,
+pub(crate) struct Turn {
+    pub(crate) id: String,
     #[serde(default)]
-    pub status: Option<String>,
+    pub(crate) status: Option<String>,
     #[serde(default)]
-    pub error: Option<JsonValue>,
+    pub(crate) error: Option<JsonValue>,
     #[serde(default)]
-    pub duration_ms: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnInterruptParams {
-    pub thread_id: String,
+pub(crate) struct TurnInterruptParams {
+    pub(crate) thread_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct TurnInterruptResponse {}
+pub(crate) struct TurnInterruptResponse {}
 
 // ---------------------------------------------------------------------------
 // Approval & sandbox
@@ -251,7 +260,7 @@ pub struct TurnInterruptResponse {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum ApprovalPolicy {
+pub(crate) enum ApprovalPolicy {
     #[serde(rename = "untrusted")]
     UnlessTrusted,
     OnFailure,
@@ -260,7 +269,7 @@ pub enum ApprovalPolicy {
 }
 
 impl ApprovalPolicy {
-    pub fn as_wire_str(self) -> &'static str {
+    fn as_wire_str(self) -> &'static str {
         match self {
             ApprovalPolicy::UnlessTrusted => "untrusted",
             ApprovalPolicy::OnFailure => "on-failure",
@@ -272,7 +281,7 @@ impl ApprovalPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ApprovalsReviewer {
+pub(crate) enum ApprovalsReviewer {
     User,
     AutoReview,
     GuardianSubagent,
@@ -280,7 +289,7 @@ pub enum ApprovalsReviewer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SandboxMode {
+pub(crate) enum SandboxMode {
     ReadOnly,
     WorkspaceWrite,
     DangerFullAccess,
@@ -288,7 +297,7 @@ pub enum SandboxMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum SandboxPolicy {
+pub(crate) enum SandboxPolicy {
     ReadOnly {
         #[serde(rename = "networkAccess")]
         #[serde(default)]
@@ -317,14 +326,14 @@ pub enum SandboxPolicy {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CollaborationMode {
-    pub mode: ModeKind,
-    pub settings: CollaborationSettings,
+pub(crate) struct CollaborationMode {
+    pub(crate) mode: ModeKind,
+    pub(crate) settings: CollaborationSettings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ModeKind {
+pub(crate) enum ModeKind {
     Default,
     Plan,
     #[allow(dead_code)]
@@ -335,12 +344,12 @@ pub enum ModeKind {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CollaborationSettings {
-    pub model: String,
+pub(crate) struct CollaborationSettings {
+    pub(crate) model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub developer_instructions: Option<String>,
+    pub(crate) developer_instructions: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -349,144 +358,145 @@ pub struct CollaborationSettings {
 
 /// Notification method names we care about (compared as `&str` at dispatch
 /// time so unknown methods don't crash the client).
-pub mod method {
-    pub const THREAD_COMPACT_START: &str = "thread/compact/start";
-    pub const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
-    pub const THREAD_COMPACTED: &str = "thread/compacted";
-    pub const THREAD_CLOSED: &str = "thread/closed";
-    pub const TURN_COMPLETED: &str = "turn/completed";
-    pub const TURN_FAILED: &str = "turn/failed";
-    pub const TURN_PLAN_UPDATED: &str = "turn/planUpdated";
-    pub const ITEM_STARTED: &str = "item/started";
-    pub const ITEM_UPDATED: &str = "item/updated";
-    pub const ITEM_COMPLETED: &str = "item/completed";
-    pub const MODEL_REROUTED: &str = "model/rerouted";
-    pub const ERROR: &str = "error";
-    pub const INITIALIZED: &str = "initialized";
+pub(crate) mod method {
+    pub(crate) const THREAD_COMPACT_START: &str = "thread/compact/start";
+    pub(crate) const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
+    pub(crate) const THREAD_COMPACTED: &str = "thread/compacted";
+    pub(crate) const THREAD_CLOSED: &str = "thread/closed";
+    pub(crate) const TURN_COMPLETED: &str = "turn/completed";
+    pub(crate) const TURN_FAILED: &str = "turn/failed";
+    pub(crate) const TURN_PLAN_UPDATED: &str = "turn/planUpdated";
+    pub(crate) const ITEM_STARTED: &str = "item/started";
+    pub(crate) const ITEM_UPDATED: &str = "item/updated";
+    pub(crate) const ITEM_COMPLETED: &str = "item/completed";
+    pub(crate) const MODEL_REROUTED: &str = "model/rerouted";
+    pub(crate) const ERROR: &str = "error";
+    pub(crate) const INITIALIZED: &str = "initialized";
 
     /// Internal, codex-claw-synthesized notification broadcast by the
     /// supervisor when the app-server child exits, so in-flight turns can abort
     /// promptly instead of waiting out the output-idle timeout. Namespaced so it
     /// can never collide with a real app-server method.
-    pub const BACKEND_DISCONNECTED: &str = "codexclaw/internal/backendDisconnected";
+    pub(crate) const BACKEND_DISCONNECTED: &str = "codexclaw/internal/backendDisconnected";
 
     // Server-initiated request methods (require a response).
-    pub const COMMAND_EXECUTION_REQUEST_APPROVAL: &str = "item/commandExecution/requestApproval";
-    pub const FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
-    pub const PERMISSIONS_REQUEST_APPROVAL: &str = "item/permissions/requestApproval";
-    pub const APPLY_PATCH_APPROVAL: &str = "applyPatchApproval";
-    pub const EXEC_COMMAND_APPROVAL: &str = "execCommandApproval";
-    pub const MCP_SERVER_ELICITATION_REQUEST: &str = "mcpServer/elicitation/request";
-    pub const CHATGPT_AUTH_TOKENS_REFRESH: &str = "account/chatgptAuthTokens/refresh";
+    pub(crate) const COMMAND_EXECUTION_REQUEST_APPROVAL: &str =
+        "item/commandExecution/requestApproval";
+    pub(crate) const FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
+    pub(crate) const PERMISSIONS_REQUEST_APPROVAL: &str = "item/permissions/requestApproval";
+    pub(crate) const APPLY_PATCH_APPROVAL: &str = "applyPatchApproval";
+    pub(crate) const EXEC_COMMAND_APPROVAL: &str = "execCommandApproval";
+    pub(crate) const MCP_SERVER_ELICITATION_REQUEST: &str = "mcpServer/elicitation/request";
+    pub(crate) const CHATGPT_AUTH_TOKENS_REFRESH: &str = "account/chatgptAuthTokens/refresh";
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnCompletedNotification {
-    pub thread_id: String,
-    pub turn: TurnCompleted,
+pub(crate) struct TurnCompletedNotification {
+    pub(crate) thread_id: String,
+    pub(crate) turn: TurnCompleted,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnCompleted {
-    pub id: String,
+pub(crate) struct TurnCompleted {
+    pub(crate) id: String,
     #[serde(default)]
-    pub status: String,
+    pub(crate) status: String,
     #[serde(default)]
-    pub error: Option<TurnError>,
+    pub(crate) error: Option<TurnError>,
     #[serde(default)]
-    pub duration_ms: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnError {
+pub(crate) struct TurnError {
     #[serde(default)]
-    pub message: Option<String>,
+    pub(crate) message: Option<String>,
     #[serde(default)]
     #[serde(rename = "type")]
-    pub kind: Option<String>,
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ItemNotification {
-    pub thread_id: String,
+pub(crate) struct ItemNotification {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub turn_id: Option<String>,
-    pub item: ItemPayload,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) item: ItemPayload,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ItemPayload {
+pub(crate) struct ItemPayload {
     #[serde(default)]
-    pub id: Option<String>,
+    pub(crate) id: Option<String>,
     #[serde(rename = "type", default)]
-    pub item_type: String,
+    pub(crate) item_type: String,
     #[serde(default)]
-    pub status: Option<String>,
+    pub(crate) status: Option<String>,
     #[serde(default)]
-    pub text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(default)]
-    pub phase: Option<String>,
+    pub(crate) phase: Option<String>,
     #[serde(default)]
-    pub summary: Option<JsonValue>,
+    pub(crate) summary: Option<JsonValue>,
     #[serde(default)]
-    pub content: Option<JsonValue>,
+    pub(crate) content: Option<JsonValue>,
     #[serde(default)]
-    pub command: Option<String>,
+    pub(crate) command: Option<String>,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub aggregated_output: Option<String>,
+    pub(crate) aggregated_output: Option<String>,
     #[serde(default)]
-    pub exit_code: Option<i32>,
+    pub(crate) exit_code: Option<i32>,
     #[serde(default)]
-    pub query: Option<String>,
+    pub(crate) query: Option<String>,
     #[serde(default)]
-    pub action: Option<JsonValue>,
+    pub(crate) action: Option<JsonValue>,
     #[serde(default)]
-    pub changes: Vec<FileChange>,
+    pub(crate) changes: Vec<FileChange>,
     #[serde(default)]
-    pub server: Option<String>,
+    pub(crate) server: Option<String>,
     #[serde(default)]
-    pub tool: Option<String>,
+    pub(crate) tool: Option<String>,
     #[serde(default)]
-    pub arguments: Option<JsonValue>,
+    pub(crate) arguments: Option<JsonValue>,
     #[serde(default)]
-    pub result: Option<JsonValue>,
+    pub(crate) result: Option<JsonValue>,
     #[serde(default)]
-    pub error: Option<JsonValue>,
+    pub(crate) error: Option<JsonValue>,
     #[serde(default)]
-    pub prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(default)]
-    pub sender_thread_id: Option<String>,
+    pub(crate) sender_thread_id: Option<String>,
     #[serde(default)]
-    pub receiver_thread_ids: Vec<String>,
+    pub(crate) receiver_thread_ids: Vec<String>,
     #[serde(default)]
-    pub message: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct FileChange {
+pub(crate) struct FileChange {
     #[serde(default)]
-    pub path: String,
-    pub kind: PatchChangeKindWire,
+    pub(crate) path: String,
+    pub(crate) kind: PatchChangeKindWire,
     #[serde(default)]
-    pub diff: String,
+    pub(crate) diff: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-pub enum PatchChangeKindWire {
+pub(crate) enum PatchChangeKindWire {
     Legacy(String),
     Structured(PatchChangeKind),
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum PatchChangeKind {
+pub(crate) enum PatchChangeKind {
     Add,
     Delete,
     Update {
@@ -497,121 +507,87 @@ pub enum PatchChangeKind {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentMessageDeltaNotification {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub item_id: String,
+pub(crate) struct TokenUsageUpdatedNotification {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub delta: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReasoningDeltaNotification {
-    pub thread_id: String,
-    #[serde(default)]
-    pub turn_id: Option<String>,
-    #[serde(default)]
-    pub item_id: Option<String>,
-    #[serde(default)]
-    pub delta: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandOutputDeltaNotification {
-    pub thread_id: String,
-    #[serde(default)]
-    pub item_id: Option<String>,
-    #[serde(default)]
-    pub chunk: Option<String>,
-    #[serde(default)]
-    pub stream: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenUsageUpdatedNotification {
-    pub thread_id: String,
-    #[serde(default)]
-    pub turn_id: Option<String>,
-    pub token_usage: TokenUsagePayload,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) token_usage: TokenUsagePayload,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenUsagePayload {
-    pub total: TokenCountBucket,
-    pub last: TokenCountBucket,
+pub(crate) struct TokenUsagePayload {
+    pub(crate) total: TokenCountBucket,
+    pub(crate) last: TokenCountBucket,
     #[serde(default)]
-    pub model_context_window: Option<u64>,
+    pub(crate) model_context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenCountBucket {
+pub(crate) struct TokenCountBucket {
     #[serde(default)]
-    pub total_tokens: u64,
+    pub(crate) total_tokens: u64,
     #[serde(default)]
-    pub input_tokens: u64,
+    pub(crate) input_tokens: u64,
     #[serde(default)]
-    pub cached_input_tokens: u64,
+    pub(crate) cached_input_tokens: u64,
     #[serde(default)]
-    pub output_tokens: u64,
+    pub(crate) output_tokens: u64,
     #[serde(default)]
-    pub reasoning_output_tokens: u64,
+    pub(crate) reasoning_output_tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnPlanUpdatedNotification {
-    pub thread_id: String,
+pub(crate) struct TurnPlanUpdatedNotification {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub turn_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
     #[serde(default)]
-    pub plan: Vec<TurnPlanStep>,
+    pub(crate) plan: Vec<TurnPlanStep>,
     #[serde(default)]
-    pub explanation: Option<String>,
+    pub(crate) explanation: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TurnPlanStep {
+pub(crate) struct TurnPlanStep {
     #[serde(default)]
-    pub step: Option<String>,
+    pub(crate) step: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub(crate) status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelReroutedNotification {
+pub(crate) struct ModelReroutedNotification {
     #[serde(default)]
-    pub thread_id: Option<String>,
+    pub(crate) thread_id: Option<String>,
     #[serde(default)]
-    pub from_model: Option<String>,
+    pub(crate) from_model: Option<String>,
     #[serde(default)]
-    pub to_model: Option<String>,
+    pub(crate) to_model: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompactedNotification {
-    pub thread_id: String,
+pub(crate) struct CompactedNotification {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub turn_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ThreadCompactStartParams {
-    pub thread_id: String,
+pub(crate) struct ThreadCompactStartParams {
+    pub(crate) thread_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct ThreadCompactStartResponse {}
+pub(crate) struct ThreadCompactStartResponse {}
 
 // ---------------------------------------------------------------------------
 // Server-initiated requests (approvals & elicitations)
@@ -619,64 +595,64 @@ pub struct ThreadCompactStartResponse {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CommandApprovalParams {
-    pub thread_id: String,
+pub(crate) struct CommandApprovalParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub turn_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
     #[serde(default)]
-    pub item_id: Option<String>,
+    pub(crate) item_id: Option<String>,
     #[serde(default)]
-    pub command: Option<String>,
+    pub(crate) command: Option<String>,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub command_actions: Vec<JsonValue>,
+    pub(crate) command_actions: Vec<JsonValue>,
     #[serde(default)]
-    pub proposed_execpolicy_amendment: Option<JsonValue>,
+    pub(crate) proposed_execpolicy_amendment: Option<JsonValue>,
     #[serde(default)]
-    pub available_decisions: Vec<JsonValue>,
+    pub(crate) available_decisions: Vec<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileChangeApprovalParams {
-    pub thread_id: String,
+pub(crate) struct FileChangeApprovalParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub turn_id: Option<String>,
+    pub(crate) turn_id: Option<String>,
     #[serde(default)]
-    pub item_id: Option<String>,
+    pub(crate) item_id: Option<String>,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub grant_root: Option<String>,
+    pub(crate) grant_root: Option<String>,
     #[serde(default)]
-    pub file_changes: JsonValue,
+    pub(crate) file_changes: JsonValue,
     #[serde(default)]
-    pub available_decisions: Vec<JsonValue>,
+    pub(crate) available_decisions: Vec<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermissionsApprovalParams {
-    pub thread_id: String,
+pub(crate) struct PermissionsApprovalParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub permissions: JsonValue,
+    pub(crate) permissions: JsonValue,
     #[serde(default)]
-    pub available_decisions: Vec<JsonValue>,
+    pub(crate) available_decisions: Vec<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpElicitationParams {
-    pub thread_id: String,
+pub(crate) struct McpElicitationParams {
+    pub(crate) thread_id: String,
     #[serde(default)]
-    pub server: Option<String>,
+    pub(crate) server: Option<String>,
     #[serde(default)]
-    pub request: JsonValue,
+    pub(crate) request: JsonValue,
 }
 
 /// The decision variants the server accepts. Derived from the installed
@@ -684,14 +660,14 @@ pub struct McpElicitationParams {
 /// acceptWithExecpolicyAmendment, applyNetworkPolicyAmendment, decline, cancel".
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub enum ApprovalDecision {
+pub(crate) enum ApprovalDecision {
     Simple(SimpleDecision),
     WithAmendment(AmendedDecision),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum SimpleDecision {
+pub(crate) enum SimpleDecision {
     Accept,
     AcceptForSession,
     Decline,
@@ -699,7 +675,7 @@ pub enum SimpleDecision {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub enum AmendedDecision {
+pub(crate) enum AmendedDecision {
     #[serde(rename = "acceptWithExecpolicyAmendment")]
     AcceptWithExecpolicyAmendment { execpolicy_amendment: Vec<String> },
     #[serde(rename = "applyNetworkPolicyAmendment")]
@@ -710,23 +686,23 @@ pub enum AmendedDecision {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CommandApprovalResponse {
-    pub decision: ApprovalDecision,
+pub(crate) struct CommandApprovalResponse {
+    pub(crate) decision: ApprovalDecision,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FileChangeApprovalResponse {
-    pub decision: ApprovalDecision,
+pub(crate) struct FileChangeApprovalResponse {
+    pub(crate) decision: ApprovalDecision,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PermissionsApprovalResponse {
-    pub decision: ApprovalDecision,
+pub(crate) struct PermissionsApprovalResponse {
+    pub(crate) decision: ApprovalDecision,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
-pub enum ElicitationResponse {
+pub(crate) enum ElicitationResponse {
     Accept { content: JsonValue },
     Decline,
     Cancel,

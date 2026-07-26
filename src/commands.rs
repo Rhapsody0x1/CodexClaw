@@ -97,11 +97,11 @@ const PROTECTED_COMMANDS: &[&str] = &[
 const PROJECT_KEY_SEP: char = '\u{1f}';
 
 #[derive(Debug, Clone)]
-pub struct CommandReply {
-    pub text: String,
+pub(crate) struct CommandReply {
+    pub(crate) text: String,
 }
 
-pub enum CommandOutcome {
+pub(crate) enum CommandOutcome {
     Reply(CommandReply),
     Continue,
     CancelCurrent(String),
@@ -120,7 +120,7 @@ pub enum CommandOutcome {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ApprovalIntent {
+pub(crate) enum ApprovalIntent {
     Accept,
     AcceptForSession,
     Decline,
@@ -134,7 +134,7 @@ struct ProjectBucket {
     latest: Option<DateTime<Utc>>,
 }
 
-pub async fn maybe_handle_command(
+pub(crate) async fn maybe_handle_command(
     text: &str,
     openid: &str,
     session: &SessionStore,
@@ -982,7 +982,7 @@ async fn handle_approvals(
     handle_approvals_arg(&args.join(" "), openid, session).await
 }
 
-pub(crate) async fn handle_approvals_arg(
+async fn handle_approvals_arg(
     text: &str,
     openid: &str,
     session: &SessionStore,
@@ -1331,7 +1331,7 @@ async fn handle_cancel_plan(openid: &str, session: &SessionStore) -> Result<Comm
     }))
 }
 
-pub(crate) async fn handle_plan_arg(
+async fn handle_plan_arg(
     text: &str,
     openid: &str,
     session: &SessionStore,
@@ -2584,7 +2584,7 @@ fn normalize_command_alias_name(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
-pub(crate) fn canonicalize_core_command(command: &str) -> &str {
+fn canonicalize_core_command(command: &str) -> &str {
     match command {
         "/帮助" => "/help",
         "/状态" => "/status",
@@ -2779,14 +2779,14 @@ mod interactive {
     ];
 
     #[derive(Debug, PartialEq, Eq)]
-    pub enum FuzzyOutcome {
+    pub(super) enum FuzzyOutcome {
         Exact(String),
         Ambiguous(Vec<String>),
         None,
     }
 
     /// Case-insensitive exact / substring match with a uniqueness requirement.
-    pub fn fuzzy_match_unique(input: &str, candidates: &[String]) -> FuzzyOutcome {
+    pub(super) fn fuzzy_match_unique(input: &str, candidates: &[String]) -> FuzzyOutcome {
         let needle = input.trim().to_ascii_lowercase();
         if needle.is_empty() {
             return FuzzyOutcome::None;
@@ -2867,7 +2867,7 @@ mod interactive {
         }
     }
 
-    pub fn resolve_model_input(input: &str, models: &[CodexModelEntry]) -> Option<String> {
+    pub(super) fn resolve_model_input(input: &str, models: &[CodexModelEntry]) -> Option<String> {
         match match_model_input(input, models) {
             FuzzyOutcome::Exact(choice) => Some(choice),
             FuzzyOutcome::Ambiguous(_) | FuzzyOutcome::None => None,
@@ -2909,7 +2909,7 @@ mod interactive {
         }
     }
 
-    pub fn resolve_reasoning_input(input: &str) -> Option<Option<ReasoningEffort>> {
+    pub(super) fn resolve_reasoning_input(input: &str) -> Option<Option<ReasoningEffort>> {
         match match_reasoning_input(input) {
             FuzzyOutcome::Exact(choice) if choice == "inherit" => Some(None),
             FuzzyOutcome::Exact(choice) => ReasoningEffort::parse_supported(&choice).map(Some),
@@ -3054,7 +3054,7 @@ mod interactive {
 
     // ---- Entry points (command with no args) -------------------------------
 
-    pub async fn enter_model_prompt(
+    pub(super) async fn enter_model_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3085,7 +3085,7 @@ mod interactive {
         }))
     }
 
-    pub async fn enter_reasoning_prompt(
+    pub(super) async fn enter_reasoning_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3108,7 +3108,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_fast_prompt(
+    pub(super) async fn enter_fast_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3131,7 +3131,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_context_prompt(
+    pub(super) async fn enter_context_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3154,7 +3154,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_verbose_prompt(
+    pub(super) async fn enter_verbose_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3181,7 +3181,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_lang_prompt(
+    pub(super) async fn enter_lang_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3203,7 +3203,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_fg_prompt(
+    pub(super) async fn enter_fg_prompt(
         snapshot: &UserSessionState,
         openid: &str,
         session: &SessionStore,
@@ -3235,7 +3235,7 @@ mod interactive {
         }))
     }
 
-    pub async fn enter_resume_projects_prompt(
+    pub(super) async fn enter_resume_projects_prompt(
         openid: &str,
         session: &SessionStore,
         locale: &str,
@@ -3254,7 +3254,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_resume_sessions_prompt(
+    pub(super) async fn enter_resume_sessions_prompt(
         openid: &str,
         session: &SessionStore,
         project_key: String,
@@ -3279,7 +3279,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_loadbg_projects_prompt(
+    pub(super) async fn enter_loadbg_projects_prompt(
         openid: &str,
         session: &SessionStore,
         locale: &str,
@@ -3298,7 +3298,7 @@ mod interactive {
         Ok(CommandOutcome::Reply(CommandReply { text }))
     }
 
-    pub async fn enter_loadbg_sessions_prompt(
+    pub(super) async fn enter_loadbg_sessions_prompt(
         openid: &str,
         session: &SessionStore,
         project_key: String,
@@ -3330,7 +3330,7 @@ mod interactive {
 
     // ---- Actions -----------------------------------------------------------
 
-    pub async fn switch_foreground(
+    pub(super) async fn switch_foreground(
         alias: &str,
         openid: &str,
         session: &SessionStore,
@@ -3370,7 +3370,7 @@ mod interactive {
         }))
     }
 
-    pub async fn execute_resume(
+    pub(super) async fn execute_resume(
         openid: &str,
         session: &SessionStore,
         default_model: &str,
@@ -3420,7 +3420,7 @@ mod interactive {
         }))
     }
 
-    pub async fn execute_loadbg(
+    pub(super) async fn execute_loadbg(
         openid: &str,
         session: &SessionStore,
         target: &DiskSessionMeta,
@@ -3449,7 +3449,7 @@ mod interactive {
 
     // ---- Pending-input consumption ----------------------------------------
 
-    pub async fn consume_pending_input(
+    pub(super) async fn consume_pending_input(
         pending: PendingSetting,
         text: &str,
         openid: &str,
@@ -4425,7 +4425,6 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             service_tier: Some(ServiceTier::Fast),
             context_mode: Some(ContextMode::OneM),
-            ..CodexRuntimeProfile::default()
         };
         let reply = expect_reply(env.run_with_runtime("/new", &runtime).await);
 

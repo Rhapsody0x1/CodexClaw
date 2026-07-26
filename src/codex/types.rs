@@ -27,15 +27,15 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct CompactRequest {
-    pub session_id: String,
-    pub workspace_dir: PathBuf,
-    pub config_overrides: Vec<String>,
-    pub add_dirs: Vec<PathBuf>,
-    pub model: Option<String>,
-    pub service_tier: Option<ServiceTier>,
-    pub context_mode: Option<ContextMode>,
-    pub reasoning_effort: ReasoningEffort,
+pub(crate) struct CompactRequest {
+    pub(crate) session_id: String,
+    pub(crate) workspace_dir: PathBuf,
+    pub(crate) config_overrides: Vec<String>,
+    pub(crate) add_dirs: Vec<PathBuf>,
+    pub(crate) model: Option<String>,
+    pub(crate) service_tier: Option<ServiceTier>,
+    pub(crate) context_mode: Option<ContextMode>,
+    pub(crate) reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Debug, Clone)]

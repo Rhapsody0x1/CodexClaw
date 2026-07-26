@@ -250,7 +250,7 @@ impl QqApiClient {
         })
     }
 
-    pub async fn send_text(
+    pub(crate) async fn send_text(
         &self,
         openid: &str,
         message_id: &str,
@@ -261,7 +261,7 @@ impl QqApiClient {
             .await
     }
 
-    pub async fn send_markdown(
+    pub(crate) async fn send_markdown(
         &self,
         openid: &str,
         message_id: &str,
@@ -272,7 +272,7 @@ impl QqApiClient {
             .await
     }
 
-    pub async fn send_markdown_proactive(&self, openid: &str, markdown: &str) -> Result<()> {
+    pub(crate) async fn send_markdown_proactive(&self, openid: &str, markdown: &str) -> Result<()> {
         self.send_text_inner(openid, None, markdown, None).await
     }
 
@@ -326,7 +326,7 @@ impl QqApiClient {
         Ok(())
     }
 
-    pub async fn upload_file(
+    pub(crate) async fn upload_file(
         &self,
         openid: &str,
         path: &Path,
@@ -356,7 +356,12 @@ impl QqApiClient {
             .await
     }
 
-    pub async fn send_media(&self, openid: &str, message_id: &str, file_info: &str) -> Result<()> {
+    pub(crate) async fn send_media(
+        &self,
+        openid: &str,
+        message_id: &str,
+        file_info: &str,
+    ) -> Result<()> {
         info!(
             openid = %openid,
             reply_to = %message_id,
@@ -377,7 +382,7 @@ impl QqApiClient {
         Ok(())
     }
 
-    pub async fn get_gateway_url(&self) -> Result<String> {
+    pub(crate) async fn get_gateway_url(&self) -> Result<String> {
         let response: GatewayInfo = self
             .request_json(
                 Method::GET,
@@ -388,7 +393,11 @@ impl QqApiClient {
         Ok(response.url)
     }
 
-    pub async fn download_attachment(&self, source_url: &str, destination: &Path) -> Result<()> {
+    pub(crate) async fn download_attachment(
+        &self,
+        source_url: &str,
+        destination: &Path,
+    ) -> Result<()> {
         let normalized_url = if source_url.starts_with("//") {
             format!("https:{source_url}")
         } else {
@@ -415,7 +424,7 @@ impl QqApiClient {
         Ok(())
     }
 
-    pub async fn get_access_token(&self) -> Result<String> {
+    pub(crate) async fn get_access_token(&self) -> Result<String> {
         let mut cache = self.token_cache.lock().await;
         if let Some(current) = cache.as_ref()
             && current.expires_at > std::time::Instant::now() + Duration::from_secs(60)
@@ -448,7 +457,7 @@ impl QqApiClient {
         Ok(parsed.access_token)
     }
 
-    pub async fn invalidate_access_token(&self) {
+    pub(crate) async fn invalidate_access_token(&self) {
         let mut cache = self.token_cache.lock().await;
         *cache = None;
     }
@@ -978,7 +987,7 @@ fn split_long_line(line: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
-pub fn estimate_text_chunk_count(text: &str) -> usize {
+pub(crate) fn estimate_text_chunk_count(text: &str) -> usize {
     split_text(text, 4500).len()
 }
 

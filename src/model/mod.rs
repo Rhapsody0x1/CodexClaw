@@ -5,9 +5,9 @@
 //! `session` and `scheduler` is what stops those three from forming a cycle
 //! around a `CronJob` map and a `ReasoningEffort` field.
 
-pub mod cron;
-pub mod message;
-pub mod settings;
+pub(crate) mod cron;
+pub(crate) mod message;
+pub(crate) mod settings;
 
 #[cfg(test)]
 mod wire_compat;

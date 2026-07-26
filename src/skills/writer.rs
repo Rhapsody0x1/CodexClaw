@@ -1,9 +1,9 @@
-pub const SLUG_PREFIX: &str = "claw-";
-pub const SLUG_MAX_CHARS: usize = 48;
-pub const DESCRIPTION_MAX_CHARS: usize = 140;
+pub(crate) const SLUG_PREFIX: &str = "claw-";
+const SLUG_MAX_CHARS: usize = 48;
+const DESCRIPTION_MAX_CHARS: usize = 140;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum SkillValidationError {
+pub(crate) enum SkillValidationError {
     #[error("name is empty or invalid (must match [a-z0-9-]+)")]
     InvalidName,
     #[error("description is empty")]
@@ -16,7 +16,7 @@ pub enum SkillValidationError {
     EmptyBody,
 }
 
-pub fn build_skill_md(
+pub(crate) fn build_skill_md(
     name: &str,
     description: &str,
     body: &str,
@@ -45,7 +45,7 @@ pub fn build_skill_md(
     ))
 }
 
-pub fn write_new_skill(
+pub(crate) fn write_new_skill(
     skills_root: &std::path::Path,
     slug: &str,
     skill_md: &str,
@@ -87,7 +87,7 @@ fn is_valid_slug(s: &str) -> bool {
         && !s.ends_with('-')
 }
 
-pub fn normalize_slug(raw: &str) -> Option<String> {
+pub(crate) fn normalize_slug(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut last_hyphen = true;
     for ch in raw.chars() {

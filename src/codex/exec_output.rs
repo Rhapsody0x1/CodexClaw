@@ -11,7 +11,7 @@ use crate::codex::CodexEvent;
 ///
 /// Lines that are blank, not valid JSON, not an `item.completed` event, not an
 /// `agent_message`, or carry no `text` field are skipped.
-pub fn agent_messages_from_lines<I, S>(lines: I) -> String
+pub(crate) fn agent_messages_from_lines<I, S>(lines: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -36,6 +36,6 @@ where
 }
 
 /// [`agent_messages_from_lines`] over a raw stdout buffer (lossy UTF-8).
-pub fn agent_messages_from_stdout(stdout: &[u8]) -> String {
+pub(crate) fn agent_messages_from_stdout(stdout: &[u8]) -> String {
     agent_messages_from_lines(String::from_utf8_lossy(stdout).lines())
 }

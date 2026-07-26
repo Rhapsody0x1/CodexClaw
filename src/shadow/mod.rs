@@ -10,13 +10,16 @@ use tracing::{info, warn};
 use crate::memory::store::MemoryStore;
 use crate::skills::index::SkillIndex;
 
-pub mod memory;
-pub mod prompt;
-pub mod runner;
-pub mod skill;
+pub(crate) mod memory;
+pub(crate) mod prompt;
+pub(crate) mod runner;
+pub(crate) mod skill;
 
-pub use memory::{ShadowConfig, ShadowContext, memory_threshold_met};
-pub use skill::{SkillShadowConfig, skill_threshold_met};
+pub use memory::ShadowConfig;
+pub use skill::SkillShadowConfig;
+
+pub(crate) use memory::{ShadowContext, memory_threshold_met};
+pub(crate) use skill::skill_threshold_met;
 
 pub struct ShadowWorker {
     memory: Arc<MemoryStore>,
@@ -55,7 +58,7 @@ impl ShadowWorker {
         }
     }
 
-    pub fn spawn_memory(self: &Arc<Self>, ctx: ShadowContext) {
+    pub(crate) fn spawn_memory(self: &Arc<Self>, ctx: ShadowContext) {
         let worker = self.clone();
         tokio::spawn(async move {
             if let Err(err) = worker.run_memory(ctx).await {
@@ -64,7 +67,7 @@ impl ShadowWorker {
         });
     }
 
-    pub fn spawn_skill(self: &Arc<Self>, ctx: ShadowContext) {
+    pub(crate) fn spawn_skill(self: &Arc<Self>, ctx: ShadowContext) {
         let worker = self.clone();
         tokio::spawn(async move {
             if let Err(err) = worker.run_skill(ctx).await {

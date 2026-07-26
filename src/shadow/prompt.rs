@@ -1,6 +1,6 @@
-pub const MEMORY_SUMMARY_PREFIX_CHARS: usize = 60;
+const MEMORY_SUMMARY_PREFIX_CHARS: usize = 60;
 
-pub const SKILL_DISTILL_PROMPT: &str = "\
+const SKILL_DISTILL_PROMPT: &str = "\
 你是 codex-claw 的 Skill 蒸馏助手。下面是最近一个 turn 的对话，目标是判断是否值得为以后类似任务固化一个 Skill。\n\
 \n\
 **只产出 JSON**，schema：\n\
@@ -28,7 +28,7 @@ pub const SKILL_DISTILL_PROMPT: &str = "\
 </last_turn>\n\
 ";
 
-pub fn render_skill_prompt(
+pub(crate) fn render_skill_prompt(
     existing_claw_skills: &[(String, String)],
     last_user: &str,
     last_assistant: &str,
@@ -48,7 +48,7 @@ pub fn render_skill_prompt(
         .replace("{last_assistant}", last_assistant.trim())
 }
 
-pub const MEMORY_DISTILL_PROMPT: &str = "\
+const MEMORY_DISTILL_PROMPT: &str = "\
 你是 codex-claw 的记忆蒸馏助手。刚刚结束了一个 turn，下面给你最近一段对话与当前已有记忆摘要。\n\
 \n\
 **只产出 JSON**，schema：\n\
@@ -76,7 +76,7 @@ pub const MEMORY_DISTILL_PROMPT: &str = "\
 </last_turn>\n\
 ";
 
-pub fn render_memory_prompt(
+pub(crate) fn render_memory_prompt(
     existing_memory: &[String],
     existing_user: &[String],
     last_user: &str,

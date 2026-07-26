@@ -7,7 +7,7 @@ use cron::Schedule;
 
 use super::store::CronKind;
 
-pub fn next_after(kind: &CronKind, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+pub(crate) fn next_after(kind: &CronKind, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
     match kind {
         CronKind::OneShot { at } => Ok((*at > now).then_some(*at)),
         CronKind::Recurring { cron, tz } => {
@@ -25,7 +25,7 @@ pub fn next_after(kind: &CronKind, now: DateTime<Utc>) -> Result<Option<DateTime
     }
 }
 
-pub fn due_or_past(kind: &CronKind, now: DateTime<Utc>) -> bool {
+pub(crate) fn due_or_past(kind: &CronKind, now: DateTime<Utc>) -> bool {
     match kind {
         CronKind::OneShot { at } => *at <= now,
         CronKind::Recurring { .. } => false,

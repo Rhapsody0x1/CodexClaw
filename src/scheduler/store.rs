@@ -8,16 +8,16 @@ use crate::util::{fs::read_to_string_opt_async, layout::DataLayout, time::ts_slu
 
 /// The job document itself lives in [`crate::model::cron`]; re-exported here so
 /// `crate::scheduler::store::*` keeps resolving for every existing call site.
-pub use crate::model::cron::{
+pub(crate) use crate::model::cron::{
     CronJob, CronKind, DeliverPolicy, InteractiveSpec, JobAction, PendingDelivery, RunStatus,
     SessionStrategy,
 };
 
-pub fn new_job_dir(data_dir: &Path, id: &str) -> PathBuf {
+pub(crate) fn new_job_dir(data_dir: &Path, id: &str) -> PathBuf {
     DataLayout::new(data_dir).cron_job_dir(id)
 }
 
-pub async fn prepare_job_dirs(data_dir: &Path, id: &str) -> Result<PathBuf> {
+pub(crate) async fn prepare_job_dirs(data_dir: &Path, id: &str) -> Result<PathBuf> {
     let job_dir = new_job_dir(data_dir, id);
     tokio::fs::create_dir_all(job_dir.join("workspace")).await?;
     tokio::fs::create_dir_all(job_skill_dir(data_dir, id)).await?;
@@ -25,7 +25,7 @@ pub async fn prepare_job_dirs(data_dir: &Path, id: &str) -> Result<PathBuf> {
     Ok(job_dir)
 }
 
-pub async fn write_job_metadata(
+pub(crate) async fn write_job_metadata(
     job: &CronJob,
     data_dir: &Path,
     codex_home_global: &Path,
@@ -54,7 +54,7 @@ pub async fn write_job_metadata(
     Ok(())
 }
 
-pub async fn remove_job_files(
+pub(crate) async fn remove_job_files(
     data_dir: &Path,
     codex_home_global: &Path,
     id: &str,
@@ -74,7 +74,11 @@ pub async fn remove_job_files(
     Ok(())
 }
 
-pub async fn recycle_job_files(data_dir: &Path, codex_home_global: &Path, id: &str) -> Result<()> {
+pub(crate) async fn recycle_job_files(
+    data_dir: &Path,
+    codex_home_global: &Path,
+    id: &str,
+) -> Result<()> {
     remove_job_skill_link(codex_home_global, id).await?;
     let job_dir = new_job_dir(data_dir, id);
     match tokio::fs::symlink_metadata(&job_dir).await {
@@ -99,11 +103,7 @@ pub async fn recycle_job_files(data_dir: &Path, codex_home_global: &Path, id: &s
     Ok(())
 }
 
-pub async fn ensure_job_skill_link(
-    data_dir: &Path,
-    codex_home_global: &Path,
-    id: &str,
-) -> Result<()> {
+async fn ensure_job_skill_link(data_dir: &Path, codex_home_global: &Path, id: &str) -> Result<()> {
     let skills_dir = job_skill_dir(data_dir, id);
     let link = codex_home_global
         .join("skills")
@@ -129,7 +129,7 @@ pub async fn ensure_job_skill_link(
     Ok(())
 }
 
-pub async fn remove_job_skill_link(codex_home_global: &Path, id: &str) -> Result<()> {
+async fn remove_job_skill_link(codex_home_global: &Path, id: &str) -> Result<()> {
     let link = codex_home_global
         .join("skills")
         .join(format!("claw-cron-{id}"));
@@ -147,14 +147,14 @@ pub async fn remove_job_skill_link(codex_home_global: &Path, id: &str) -> Result
     Ok(())
 }
 
-pub fn job_skill_dir(data_dir: &Path, id: &str) -> PathBuf {
+fn job_skill_dir(data_dir: &Path, id: &str) -> PathBuf {
     new_job_dir(data_dir, id)
         .join("workspace")
         .join(".agents")
         .join("skills")
 }
 
-pub async fn queue_pending_delivery(
+pub(crate) async fn queue_pending_delivery(
     data_dir: &Path,
     openid: &str,
     delivery: &PendingDelivery,
@@ -180,7 +180,7 @@ pub async fn queue_pending_delivery(
     .await?
 }
 
-pub async fn take_pending_deliveries(
+pub(crate) async fn take_pending_deliveries(
     data_dir: &Path,
     openid: &str,
 ) -> Result<Vec<PendingDelivery>> {
@@ -225,7 +225,7 @@ fn sanitize_path_segment(raw: &str) -> String {
         .collect()
 }
 
-pub async fn write_run_log(
+pub(crate) async fn write_run_log(
     job: &CronJob,
     run_at: DateTime<Utc>,
     body: &str,
@@ -266,7 +266,7 @@ async fn prune_run_logs(runs_dir: &Path, runs_retention: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     Ulid::new().to_string()
 }
 

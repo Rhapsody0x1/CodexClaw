@@ -103,7 +103,7 @@ pub(crate) fn strip_end_signal(text: &str, signal: &str) -> (String, bool) {
 
 /// Strip a leading ```` ```json ```` / ```` ``` ```` fence and its closing
 /// fence, returning the trimmed body.
-pub(crate) fn strip_fenced(s: &str) -> Option<&str> {
+fn strip_fenced(s: &str) -> Option<&str> {
     let s = s
         .strip_prefix("```json")
         .or_else(|| s.strip_prefix("```"))?;

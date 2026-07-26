@@ -26,7 +26,7 @@ use super::{
 /// The decision a handler can return for a command / file-change / permissions
 /// approval request.
 #[derive(Debug, Clone, Copy)]
-pub enum ApprovalOutcome {
+pub(crate) enum ApprovalOutcome {
     Accept,
     AcceptForSession,
     Decline,
@@ -34,7 +34,7 @@ pub enum ApprovalOutcome {
 }
 
 impl ApprovalOutcome {
-    pub(crate) fn to_decision(self) -> ApprovalDecision {
+    fn to_decision(self) -> ApprovalDecision {
         match self {
             ApprovalOutcome::Accept => ApprovalDecision::Simple(SimpleDecision::Accept),
             ApprovalOutcome::AcceptForSession => {
@@ -47,40 +47,35 @@ impl ApprovalOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub struct CommandApprovalEvent {
-    pub thread_id: String,
-    pub item_id: Option<String>,
-    pub command: Option<String>,
-    pub cwd: Option<String>,
-    pub reason: Option<String>,
+pub(crate) struct CommandApprovalEvent {
+    pub(crate) command: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct FileChangeApprovalEvent {
-    pub thread_id: String,
-    pub reason: Option<String>,
-    pub grant_root: Option<String>,
-    pub file_changes: JsonValue,
+pub(crate) struct FileChangeApprovalEvent {
+    pub(crate) reason: Option<String>,
+    pub(crate) grant_root: Option<String>,
+    pub(crate) file_changes: JsonValue,
 }
 
 #[derive(Debug, Clone)]
-pub struct PermissionsApprovalEvent {
-    pub thread_id: String,
-    pub reason: Option<String>,
-    pub permissions: JsonValue,
+pub(crate) struct PermissionsApprovalEvent {
+    pub(crate) reason: Option<String>,
+    pub(crate) permissions: JsonValue,
 }
 
 #[derive(Debug, Clone)]
-pub struct ElicitationEvent {
-    pub thread_id: String,
-    pub server: Option<String>,
-    pub request: JsonValue,
+pub(crate) struct ElicitationEvent {
+    pub(crate) thread_id: String,
+    pub(crate) server: Option<String>,
 }
 
 /// Every approval request yields one of these envelopes — the handler fills
 /// the oneshot to report its decision. If the handler drops the envelope
 /// without responding, the broker replies `Decline` so the turn can progress.
-pub enum ApprovalRequest {
+pub(crate) enum ApprovalRequest {
     Command {
         event: CommandApprovalEvent,
         reply: oneshot::Sender<ApprovalOutcome>,
@@ -100,13 +95,13 @@ pub enum ApprovalRequest {
     },
 }
 
-pub struct ApprovalBroker {
+pub(crate) struct ApprovalBroker {
     supervisor: Arc<AppServerSupervisor>,
     handler_tx: Mutex<Option<mpsc::Sender<ApprovalRequest>>>,
 }
 
 impl ApprovalBroker {
-    pub fn new(supervisor: Arc<AppServerSupervisor>) -> Arc<Self> {
+    pub(crate) fn new(supervisor: Arc<AppServerSupervisor>) -> Arc<Self> {
         Arc::new(Self {
             supervisor,
             handler_tx: Mutex::new(None),
@@ -116,13 +111,13 @@ impl ApprovalBroker {
     /// Install an interactive handler. Any request delivered while no handler
     /// is installed (or while the handler's channel is full/closed) is
     /// auto-declined.
-    pub async fn install_handler(&self, tx: mpsc::Sender<ApprovalRequest>) {
+    pub(crate) async fn install_handler(&self, tx: mpsc::Sender<ApprovalRequest>) {
         *self.handler_tx.lock().await = Some(tx);
     }
 
     /// Launch the background dispatcher. Must be called exactly once after
     /// the supervisor has started.
-    pub async fn start(self: &Arc<Self>) -> Result<()> {
+    pub(crate) async fn start(self: &Arc<Self>) -> Result<()> {
         let mut rx = self
             .supervisor
             .take_server_request_receiver()
@@ -201,8 +196,6 @@ impl ApprovalBroker {
             "command approval requested"
         );
         let event = CommandApprovalEvent {
-            thread_id: params.thread_id,
-            item_id: params.item_id,
             command: params.command,
             cwd: params.cwd,
             reason: params.reason,
@@ -225,7 +218,6 @@ impl ApprovalBroker {
             }
         };
         let event = FileChangeApprovalEvent {
-            thread_id: params.thread_id,
             reason: params.reason,
             grant_root: params.grant_root,
             file_changes: params.file_changes,
@@ -248,7 +240,6 @@ impl ApprovalBroker {
             }
         };
         let event = PermissionsApprovalEvent {
-            thread_id: params.thread_id,
             reason: params.reason,
             permissions: params.permissions,
         };
@@ -272,7 +263,6 @@ impl ApprovalBroker {
         let event = ElicitationEvent {
             thread_id: params.thread_id,
             server: params.server,
-            request: params.request,
         };
         let (tx, rx) = oneshot::channel();
         let sent = {

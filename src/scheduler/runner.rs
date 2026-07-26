@@ -37,7 +37,7 @@ struct CodexTurnRun {
     interactive: Option<InteractiveSpec>,
 }
 
-pub async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJob> {
+pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJob> {
     let started_at = Utc::now();
     let manual_run = job
         .run_now_at

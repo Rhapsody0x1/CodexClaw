@@ -12,22 +12,22 @@ use crate::util::{fs::read_json_opt_async, layout::DataLayout, text::strip_end_s
 use super::store::{CronJob, InteractiveSpec, JobAction, SessionStrategy, new_job_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingInteraction {
-    pub job_id: String,
-    pub title: String,
-    pub owner_openid: String,
-    pub codex_session_id: Option<String>,
-    pub workspace_dir: PathBuf,
-    pub end_signal: String,
-    pub rounds_done: u32,
-    pub max_rounds_hard_cap: u32,
-    pub expires_at: DateTime<Utc>,
-    pub parked_fg_alias: Option<String>,
-    pub cron_fg_alias: String,
-    pub session_strategy: SessionStrategy,
+pub(crate) struct PendingInteraction {
+    pub(crate) job_id: String,
+    pub(crate) title: String,
+    pub(crate) owner_openid: String,
+    pub(crate) codex_session_id: Option<String>,
+    pub(crate) workspace_dir: PathBuf,
+    pub(crate) end_signal: String,
+    pub(crate) rounds_done: u32,
+    pub(crate) max_rounds_hard_cap: u32,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) parked_fg_alias: Option<String>,
+    pub(crate) cron_fg_alias: String,
+    pub(crate) session_strategy: SessionStrategy,
 }
 
-pub fn build_protocol_prompt(
+pub(crate) fn build_protocol_prompt(
     owner_openid: &str,
     title: &str,
     prompt: &str,
@@ -46,7 +46,7 @@ Do not emit the token until the interaction is truly complete. Hard cap: at most
     )
 }
 
-pub async fn prepare_foreground(
+pub(crate) async fn prepare_foreground(
     app: &App,
     job: &CronJob,
     spec: &InteractiveSpec,
@@ -119,7 +119,7 @@ pub async fn prepare_foreground(
     Ok(pending)
 }
 
-pub async fn update_pending_session(
+pub(crate) async fn update_pending_session(
     data_dir: &Path,
     job_id: &str,
     session_id: Option<String>,
@@ -131,7 +131,7 @@ pub async fn update_pending_session(
     write_pending(data_dir, &pending).await
 }
 
-pub async fn finish_if_needed_after_scheduler_turn(
+pub(crate) async fn finish_if_needed_after_scheduler_turn(
     app: &App,
     job: &CronJob,
     output: &str,
@@ -146,7 +146,11 @@ pub async fn finish_if_needed_after_scheduler_turn(
     Ok(stripped)
 }
 
-pub async fn on_fg_turn_completed(app: &App, openid: &str, assistant_text: &str) -> Result<()> {
+pub(crate) async fn on_fg_turn_completed(
+    app: &App,
+    openid: &str,
+    assistant_text: &str,
+) -> Result<()> {
     let mut pending = match pending_for_owner(&app.config.general.data_dir, openid).await? {
         Some(pending) => pending,
         None => return Ok(()),
@@ -168,14 +172,14 @@ pub async fn on_fg_turn_completed(app: &App, openid: &str, assistant_text: &str)
     Ok(())
 }
 
-pub async fn finish_job_for_owner(app: &App, openid: &str, reason: &str) -> Result<()> {
+pub(crate) async fn finish_job_for_owner(app: &App, openid: &str, reason: &str) -> Result<()> {
     let Some(pending) = pending_for_owner(&app.config.general.data_dir, openid).await? else {
         return Ok(());
     };
     finish_job(app, &pending.job_id, reason).await
 }
 
-pub async fn sweep_expired(app: &App) -> Result<()> {
+pub(crate) async fn sweep_expired(app: &App) -> Result<()> {
     let root = DataLayout::new(&app.config.general.data_dir).cron_jobs_dir();
     let mut entries = match tokio::fs::read_dir(&root).await {
         Ok(entries) => entries,
@@ -206,7 +210,7 @@ pub async fn sweep_expired(app: &App) -> Result<()> {
     Ok(())
 }
 
-pub async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
+pub(crate) async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
     let Some(pending) = read_pending(&app.config.general.data_dir, job_id).await? else {
         return Ok(());
     };
@@ -297,7 +301,7 @@ fn interactive_spec(job: &CronJob) -> Option<&InteractiveSpec> {
     }
 }
 
-pub async fn pending_for_owner(
+pub(crate) async fn pending_for_owner(
     data_dir: &Path,
     openid: &str,
 ) -> Result<Option<PendingInteraction>> {

@@ -1,22 +1,22 @@
 use crate::util::fs::{atomic_write, read_to_string_opt};
 
-pub const ENTRY_DELIMITER: &str = "\n§\n";
+const ENTRY_DELIMITER: &str = "\n§\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryKind {
+pub(crate) enum MemoryKind {
     Memory,
     User,
 }
 
 impl MemoryKind {
-    pub fn filename(self) -> &'static str {
+    pub(crate) fn filename(self) -> &'static str {
         match self {
             MemoryKind::Memory => "MEMORY.md",
             MemoryKind::User => "USER.md",
         }
     }
 
-    pub fn default_char_limit(self) -> usize {
+    fn default_char_limit(self) -> usize {
         match self {
             MemoryKind::Memory => 2200,
             MemoryKind::User => 1375,
@@ -24,7 +24,7 @@ impl MemoryKind {
     }
 }
 
-pub fn parse_entries(raw: &str) -> Vec<String> {
+fn parse_entries(raw: &str) -> Vec<String> {
     raw.split(ENTRY_DELIMITER)
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
@@ -32,22 +32,22 @@ pub fn parse_entries(raw: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn serialize_entries(entries: &[String]) -> String {
+fn serialize_entries(entries: &[String]) -> String {
     entries.join(ENTRY_DELIMITER)
 }
 
-pub fn load_entries(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
+fn load_entries(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
     Ok(read_to_string_opt(path)?
         .map(|raw| parse_entries(&raw))
         .unwrap_or_default())
 }
 
-pub fn write_entries(path: &std::path::Path, entries: &[String]) -> anyhow::Result<()> {
+fn write_entries(path: &std::path::Path, entries: &[String]) -> anyhow::Result<()> {
     atomic_write(path, &serialize_entries(entries))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddState {
+pub(crate) enum AddState {
     Added,
     Duplicate,
     EntryEmpty,
@@ -57,16 +57,16 @@ pub enum AddState {
 }
 
 #[derive(Debug, Clone)]
-pub struct AddOutcome {
-    pub state: AddState,
+pub(crate) struct AddOutcome {
+    pub(crate) state: AddState,
 }
 
-pub const DEFAULT_ENTRY_MAX_CHARS: usize = 160;
+const DEFAULT_ENTRY_MAX_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Default)]
-pub struct Snapshot {
-    pub memory: Vec<String>,
-    pub user: Vec<String>,
+pub(crate) struct Snapshot {
+    pub(crate) memory: Vec<String>,
+    pub(crate) user: Vec<String>,
 }
 
 struct CacheEntry {
@@ -106,7 +106,7 @@ impl MemoryStore {
         versions.get(openid).copied().unwrap_or(0)
     }
 
-    pub fn snapshot_for(&self, openid: &str) -> anyhow::Result<std::sync::Arc<Snapshot>> {
+    pub(crate) fn snapshot_for(&self, openid: &str) -> anyhow::Result<std::sync::Arc<Snapshot>> {
         let current = self.current_version(openid);
         {
             let cache = self.cache.lock().expect("cache mutex poisoned");
@@ -145,7 +145,7 @@ impl MemoryStore {
         self
     }
 
-    pub fn path_for(&self, openid: &str, kind: MemoryKind) -> std::path::PathBuf {
+    fn path_for(&self, openid: &str, kind: MemoryKind) -> std::path::PathBuf {
         self.root.join(openid).join(kind.filename())
     }
 
@@ -156,7 +156,12 @@ impl MemoryStore {
         }
     }
 
-    pub fn add(&self, openid: &str, kind: MemoryKind, content: &str) -> anyhow::Result<AddOutcome> {
+    pub(crate) fn add(
+        &self,
+        openid: &str,
+        kind: MemoryKind,
+        content: &str,
+    ) -> anyhow::Result<AddOutcome> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return Ok(AddOutcome {
@@ -196,7 +201,10 @@ impl MemoryStore {
         })
     }
 
-    pub fn remove(
+    /// No command deletes a single memory entry today; kept (and tested)
+    /// because the store owns the entry file format.
+    #[allow(dead_code)]
+    pub(crate) fn remove(
         &self,
         openid: &str,
         kind: MemoryKind,

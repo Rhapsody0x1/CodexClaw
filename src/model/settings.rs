@@ -23,7 +23,7 @@ pub enum ReasoningEffort {
 }
 
 impl ReasoningEffort {
-    pub fn parse(input: &str) -> Option<Self> {
+    pub(crate) fn parse(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "none" => Some(Self::None),
             "minimal" => Some(Self::Minimal),
@@ -35,7 +35,7 @@ impl ReasoningEffort {
         }
     }
 
-    pub fn parse_supported(input: &str) -> Option<Self> {
+    pub(crate) fn parse_supported(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
@@ -45,14 +45,14 @@ impl ReasoningEffort {
         }
     }
 
-    pub fn normalized(self) -> Self {
+    pub(crate) fn normalized(self) -> Self {
         match self {
             Self::None | Self::Minimal => Self::Low,
             other => other,
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self.normalized() {
             Self::Low => "low",
             Self::Medium => "medium",
@@ -71,7 +71,7 @@ pub enum ServiceTier {
 }
 
 impl ServiceTier {
-    pub fn parse(input: &str) -> Option<Self> {
+    pub(crate) fn parse(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().as_str() {
             "fast" | "on" => Some(Self::Fast),
             "flex" | "off" => Some(Self::Flex),
@@ -79,7 +79,7 @@ impl ServiceTier {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Fast => "fast",
             Self::Flex => "flex",
@@ -89,7 +89,7 @@ impl ServiceTier {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum ApprovalPolicySetting {
+pub(crate) enum ApprovalPolicySetting {
     UnlessTrusted,
     OnRequest,
     Never,
@@ -97,7 +97,7 @@ pub enum ApprovalPolicySetting {
 }
 
 impl ApprovalPolicySetting {
-    pub fn parse(input: &str) -> Option<Self> {
+    pub(crate) fn parse(input: &str) -> Option<Self> {
         match input.trim().to_ascii_lowercase().replace('_', "-").as_str() {
             "never" | "off" | "关" | "关闭" => Some(Self::Never),
             "on-request" | "on" | "开" | "开启" | "ask" => Some(Self::OnRequest),
@@ -109,16 +109,7 @@ impl ApprovalPolicySetting {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UnlessTrusted => "unless-trusted",
-            Self::OnRequest => "on-request",
-            Self::Never => "never",
-            Self::GuardianSubagent => "guardian-subagent",
-        }
-    }
-
-    pub fn label_zh(self) -> &'static str {
+    pub(crate) fn label_zh(self) -> &'static str {
         match self {
             Self::UnlessTrusted => "严格（unless-trusted）",
             Self::OnRequest => "按需（on-request）",
@@ -127,7 +118,7 @@ impl ApprovalPolicySetting {
         }
     }
 
-    pub fn label_en(self) -> &'static str {
+    pub(crate) fn label_en(self) -> &'static str {
         match self {
             Self::UnlessTrusted => "unless-trusted",
             Self::OnRequest => "on-request",
@@ -146,31 +137,16 @@ pub enum ContextMode {
 }
 
 impl ContextMode {
-    pub const STANDARD_CONTEXT_WINDOW: u64 = 272_000;
+    pub(crate) const STANDARD_CONTEXT_WINDOW: u64 = 272_000;
 
-    pub fn parse(input: &str) -> Option<Self> {
-        match input.trim().to_ascii_lowercase().as_str() {
-            "standard" | "272k" => Some(Self::Standard),
-            "1m" => Some(Self::OneM),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::OneM => "1m",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Standard => "272K",
             Self::OneM => "1M",
         }
     }
 
-    pub fn from_model_context_window(window: u64) -> Self {
+    pub(crate) fn from_model_context_window(window: u64) -> Self {
         if window > Self::STANDARD_CONTEXT_WINDOW {
             Self::OneM
         } else {
@@ -180,21 +156,21 @@ impl ContextMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionSettings {
-    pub model_override: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub service_tier: Option<ServiceTier>,
-    pub context_mode: Option<ContextMode>,
+pub(crate) struct SessionSettings {
+    pub(crate) model_override: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
+    pub(crate) context_mode: Option<ContextMode>,
     #[serde(default)]
-    pub verbose: bool,
+    pub(crate) verbose: bool,
     #[serde(default)]
-    pub plan_mode: bool,
+    pub(crate) plan_mode: bool,
     #[serde(default)]
-    pub approval_policy_override: Option<ApprovalPolicySetting>,
+    pub(crate) approval_policy_override: Option<ApprovalPolicySetting>,
     #[serde(default)]
-    pub pending_plan: Option<String>,
+    pub(crate) pending_plan: Option<String>,
     #[serde(default = "default_language")]
-    pub language: String,
+    pub(crate) language: String,
 }
 
 pub(crate) fn default_language() -> String {
@@ -218,7 +194,7 @@ impl Default for SessionSettings {
 }
 
 impl SessionSettings {
-    pub fn merged_with_profile(&self, profile: Option<&DialogProfile>) -> Self {
+    pub(crate) fn merged_with_profile(&self, profile: Option<&DialogProfile>) -> Self {
         let mut merged = self.clone();
         let Some(profile) = profile else {
             return merged;
@@ -241,38 +217,38 @@ impl SessionSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SessionState {
-    pub session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     #[serde(default)]
-    pub settings: SessionSettings,
+    pub(crate) settings: SessionSettings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum DialogOrigin {
+pub(crate) enum DialogOrigin {
     #[default]
     Local,
     Global,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct DialogProfile {
-    pub model_override: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub service_tier: Option<ServiceTier>,
-    pub context_mode: Option<ContextMode>,
+pub(crate) struct DialogProfile {
+    pub(crate) model_override: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
+    pub(crate) context_mode: Option<ContextMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ImportedSessionProfile {
-    pub workspace_dir: PathBuf,
-    pub model_override: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub service_tier: Option<ServiceTier>,
-    pub context_mode: Option<ContextMode>,
+pub(crate) struct ImportedSessionProfile {
+    pub(crate) workspace_dir: PathBuf,
+    pub(crate) model_override: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
+    pub(crate) context_mode: Option<ContextMode>,
 }
 
 impl ImportedSessionProfile {
-    pub fn dialog_profile(&self) -> DialogProfile {
+    pub(crate) fn dialog_profile(&self) -> DialogProfile {
         DialogProfile {
             model_override: self.model_override.clone(),
             reasoning_effort: self.reasoning_effort,
@@ -283,27 +259,27 @@ impl ImportedSessionProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TokenUsageSnapshot {
-    pub total_tokens: u64,
-    pub window: u64,
+pub(crate) struct TokenUsageSnapshot {
+    pub(crate) total_tokens: u64,
+    pub(crate) window: u64,
     #[serde(default)]
-    pub input_tokens: u64,
+    pub(crate) input_tokens: u64,
     #[serde(default)]
-    pub cached_input_tokens: u64,
+    pub(crate) cached_input_tokens: u64,
     #[serde(default)]
-    pub output_tokens: u64,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) output_tokens: u64,
+    pub(crate) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl TokenUsageSnapshot {
-    pub fn context_tokens(&self) -> Option<u64> {
+    pub(crate) fn context_tokens(&self) -> Option<u64> {
         if self.window > 0 && self.total_tokens > self.window {
             return None;
         }
         Some(self.total_tokens)
     }
 
-    pub fn percent_remaining(&self) -> Option<u64> {
+    pub(crate) fn percent_remaining(&self) -> Option<u64> {
         if self.window == 0 {
             return None;
         }
@@ -323,28 +299,28 @@ impl TokenUsageSnapshot {
         )
     }
 
-    pub fn percent_used(&self) -> Option<u64> {
+    pub(crate) fn percent_used(&self) -> Option<u64> {
         self.percent_remaining()
             .map(|value| 100_u64.saturating_sub(value))
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DialogState {
-    pub session_id: Option<String>,
+pub(crate) struct DialogState {
+    pub(crate) session_id: Option<String>,
     #[serde(default)]
-    pub origin: DialogOrigin,
-    pub workspace_dir: PathBuf,
+    pub(crate) origin: DialogOrigin,
+    pub(crate) workspace_dir: PathBuf,
     #[serde(default)]
-    pub saved: bool,
+    pub(crate) saved: bool,
     #[serde(default)]
-    pub profile: Option<DialogProfile>,
+    pub(crate) profile: Option<DialogProfile>,
     #[serde(default)]
-    pub last_usage: Option<TokenUsageSnapshot>,
+    pub(crate) last_usage: Option<TokenUsageSnapshot>,
 }
 
 impl DialogState {
-    pub fn new_temporary(workspace_dir: PathBuf) -> Self {
+    pub(crate) fn new_temporary(workspace_dir: PathBuf) -> Self {
         Self {
             session_id: None,
             origin: DialogOrigin::Local,
@@ -355,21 +331,21 @@ impl DialogState {
         }
     }
 
-    pub fn is_temporary(&self) -> bool {
+    pub(crate) fn is_temporary(&self) -> bool {
         self.session_id.is_none()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CommandAlias {
-    pub name: String,
-    pub commands: Vec<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+pub(crate) struct CommandAlias {
+    pub(crate) name: String,
+    pub(crate) commands: Vec<String>,
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PendingSetting {
+pub(crate) enum PendingSetting {
     Model,
     Reasoning,
     Fast,
@@ -405,7 +381,7 @@ pub enum PendingSetting {
 }
 
 impl PendingSetting {
-    pub fn command_name(&self, locale: &str) -> &'static str {
+    pub(crate) fn command_name(&self, locale: &str) -> &'static str {
         use PendingSetting::*;
         let zh = locale.eq_ignore_ascii_case("zh");
         match self {
@@ -512,30 +488,30 @@ impl PendingSetting {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UserSessionState {
-    pub foreground: DialogState,
+pub(crate) struct UserSessionState {
+    pub(crate) foreground: DialogState,
     #[serde(default)]
-    pub background: BTreeMap<String, DialogState>,
+    pub(crate) background: BTreeMap<String, DialogState>,
     #[serde(default)]
-    pub background_order: Vec<String>,
+    pub(crate) background_order: Vec<String>,
     #[serde(default)]
-    pub settings: SessionSettings,
+    pub(crate) settings: SessionSettings,
     #[serde(default)]
-    pub alias_seq: u64,
+    pub(crate) alias_seq: u64,
     #[serde(default)]
-    pub last_projects_view: Vec<String>,
+    pub(crate) last_projects_view: Vec<String>,
     #[serde(default)]
-    pub last_sessions_view: Vec<String>,
+    pub(crate) last_sessions_view: Vec<String>,
     #[serde(default)]
-    pub last_import_projects_view: Vec<String>,
+    pub(crate) last_import_projects_view: Vec<String>,
     #[serde(default)]
-    pub last_import_sessions_view: Vec<String>,
+    pub(crate) last_import_sessions_view: Vec<String>,
     #[serde(default)]
-    pub saved_local_session_ids: Vec<String>,
+    pub(crate) saved_local_session_ids: Vec<String>,
     #[serde(default)]
-    pub command_aliases: BTreeMap<String, CommandAlias>,
+    pub(crate) command_aliases: BTreeMap<String, CommandAlias>,
     #[serde(default)]
-    pub pending_setting: Option<PendingSetting>,
+    pub(crate) pending_setting: Option<PendingSetting>,
 }
 
 impl UserSessionState {
@@ -543,7 +519,8 @@ impl UserSessionState {
     /// `Default`-ish literals in `session/store.rs`; kept as the single source
     /// of truth for the initial field values so those literals can be folded
     /// into it.
-    pub fn new(default_workspace_dir: PathBuf) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn new(default_workspace_dir: PathBuf) -> Self {
         Self {
             foreground: DialogState::new_temporary(default_workspace_dir),
             background: BTreeMap::new(),
@@ -562,13 +539,13 @@ impl UserSessionState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct PersistedSessionState {
+pub(crate) struct PersistedSessionState {
     #[serde(default)]
-    pub users: BTreeMap<String, UserSessionState>,
+    pub(crate) users: BTreeMap<String, UserSessionState>,
     #[serde(default)]
-    pub imported_profiles: BTreeMap<String, ImportedSessionProfile>,
+    pub(crate) imported_profiles: BTreeMap<String, ImportedSessionProfile>,
     #[serde(default)]
-    pub cron_jobs: BTreeMap<String, CronJob>,
+    pub(crate) cron_jobs: BTreeMap<String, CronJob>,
 }
 
 #[cfg(test)]

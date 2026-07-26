@@ -14,25 +14,24 @@ use crate::util::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct CodexRuntimeProfile {
-    pub configured_model: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub service_tier: Option<ServiceTier>,
-    pub context_mode: Option<ContextMode>,
-    pub model_provider: Option<String>,
+pub(crate) struct CodexRuntimeProfile {
+    pub(crate) configured_model: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
+    pub(crate) context_mode: Option<ContextMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexModelEntry {
-    pub name: String,
-    pub aliases: Vec<String>,
-    pub description: Option<String>,
-    pub description_zh: Option<String>,
-    pub description_en: Option<String>,
+pub(crate) struct CodexModelEntry {
+    pub(crate) name: String,
+    pub(crate) aliases: Vec<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) description_zh: Option<String>,
+    pub(crate) description_en: Option<String>,
 }
 
 impl CodexModelEntry {
-    pub fn description_for_locale(&self, locale: &str) -> Option<&str> {
+    pub(crate) fn description_for_locale(&self, locale: &str) -> Option<&str> {
         if locale.eq_ignore_ascii_case("zh") {
             self.description_zh
                 .as_deref()
@@ -53,7 +52,6 @@ struct RawConfig {
     model_reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<ServiceTier>,
     model_context_window: Option<u64>,
-    model_provider: Option<String>,
     #[serde(default)]
     profiles: Option<BTreeMap<String, RawProfile>>,
 }
@@ -83,7 +81,7 @@ struct RawModelEntry {
 
 const CODEX_MODELS_TOML: &str = include_str!("../../config/codex_models.toml");
 
-pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeProfile {
+pub(crate) fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeProfile {
     let Ok(raw) = std::fs::read_to_string(config_path) else {
         return CodexRuntimeProfile::default();
     };
@@ -97,13 +95,10 @@ pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeP
         context_mode: parsed
             .model_context_window
             .map(ContextMode::from_model_context_window),
-        model_provider: parsed
-            .model_provider
-            .filter(|value| !value.trim().is_empty()),
     }
 }
 
-pub fn write_service_tier_to_config_path(
+pub(crate) fn write_service_tier_to_config_path(
     config_path: &Path,
     service_tier: Option<ServiceTier>,
 ) -> Result<()> {
@@ -114,7 +109,7 @@ pub fn write_service_tier_to_config_path(
     )
 }
 
-pub fn write_model_to_config_path(config_path: &Path, model: Option<&str>) -> Result<()> {
+pub(crate) fn write_model_to_config_path(config_path: &Path, model: Option<&str>) -> Result<()> {
     write_top_level_config_value(
         config_path,
         "model",
@@ -122,7 +117,7 @@ pub fn write_model_to_config_path(config_path: &Path, model: Option<&str>) -> Re
     )
 }
 
-pub fn write_reasoning_effort_to_config_path(
+pub(crate) fn write_reasoning_effort_to_config_path(
     config_path: &Path,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<()> {
@@ -133,7 +128,7 @@ pub fn write_reasoning_effort_to_config_path(
     )
 }
 
-pub fn write_context_mode_to_config_path(
+pub(crate) fn write_context_mode_to_config_path(
     config_path: &Path,
     context_mode: Option<ContextMode>,
 ) -> Result<()> {
@@ -156,14 +151,14 @@ pub fn write_context_mode_to_config_path(
 ///   3. `model` values defined under `[profiles.*]` in that same file.
 ///   4. An optional `extra` slice for per-session overrides the caller wants
 ///      surfaced (e.g. the user's `model_override`).
-pub fn list_codex_model_entries(
+pub(crate) fn list_codex_model_entries(
     runtime_profile: &CodexRuntimeProfile,
     extra: &[String],
 ) -> Vec<CodexModelEntry> {
     list_codex_model_entries_with_path(runtime_profile, extra, &codex_config_path())
 }
 
-pub fn list_codex_model_entries_with_path(
+fn list_codex_model_entries_with_path(
     runtime_profile: &CodexRuntimeProfile,
     extra: &[String],
     config_path: &Path,

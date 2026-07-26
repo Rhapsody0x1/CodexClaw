@@ -6,7 +6,7 @@
 
 pub(crate) mod fs;
 pub(crate) mod lang;
-pub mod layout;
-pub mod path;
+pub(crate) mod layout;
+pub(crate) mod path;
 pub(crate) mod text;
 pub(crate) mod time;

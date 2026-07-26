@@ -1,9 +1,19 @@
+//! The `codex exec` NDJSON event schema.
+//!
+//! `dead_code` is allowed module-wide: this is a transcription of the events
+//! codex emits, and the shape has to follow the producer rather than today's
+//! consumers. Only [`CodexEvent::ItemCompleted`] and the token-usage types are
+//! read right now (`exec_output.rs` keeps completed `agent_message` items,
+//! `app_server/session.rs` builds [`TokenUsageInfo`]); the remaining variants
+//! and fields are the parts of the stream this crate does not act on yet.
+#![allow(dead_code)]
+
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
-pub enum CodexEvent {
+pub(crate) enum CodexEvent {
     #[serde(rename = "thread.started")]
     ThreadStarted { thread_id: String },
     #[serde(rename = "turn.started")]
@@ -31,7 +41,7 @@ pub enum CodexEvent {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ResponseItemPayload {
+pub(crate) enum ResponseItemPayload {
     WebSearchCall {
         #[serde(default)]
         status: Option<String>,
@@ -43,7 +53,7 @@ pub enum ResponseItemPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum EventMsgPayload {
+pub(crate) enum EventMsgPayload {
     TokenCount {
         #[serde(default)]
         info: Option<TokenUsageInfo>,
@@ -53,52 +63,52 @@ pub enum EventMsgPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct CodexItem {
+pub(crate) struct CodexItem {
     #[serde(default)]
-    pub id: Option<String>,
+    pub(crate) id: Option<String>,
     #[serde(rename = "type")]
-    pub item_type: String,
+    pub(crate) item_type: String,
     #[serde(default)]
-    pub text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(default)]
-    pub message: Option<String>,
+    pub(crate) message: Option<String>,
     #[serde(default)]
-    pub command: Option<String>,
+    pub(crate) command: Option<String>,
     #[serde(default)]
-    pub query: Option<String>,
+    pub(crate) query: Option<String>,
     #[serde(default)]
-    pub action: Option<WebSearchAction>,
+    pub(crate) action: Option<WebSearchAction>,
     #[serde(default)]
-    pub changes: Vec<FileUpdateChange>,
+    pub(crate) changes: Vec<FileUpdateChange>,
     #[serde(default)]
-    pub server: Option<String>,
+    pub(crate) server: Option<String>,
     #[serde(default)]
-    pub tool: Option<String>,
+    pub(crate) tool: Option<String>,
     #[serde(default)]
-    pub arguments: Option<JsonValue>,
+    pub(crate) arguments: Option<JsonValue>,
     #[serde(default)]
-    pub result: Option<McpToolCallResult>,
+    pub(crate) result: Option<McpToolCallResult>,
     #[serde(default)]
-    pub error: Option<McpToolCallError>,
+    pub(crate) error: Option<McpToolCallError>,
     #[serde(default)]
-    pub prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(default)]
-    pub sender_thread_id: Option<String>,
+    pub(crate) sender_thread_id: Option<String>,
     #[serde(default)]
-    pub receiver_thread_ids: Vec<String>,
+    pub(crate) receiver_thread_ids: Vec<String>,
     #[serde(default)]
-    pub items: Vec<TodoEntry>,
+    pub(crate) items: Vec<TodoEntry>,
     #[serde(default)]
-    pub aggregated_output: Option<String>,
+    pub(crate) aggregated_output: Option<String>,
     #[serde(default)]
-    pub exit_code: Option<i32>,
+    pub(crate) exit_code: Option<i32>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub(crate) status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WebSearchAction {
+pub(crate) enum WebSearchAction {
     Search {
         #[serde(default)]
         query: Option<String>,
@@ -120,58 +130,58 @@ pub enum WebSearchAction {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct FileUpdateChange {
-    pub path: String,
-    pub kind: PatchChangeKind,
+pub(crate) struct FileUpdateChange {
+    pub(crate) path: String,
+    pub(crate) kind: PatchChangeKind,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PatchChangeKind {
+pub(crate) enum PatchChangeKind {
     Add,
     Delete,
     Update,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct McpToolCallResult {
+pub(crate) struct McpToolCallResult {
     #[serde(default)]
-    pub content: Vec<JsonValue>,
+    pub(crate) content: Vec<JsonValue>,
     #[serde(default)]
-    pub structured_content: Option<JsonValue>,
+    pub(crate) structured_content: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct McpToolCallError {
-    pub message: String,
+pub(crate) struct McpToolCallError {
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TodoEntry {
-    pub text: String,
-    pub completed: bool,
+pub(crate) struct TodoEntry {
+    pub(crate) text: String,
+    pub(crate) completed: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct TokenUsage {
+pub(crate) struct TokenUsage {
     #[serde(default)]
-    pub input_tokens: u64,
+    pub(crate) input_tokens: u64,
     #[serde(default)]
-    pub cached_input_tokens: u64,
+    pub(crate) cached_input_tokens: u64,
     #[serde(default)]
-    pub output_tokens: u64,
+    pub(crate) output_tokens: u64,
     #[serde(default)]
-    pub reasoning_output_tokens: u64,
+    pub(crate) reasoning_output_tokens: u64,
     #[serde(default)]
-    pub total_tokens: u64,
+    pub(crate) total_tokens: u64,
 }
 
 impl TokenUsage {
-    pub fn total(&self) -> u64 {
+    pub(crate) fn total(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 
-    pub fn tokens_in_context_window(&self) -> u64 {
+    pub(crate) fn tokens_in_context_window(&self) -> u64 {
         if self.total_tokens > 0 {
             self.total_tokens
         } else {
@@ -201,15 +211,15 @@ impl TokenUsage {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TokenUsageInfo {
     #[serde(default)]
-    pub total_token_usage: TokenUsage,
+    pub(crate) total_token_usage: TokenUsage,
     #[serde(default)]
-    pub last_token_usage: TokenUsage,
+    pub(crate) last_token_usage: TokenUsage,
     #[serde(default)]
-    pub model_context_window: Option<u64>,
+    pub(crate) model_context_window: Option<u64>,
 }
 
 impl TokenUsageInfo {
-    pub fn context_window_usage(&self) -> &TokenUsage {
+    pub(crate) fn context_window_usage(&self) -> &TokenUsage {
         if self.last_token_usage.tokens_in_context_window() > 0
             || self.total_token_usage.tokens_in_context_window() == 0
         {

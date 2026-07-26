@@ -7,11 +7,11 @@ use std::{
 use crate::skills::writer::SLUG_PREFIX;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillMeta {
-    pub slug: String,
-    pub name: String,
-    pub description: String,
-    pub dir: PathBuf,
+pub(crate) struct SkillMeta {
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) dir: PathBuf,
 }
 
 pub struct SkillIndex {
@@ -27,11 +27,11 @@ impl SkillIndex {
         }
     }
 
-    pub fn invalidate(&self) {
+    pub(crate) fn invalidate(&self) {
         *self.cache.write().expect("skill cache poisoned") = None;
     }
 
-    pub fn list_claw(&self) -> anyhow::Result<Vec<SkillMeta>> {
+    pub(crate) fn list_claw(&self) -> anyhow::Result<Vec<SkillMeta>> {
         if let Some(hit) = self.cache.read().expect("skill cache poisoned").as_ref() {
             return Ok(hit.clone());
         }
@@ -41,7 +41,7 @@ impl SkillIndex {
     }
 }
 
-pub fn parse_frontmatter(md: &str) -> Option<HashMap<String, String>> {
+fn parse_frontmatter(md: &str) -> Option<HashMap<String, String>> {
     let rest = md.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
     let body = &rest[..end];
@@ -58,7 +58,7 @@ pub fn parse_frontmatter(md: &str) -> Option<HashMap<String, String>> {
     Some(out)
 }
 
-pub fn scan_claw_skills(root: &Path) -> anyhow::Result<Vec<SkillMeta>> {
+fn scan_claw_skills(root: &Path) -> anyhow::Result<Vec<SkillMeta>> {
     let mut out = Vec::new();
     let read = match std::fs::read_dir(root) {
         Ok(r) => r,

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{message::IncomingMessage, model::settings::SessionSettings};
 
-pub fn build_prompt(
+pub(crate) fn build_prompt(
     message: &IncomingMessage,
     settings: &SessionSettings,
     default_model: &str,

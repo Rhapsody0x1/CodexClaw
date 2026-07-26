@@ -33,23 +33,22 @@ use super::{
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<JsonValue, JsonRpcError>>>>>;
 
 #[derive(Debug, Clone)]
-pub struct Notification {
-    pub method: String,
-    pub params: JsonValue,
+pub(crate) struct Notification {
+    pub(crate) method: String,
+    pub(crate) params: JsonValue,
 }
 
 #[derive(Debug)]
-pub struct ServerRequest {
-    pub id: JsonValue,
-    pub method: String,
-    pub params: JsonValue,
+pub(crate) struct ServerRequest {
+    pub(crate) id: JsonValue,
+    pub(crate) method: String,
+    pub(crate) params: JsonValue,
 }
 
-pub struct JsonRpcClient {
+pub(crate) struct JsonRpcClient {
     transport: Arc<StdioTransport>,
     pending: PendingMap,
     next_id: AtomicI64,
-    notifications_tx: broadcast::Sender<Notification>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -57,7 +56,7 @@ pub struct JsonRpcClient {
 impl JsonRpcClient {
     /// Construct a client and start its reader. Returns the client plus a
     /// receiver that fires when the reader task exits (child EOF).
-    pub async fn start(
+    pub(crate) async fn start(
         transport: Arc<StdioTransport>,
         notifications_tx: broadcast::Sender<Notification>,
         server_requests_tx: mpsc::Sender<ServerRequest>,
@@ -70,7 +69,7 @@ impl JsonRpcClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
-        let notifications_for_reader = notifications_tx.clone();
+        let notifications_for_reader = notifications_tx;
 
         let (exit_tx, exit_rx) = oneshot::channel();
         let raw_handle = tokio::spawn({
@@ -123,14 +122,13 @@ impl JsonRpcClient {
             transport,
             pending,
             next_id: AtomicI64::new(1),
-            notifications_tx,
             reader_handle: Mutex::new(Some(raw_handle)),
             stderr_handle: Mutex::new(stderr_handle),
         });
         Ok((client, exit_rx))
     }
 
-    pub async fn request<P, R>(&self, method: &str, params: &P) -> Result<R>
+    pub(crate) async fn request<P, R>(&self, method: &str, params: &P) -> Result<R>
     where
         P: Serialize,
         R: DeserializeOwned,
@@ -165,7 +163,7 @@ impl JsonRpcClient {
     }
 
     /// Fire-and-forget: parameter-less notification (e.g. `initialized`).
-    pub async fn notify_empty(&self, method: &str) -> Result<()> {
+    pub(crate) async fn notify_empty(&self, method: &str) -> Result<()> {
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -173,7 +171,7 @@ impl JsonRpcClient {
         self.transport.write_message(msg).await
     }
 
-    pub async fn respond_ok<R: Serialize>(&self, id: JsonValue, result: &R) -> Result<()> {
+    pub(crate) async fn respond_ok<R: Serialize>(&self, id: JsonValue, result: &R) -> Result<()> {
         let result = serde_json::to_value(result).context("serialize response result")?;
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -183,7 +181,7 @@ impl JsonRpcClient {
         self.transport.write_message(msg).await
     }
 
-    pub async fn respond_err(&self, id: JsonValue, err: JsonRpcError) -> Result<()> {
+    pub(crate) async fn respond_err(&self, id: JsonValue, err: JsonRpcError) -> Result<()> {
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -192,12 +190,8 @@ impl JsonRpcClient {
         self.transport.write_message(msg).await
     }
 
-    pub fn subscribe_notifications(&self) -> broadcast::Receiver<Notification> {
-        self.notifications_tx.subscribe()
-    }
-
     /// Wake every outstanding request with a disconnect error.
-    pub async fn drain_pending_with_disconnect(&self, reason: &str) {
+    pub(crate) async fn drain_pending_with_disconnect(&self, reason: &str) {
         let mut pending = self.pending.lock().await;
         for (_, tx) in pending.drain() {
             let _ = tx.send(Err(JsonRpcError {
@@ -208,7 +202,7 @@ impl JsonRpcClient {
         }
     }
 
-    pub async fn shutdown(&self, reason: &str) {
+    pub(crate) async fn shutdown(&self, reason: &str) {
         debug!(reason, "shutting down JsonRpcClient");
         self.drain_pending_with_disconnect(reason).await;
         if let Some(handle) = self.reader_handle.lock().await.take() {

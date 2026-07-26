@@ -19,21 +19,21 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildRecord {
-    pub built_at: String,
-    pub command: String,
-    pub binary_path: String,
-    pub success: bool,
+struct BuildRecord {
+    pub(crate) built_at: String,
+    pub(crate) command: String,
+    pub(crate) binary_path: String,
+    pub(crate) success: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct BuildResult {
-    pub success: bool,
-    pub binary_path: PathBuf,
-    pub summary: String,
+pub(crate) struct BuildResult {
+    pub(crate) success: bool,
+    pub(crate) binary_path: PathBuf,
+    pub(crate) summary: String,
 }
 
-pub fn changed_self_repo(
+pub(crate) fn changed_self_repo(
     workspace_dir: &Path,
     changed_files: &[PathBuf],
     self_repo_dir: &Path,
@@ -48,7 +48,7 @@ pub fn changed_self_repo(
     })
 }
 
-pub async fn ensure_successful_build(config: &AppConfig) -> Result<BuildResult> {
+pub(crate) async fn ensure_successful_build(config: &AppConfig) -> Result<BuildResult> {
     // Self-update must deploy the current working tree, not a previously
     // recorded build artifact. Reusing last-build.json can silently roll the
     // service back to an older binary when source files changed after the last
@@ -56,7 +56,7 @@ pub async fn ensure_successful_build(config: &AppConfig) -> Result<BuildResult> 
     run_build(config).await
 }
 
-pub async fn run_build(config: &AppConfig) -> Result<BuildResult> {
+pub(crate) async fn run_build(config: &AppConfig) -> Result<BuildResult> {
     let parts = shlex::split(&config.general.self_build_command).ok_or_else(|| {
         anyhow!(
             "invalid self_build_command: {}",
@@ -133,7 +133,7 @@ pub async fn run_build(config: &AppConfig) -> Result<BuildResult> {
     })
 }
 
-pub async fn save_last_build_record(data_dir: &Path, record: &BuildRecord) -> Result<()> {
+async fn save_last_build_record(data_dir: &Path, record: &BuildRecord) -> Result<()> {
     let path = last_build_path(data_dir);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -199,7 +199,7 @@ fn truncate(input: &str, max_chars: usize) -> String {
 /// arg handling, env drift) is caught BEFORE it overwrites the running binary.
 /// `--smoke-test` loads and normalizes config, unlike `--help` which returns
 /// before any startup work.
-pub async fn smoke_test_binary(binary: &Path) -> Result<()> {
+pub(crate) async fn smoke_test_binary(binary: &Path) -> Result<()> {
     use std::process::Stdio;
     use std::time::Duration;
 
@@ -222,7 +222,10 @@ pub async fn smoke_test_binary(binary: &Path) -> Result<()> {
     }
 }
 
-pub async fn replace_binary_for_restart(source_binary: &Path, target_binary: &Path) -> Result<()> {
+pub(crate) async fn replace_binary_for_restart(
+    source_binary: &Path,
+    target_binary: &Path,
+) -> Result<()> {
     anyhow::ensure!(
         source_binary.exists(),
         "build output does not exist: {}",

@@ -2,16 +2,16 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use codex_claw::{
+    DataLayout,
     app::App,
     codex::{AppServerHandle, ClientInfo, CodexExecutor, build_codex_path_env, config_snapshot},
     config::AppConfig,
-    memory::store::MemoryStore,
+    memory::MemoryStore,
     qq::{C2CMessageEvent, QqApiClient, spawn_gateway},
     scheduler,
     session::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
-    skills::index::SkillIndex,
-    util::{layout::DataLayout, path::home_dir},
+    skills::SkillIndex,
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let mut config = AppConfig::load()?;
-    normalize_config_paths(&mut config).await?;
+    config.normalize_paths().await?;
     // Startup self-check used by the self-update smoke test: exercises arg
     // handling + config load/normalization (the common startup-panic surface)
     // and exits 0 without starting the service. Placed after config load so a
@@ -109,11 +109,7 @@ async fn run_bot(config: AppConfig) -> Result<()> {
         )
         .await?,
     );
-    let codex = Arc::new(CodexExecutor::new(
-        config.general.codex_binary.clone(),
-        config.general.data_dir.clone(),
-        app_server,
-    ));
+    let codex = Arc::new(CodexExecutor::new(app_server));
     let layout = DataLayout::new(&config.general.data_dir);
     let memory = Arc::new(MemoryStore::new(layout.memory_dir()));
     let skills_root = config.general.codex_home_global.join("skills");
@@ -224,57 +220,6 @@ async fn wait_for_shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-}
-
-async fn normalize_config_paths(config: &mut AppConfig) -> Result<()> {
-    config.general.data_dir = normalize_path(config.general.data_dir.clone()).await?;
-    config.general.codex_home_global =
-        normalize_path(config.general.codex_home_global.clone()).await?;
-    config.general.system_codex_home =
-        normalize_path(config.general.system_codex_home.clone()).await?;
-    config.general.default_workspace_dir =
-        normalize_path(config.general.default_workspace_dir.clone()).await?;
-    config.general.self_repo_dir = normalize_path(config.general.self_repo_dir.clone()).await?;
-    config.general.self_binary_path = if config.general.self_binary_path.is_absolute() {
-        config.general.self_binary_path.clone()
-    } else {
-        normalize_path(
-            config
-                .general
-                .self_repo_dir
-                .join(&config.general.self_binary_path),
-        )
-        .await?
-    };
-    Ok(())
-}
-
-async fn normalize_path(path: PathBuf) -> Result<PathBuf> {
-    let expanded = expand_tilde(path);
-    let absolute = if expanded.is_absolute() {
-        expanded
-    } else {
-        std::env::current_dir()?.join(expanded)
-    };
-    tokio::fs::create_dir_all(
-        absolute
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-    )
-    .await
-    .ok();
-    std::fs::canonicalize(&absolute).or(Ok(absolute))
-}
-
-fn expand_tilde(path: PathBuf) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return home_dir();
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return home_dir().join(rest);
-    }
-    path
 }
 
 #[cfg(test)]
