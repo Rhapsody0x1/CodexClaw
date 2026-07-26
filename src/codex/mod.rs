@@ -2,6 +2,7 @@ pub mod app_server;
 pub mod config_snapshot;
 pub(crate) mod display;
 pub(crate) mod events;
+pub(crate) mod exec_cli;
 pub(crate) mod exec_output;
 pub(crate) mod executor;
 pub(crate) mod prompt;
@@ -24,7 +25,7 @@ pub(crate) use app_server::{
     PermissionsApprovalEvent,
 };
 pub(crate) use events::CodexEvent;
-pub(crate) use exec_output::{agent_messages_from_lines, agent_messages_from_stdout};
+pub(crate) use exec_output::agent_messages_from_lines;
 pub(crate) use prompt::build_prompt;
 pub(crate) use runtime::{
     CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries,

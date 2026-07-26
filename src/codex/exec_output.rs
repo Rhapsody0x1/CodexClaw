@@ -34,8 +34,3 @@ where
     }
     parts.join("\n")
 }
-
-/// [`agent_messages_from_lines`] over a raw stdout buffer (lossy UTF-8).
-pub(crate) fn agent_messages_from_stdout(stdout: &[u8]) -> String {
-    agent_messages_from_lines(String::from_utf8_lossy(stdout).lines())
-}

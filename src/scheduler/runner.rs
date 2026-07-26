@@ -1,17 +1,19 @@
-use std::{process::Stdio, time::Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use rust_i18n::t;
 use tokio::{
-    io::AsyncReadExt,
     process::Command,
     sync::{mpsc, oneshot},
     time::{sleep, timeout},
 };
 
 use crate::{
-    codex::{ExecutionRequest, ExecutionUpdate, agent_messages_from_stdout},
+    codex::{
+        ExecutionRequest, ExecutionUpdate, agent_messages_from_lines,
+        exec_cli::{self, ExecSpec},
+    },
     session::state::{ApprovalPolicySetting, DialogProfile, SessionSettings, SessionState},
     util::{layout::DataLayout, text::truncate_middle},
 };
@@ -351,88 +353,46 @@ async fn run_codex_exec(
     env: &std::collections::BTreeMap<String, String>,
     max_duration: std::time::Duration,
 ) -> Result<String> {
-    let mut cmd = Command::new(&ctx.config.general.codex_binary);
-    cmd.args(codex_exec_args(model, extra_args, prompt));
-    cmd.env("CODEX_HOME", &ctx.config.general.codex_home_global);
-    cmd.envs(env);
-    cmd.current_dir(&job.workspace_dir);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-    let mut child = cmd.spawn().context("failed to spawn codex exec")?;
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let stdout_task = tokio::spawn(async move {
-        let mut stdout = Vec::new();
-        if let Some(out) = stdout_pipe.as_mut() {
-            out.read_to_end(&mut stdout).await?;
-        }
-        Ok::<_, std::io::Error>(stdout)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut stderr = Vec::new();
-        if let Some(err) = stderr_pipe.as_mut() {
-            err.read_to_end(&mut stderr).await?;
-        }
-        Ok::<_, std::io::Error>(stderr)
-    });
-    let status = match timeout(max_duration, child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
-            child.kill().await.ok();
-            child.wait().await.ok();
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(anyhow!("timed out after {}s", max_duration.as_secs()));
-        }
-    };
-    let stdout = stdout_task
-        .await
-        .context("failed to join codex exec stdout reader")?
-        .context("failed to read codex exec stdout")?;
-    let stderr = stderr_task
-        .await
-        .context("failed to join codex exec stderr reader")?
-        .context("failed to read codex exec stderr")?;
+    let output = exec_cli::run(ExecSpec {
+        binary: &ctx.config.general.codex_binary,
+        codex_home: &ctx.config.general.codex_home_global,
+        cwd: &job.workspace_dir,
+        prompt,
+        model,
+        reasoning: None,
+        sandbox: None,
+        ephemeral: false,
+        extra_args,
+        env: Some(env),
+        deadline: max_duration,
+        capture_stderr: true,
+        label: "codex exec",
+    })
+    .await?;
+    let stdout_text = output.stdout_lines.join("\n");
     let combined = format!(
         "{}{}{}",
-        String::from_utf8_lossy(&stdout),
-        if stderr.is_empty() {
+        stdout_text,
+        if output.stderr.is_empty() {
             ""
         } else {
             "\n[stderr]\n"
         },
-        String::from_utf8_lossy(&stderr)
+        output.stderr
     );
-    if !status.success() {
+    if !output.status.success() {
         return Err(anyhow!(
-            "codex exec exited with {status}: {}",
+            "codex exec exited with {}: {}",
+            output.status,
             truncate_middle(combined.trim(), MAX_CODEX_EXEC_ERROR_CHARS)
         ));
     }
-    let agent_output = agent_messages_from_stdout(&stdout);
+    let agent_output = agent_messages_from_lines(&output.stdout_lines);
     if agent_output.trim().is_empty() {
-        Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+        Ok(stdout_text.trim().to_string())
     } else {
         Ok(agent_output)
     }
-}
-
-fn codex_exec_args(model: Option<&str>, extra_args: &[String], prompt: &str) -> Vec<String> {
-    let mut args = vec!["exec".to_string()];
-    if !extra_args.iter().any(|arg| arg == "--skip-git-repo-check") {
-        args.push("--skip-git-repo-check".to_string());
-    }
-    if !extra_args.iter().any(|arg| arg == "--json") {
-        args.push("--json".to_string());
-    }
-    if let Some(model) = model {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-    args.extend(extra_args.iter().cloned());
-    args.push(prompt.to_string());
-    args
 }
 
 async fn run_codex_turn(
@@ -729,7 +689,7 @@ fn format_run_log(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_messages_from_stdout, codex_exec_args, keep_interrupted_thread};
+    use super::{agent_messages_from_lines, keep_interrupted_thread};
     use crate::codex::ExecutionUpdate;
     use crate::model::cron::fixtures::shell_job;
     use crate::scheduler::store::{CronJob, JobAction, SessionStrategy};
@@ -817,61 +777,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_exec_args_include_git_repo_check_skip_and_json_by_default() {
-        let extra_args = vec!["--output-schema".to_string(), "{}".to_string()];
-
-        let args = codex_exec_args(Some("gpt-5.5"), &extra_args, "hello");
-
-        assert_eq!(
-            args,
-            vec![
-                "exec",
-                "--skip-git-repo-check",
-                "--json",
-                "--model",
-                "gpt-5.5",
-                "--output-schema",
-                "{}",
-                "hello"
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_exec_args_do_not_duplicate_explicit_git_repo_check_skip_or_json() {
-        let extra_args = vec![
-            "--skip-git-repo-check".to_string(),
-            "--json".to_string(),
-            "--output-schema".to_string(),
-            "{}".to_string(),
-        ];
-
-        let args = codex_exec_args(None, &extra_args, "hello");
-
-        assert_eq!(
-            args,
-            vec![
-                "exec",
-                "--skip-git-repo-check",
-                "--json",
-                "--output-schema",
-                "{}",
-                "hello"
-            ]
-        );
-        assert_eq!(
-            args.iter()
-                .filter(|arg| arg.as_str() == "--skip-git-repo-check")
-                .count(),
-            1
-        );
-        assert_eq!(
-            args.iter().filter(|arg| arg.as_str() == "--json").count(),
-            1
-        );
-    }
-
-    #[test]
     fn codex_exec_stdout_extraction_ignores_events_and_stderr_noise() {
         let stdout = r#"{"type":"thread.started","thread_id":"x"}
 {"type":"item.completed","item":{"id":"a","type":"reasoning","text":"hidden"}}
@@ -881,7 +786,7 @@ not json
 "#;
 
         assert_eq!(
-            agent_messages_from_stdout(stdout.as_bytes()),
+            agent_messages_from_lines(stdout.lines()),
             "早餐正文".to_string()
         );
     }

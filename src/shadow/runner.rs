@@ -1,13 +1,11 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, time::Duration};
 
-use anyhow::{Context, Result, anyhow};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    time::timeout,
+use anyhow::{Result, anyhow};
+
+use crate::codex::{
+    agent_messages_from_lines,
+    exec_cli::{self, ExecSpec},
 };
-
-use crate::codex::agent_messages_from_lines;
 
 pub(crate) struct OneshotConfig<'a> {
     pub(crate) codex_binary: &'a str,
@@ -19,93 +17,30 @@ pub(crate) struct OneshotConfig<'a> {
     pub(crate) deadline: Duration,
 }
 
+/// Run one read-only, ephemeral `codex exec` and return only the agent's
+/// message text. Strict contract: a non-zero exit is an error, never partial
+/// output — a distillation that half-ran must not be applied.
 pub(crate) async fn run_codex_oneshot(cfg: OneshotConfig<'_>) -> Result<String> {
-    let mut cmd = Command::new(cfg.codex_binary);
-    cmd.arg("exec")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--skip-git-repo-check")
-        .arg("--ephemeral")
-        .arg("--json")
-        .arg("-C")
-        .arg(cfg.workspace_dir)
-        .env("CODEX_HOME", cfg.codex_home);
-    if let Some(model) = cfg.model {
-        cmd.arg("-m").arg(model);
+    let output = exec_cli::run(ExecSpec {
+        binary: cfg.codex_binary,
+        codex_home: cfg.codex_home,
+        cwd: cfg.workspace_dir,
+        prompt: cfg.prompt,
+        model: cfg.model,
+        reasoning: cfg.reasoning,
+        sandbox: Some("read-only"),
+        ephemeral: true,
+        extra_args: &[],
+        env: None,
+        deadline: cfg.deadline,
+        capture_stderr: false,
+        label: "codex shadow",
+    })
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!("codex shadow exited with status {}", output.status));
     }
-    if let Some(reasoning) = cfg.reasoning {
-        cmd.arg("-c")
-            .arg(format!("model_reasoning_effort=\"{reasoning}\""));
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Ensure any early return / drop kills the child instead of leaking a
-        // still-running codex process (the reader-error path returns without an
-        // explicit kill).
-        .kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn {}", cfg.codex_binary))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(cfg.prompt.as_bytes())
-            .await
-            .context("failed to write shadow prompt to codex stdin")?;
-        stdin.shutdown().await.ok();
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("codex exec produced no stdout"))?;
-    let stderr = child.stderr.take();
-    let mut reader = BufReader::new(stdout).lines();
-
-    let mut lines = Vec::new();
-    let collect = async {
-        let read_stdout = async {
-            while let Some(line) = reader.next_line().await? {
-                lines.push(line);
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-        // `codex exec --json` writes log/progress lines to stderr. If that pipe
-        // is never drained it fills (~64KB), the child blocks writing, and it
-        // stops producing stdout — stalling collection until the deadline.
-        // Drain stderr concurrently so the pipe can never back up.
-        let drain_stderr = async {
-            if let Some(stderr) = stderr {
-                let mut err_reader = BufReader::new(stderr).lines();
-                while let Ok(Some(_)) = err_reader.next_line().await {}
-            }
-        };
-        let (stdout_result, ()) = tokio::join!(read_stdout, drain_stderr);
-        stdout_result
-    };
-
-    match timeout(cfg.deadline, collect).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => return Err(err),
-        Err(_) => {
-            child.start_kill().ok();
-            return Err(anyhow!("codex shadow timed out after {:?}", cfg.deadline));
-        }
-    }
-
-    // Guard the reap with a timeout: even after stdout closes the child could
-    // otherwise wedge and hang this task forever.
-    let status = match timeout(Duration::from_secs(5), child.wait()).await {
-        Ok(status) => status.context("codex shadow wait failed")?,
-        Err(_) => {
-            child.start_kill().ok();
-            return Err(anyhow!("codex shadow did not exit after stdout closed"));
-        }
-    };
-    if !status.success() {
-        return Err(anyhow!("codex shadow exited with status {status}"));
-    }
-    Ok(agent_messages_from_lines(lines))
+    Ok(agent_messages_from_lines(output.stdout_lines))
 }
 
 #[cfg(test)]
