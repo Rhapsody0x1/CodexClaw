@@ -122,6 +122,11 @@ pub(super) async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
             locale = lang.as_str()
         )));
     }
+    // Same gate as /model, /reasoning and /context: the turn-end profile
+    // write-back would silently clobber a mid-turn tier change.
+    if ctx.is_busy {
+        return Ok(busy_reply(lang.as_str()));
+    }
     let value = args.join(" ");
     let next = interactive::resolve_fast_input(&value)
         .ok_or_else(|| anyhow!(t!("commands.fast.invalid", locale = lang.as_str()).into_owned()))?;

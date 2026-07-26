@@ -46,6 +46,10 @@ impl App {
             .await?
             .is_some()
         {
+            // The interactive job may have a codex turn mid-flight; stop it
+            // before restoring the parked dialog, or it keeps streaming into
+            // the restored conversation.
+            self.cancel_active_turn().await;
             crate::scheduler::finish_job_for_owner(
                 &self.scheduler_ctx,
                 &normalized.sender_openid,
@@ -63,6 +67,14 @@ impl App {
             )
             .await?;
             return Ok(());
+        }
+
+        // Cancel the running turn *before* /stop mutates the session state, so
+        // the abort tail races a foreground that has already moved on (the CAS
+        // binding drops it) instead of streaming into the swapped dialog.
+        // Alias-expanded stops still get cancelled via dispatch_outcome.
+        if matches!(trimmed_command, "/stop" | "/停止") {
+            self.cancel_active_turn().await;
         }
 
         let command_outcome = match maybe_handle_command(
@@ -293,10 +305,11 @@ impl App {
                 message_id = %normalized.message_id,
                 "rejected because another turn is still running"
             );
+            let lang = self.command_locale(&normalized.sender_openid).await;
             self.reply_text(
                 &normalized.sender_openid,
                 &normalized.message_id,
-                "上一轮仍在处理中，请稍后再试。",
+                &t!("errors.busy", locale = lang.as_str()),
             )
             .await?;
             return Ok(());

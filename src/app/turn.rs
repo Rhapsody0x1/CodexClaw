@@ -274,37 +274,28 @@ impl App {
             text_len = output.text.len(),
             "codex turn completed"
         );
-        if let Some(session_id) = output.session_id.clone() {
-            self.session
-                .bind_foreground_session_profile(
-                    &message.sender_openid,
-                    Some(session_id),
-                    DialogProfile {
-                        model_override: Some(effective_model.clone()),
-                        reasoning_effort: Some(reasoning),
-                        service_tier: None,
-                        context_mode,
-                    },
-                )
-                .await?;
-        } else {
-            self.session
-                .set_foreground_session_id(&message.sender_openid, None)
-                .await?;
-        }
-        let usage_snapshot = if let Some(info) = output.token_usage_info {
-            if let Some(snapshot) = build_usage_snapshot(&info, output.context_window) {
-                let _ = self
-                    .session
-                    .set_foreground_usage(&message.sender_openid, snapshot.clone())
-                    .await;
-                Some(snapshot)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let usage_snapshot = output
+            .token_usage_info
+            .as_ref()
+            .and_then(|info| build_usage_snapshot(info, output.context_window));
+        // CAS-guarded, mirroring the failure tail: if /bg, /new, /fg or /stop
+        // swapped the foreground mid-turn, the finished thread is parked as a
+        // background entry instead of clobbering the dialog the user is on.
+        let parked_alias = self
+            .session
+            .bind_turn_result(
+                &message.sender_openid,
+                &setup.user_snapshot.foreground,
+                output.session_id.clone(),
+                DialogProfile {
+                    model_override: Some(effective_model.clone()),
+                    reasoning_effort: Some(reasoning),
+                    service_tier: None,
+                    context_mode,
+                },
+                usage_snapshot.clone(),
+            )
+            .await?;
         let lang_for_warning = self.command_locale(&message.sender_openid).await;
         let context_warning = usage_snapshot
             .as_ref()
@@ -329,6 +320,19 @@ impl App {
         } else if let Some(warning) = context_warning.as_deref() {
             self.reply_text(&message.sender_openid, &message.message_id, warning)
                 .await?;
+        }
+        if let Some(alias) = parked_alias.as_deref() {
+            let _ = self
+                .reply_text(
+                    &message.sender_openid,
+                    &message.message_id,
+                    &t!(
+                        "commands.bg.auto_parked",
+                        alias = alias,
+                        locale = lang_for_warning.as_str()
+                    ),
+                )
+                .await;
         }
 
         if let Err(err) = crate::scheduler::on_fg_turn_completed(
@@ -526,7 +530,10 @@ impl App {
             self.reply_text(
                 openid,
                 message_id,
-                "当前有任务在运行，请先等待当前任务完成后再执行 `/self-update`。",
+                &t!(
+                    "errors.busy",
+                    locale = self.command_locale(openid).await.as_str()
+                ),
             )
             .await?;
             return Ok(());

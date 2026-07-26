@@ -325,6 +325,69 @@ impl SessionStore {
         .await
     }
 
+    /// Persist a *successful* turn's result onto the right dialog. While the
+    /// foreground is still the dialog the turn started on (same generation),
+    /// this behaves like the plain bind: thread id + profile + usage land on
+    /// the foreground and `None` is returned. When /bg, /new, /fg or /stop
+    /// swapped the foreground mid-turn, the completed thread must not clobber
+    /// the dialog the user switched to — instead it is parked as a background
+    /// entry under a generated alias (returned as `Some(alias)`), so the
+    /// finished conversation stays reachable rather than silently resurfacing
+    /// or getting lost. A turn that produced no thread id only clears the
+    /// foreground binding, and only while the foreground is still its own.
+    pub(crate) async fn bind_turn_result(
+        &self,
+        openid: &str,
+        expected: &DialogState,
+        session_id: Option<String>,
+        profile: DialogProfile,
+        usage: Option<TokenUsageSnapshot>,
+    ) -> Result<Option<String>> {
+        self.mutate_state(|state| {
+            let (parked_alias, cached_profile) = {
+                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                let Some(session_id) = session_id else {
+                    // No thread came out of the turn: clear the stale binding,
+                    // but only if the foreground is still the turn's dialog.
+                    if user.foreground.generation == expected.generation {
+                        user.foreground.session_id = None;
+                        if let Some(usage) = usage {
+                            user.foreground.last_usage = Some(usage);
+                        }
+                    }
+                    return Ok(None);
+                };
+                if Dialogs::of(user).bind_if_current(expected, session_id.clone(), profile.clone())
+                {
+                    if let Some(usage) = usage {
+                        user.foreground.last_usage = Some(usage);
+                    }
+                    (None, cached_profile_from_dialog(&user.foreground))
+                } else {
+                    let parked = DialogState {
+                        session_id: Some(session_id.clone()),
+                        origin: DialogOrigin::Local,
+                        workspace_dir: expected.workspace_dir.clone(),
+                        saved: true,
+                        profile: Some(profile),
+                        last_usage: usage,
+                        generation: 0,
+                    };
+                    let cached = cached_profile_from_dialog(&parked);
+                    let mut dialogs = Dialogs::of(user);
+                    let alias = dialogs.add_background(None, parked)?;
+                    dialogs.register_saved_session(&session_id);
+                    (Some(alias), cached)
+                }
+            };
+            persist_cached_profile(state, cached_profile);
+            Ok(parked_alias)
+        })
+        .await
+    }
+
+    /// Test-only since `bind_turn_result` took over the production path.
+    #[cfg(test)]
     pub(crate) async fn set_foreground_session_id(
         &self,
         openid: &str,
@@ -337,6 +400,8 @@ impl SessionStore {
         .await
     }
 
+    /// Test-only since `bind_turn_result` took over the production path.
+    #[cfg(test)]
     pub(crate) async fn set_foreground_usage(
         &self,
         openid: &str,
@@ -1361,6 +1426,72 @@ mod tests {
         assert!(
             snapshot.foreground.session_id.is_none(),
             "the reset foreground must stay unbound"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_turn_result_parks_thread_when_foreground_moved_on() {
+        let env = TestEnv::new().await;
+
+        // A first turn starts on a fresh temporary foreground; the user sends
+        // /bg (or /new) mid-turn, swapping in a value-identical temporary.
+        let turn_start = env.snapshot("u1").await;
+        env.store.new_foreground("u1").await.unwrap();
+
+        // The turn then *succeeds*: its thread must not clobber the new
+        // foreground — it gets parked as a background entry instead.
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("finished-thread".into()),
+                DialogProfile::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let alias = parked.expect("thread should be parked, not bound");
+        let snapshot = env.snapshot("u1").await;
+        assert!(
+            snapshot.foreground.session_id.is_none(),
+            "foreground untouched"
+        );
+        let entry = snapshot
+            .background
+            .get(&alias)
+            .expect("parked entry exists");
+        assert_eq!(entry.session_id.as_deref(), Some("finished-thread"));
+        assert!(entry.saved, "parked turn results are kept");
+        assert!(
+            snapshot
+                .saved_local_session_ids
+                .iter()
+                .any(|id| id == "finished-thread"),
+            "rollout must survive pruning"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_turn_result_binds_while_foreground_unchanged() {
+        let env = TestEnv::new().await;
+        let turn_start = env.snapshot("u1").await;
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("live-thread".into()),
+                DialogProfile::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(parked.is_none());
+        let snapshot = env.snapshot("u1").await;
+        assert_eq!(
+            snapshot.foreground.session_id.as_deref(),
+            Some("live-thread")
         );
     }
 
