@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use codex_claw::{
@@ -6,13 +6,14 @@ use codex_claw::{
     codex::{AppServerHandle, ClientInfo, CodexExecutor, build_codex_path_env, config_snapshot},
     config::AppConfig,
     memory::store::MemoryStore,
-    qq::{QqApiClient, spawn_gateway},
+    qq::{C2CMessageEvent, QqApiClient, spawn_gateway},
     scheduler,
     session::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
     skills::index::SkillIndex,
     util::{layout::DataLayout, path::home_dir},
 };
+use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
@@ -151,7 +152,13 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     };
     let app = App::new(config, session, qq_client, codex, memory, shadow);
     scheduler::Scheduler::spawn(app.clone());
-    spawn_gateway(app.clone());
+    let (c2c_tx, c2c_rx) = mpsc::unbounded_channel();
+    spawn_gateway(
+        app.config.general.data_dir.clone(),
+        app.qq_client.clone(),
+        c2c_tx,
+    );
+    spawn_c2c_consumer(app.clone(), c2c_rx);
 
     wait_for_shutdown_signal().await;
     tracing::info!("shutdown signal received, terminating app-server child");
@@ -160,6 +167,38 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     // after restart would corrupt the shared SQLite/rollout state).
     app.codex.handle().shutdown().await;
     Ok(())
+}
+
+/// Drain C2C events produced by the QQ gateway into `App::handle_c2c_event`.
+fn spawn_c2c_consumer(app: Arc<App>, events: mpsc::UnboundedReceiver<C2CMessageEvent>) {
+    spawn_dispatch_loop(events, move |event| {
+        let app = app.clone();
+        async move {
+            if let Err(err) = app.handle_c2c_event(event).await {
+                tracing::warn!("failed to process c2c message from gateway: {err:#}");
+            }
+        }
+    });
+}
+
+/// Receive from `events` and hand every item to `handle` on its own detached
+/// task.
+///
+/// The per-item `tokio::spawn` is load-bearing, not incidental: the QQ gateway
+/// used to spawn inline at the receive site, and handling a single message can
+/// occupy a Codex turn for minutes. Awaiting `handle` in this loop instead
+/// would let one slow message stall every message behind it.
+fn spawn_dispatch_loop<T, F, Fut>(mut events: mpsc::UnboundedReceiver<T>, handle: F)
+where
+    T: Send + 'static,
+    F: Fn(T) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        while let Some(item) = events.recv().await {
+            tokio::spawn(handle(item));
+        }
+    });
 }
 
 /// Wait for SIGTERM (service stop / supervisor restart) or SIGINT (Ctrl-C).
@@ -236,4 +275,72 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
         return home_dir().join(rest);
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The dispatch loop must not serialize handlers: a handler that never
+    /// finishes may not keep the items behind it from starting.
+    #[tokio::test]
+    async fn dispatch_loop_does_not_await_handlers_serially() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::unbounded_channel::<usize>();
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel::<usize>();
+
+        let counter = started.clone();
+        spawn_dispatch_loop(rx, move |item| {
+            let counter = counter.clone();
+            let done_tx = done_tx.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                if item == 0 {
+                    // Stands in for a long-running turn.
+                    std::future::pending::<()>().await;
+                }
+                let _ = done_tx.send(item);
+            }
+        });
+
+        for item in 0..3 {
+            tx.send(item).expect("consumer alive");
+        }
+
+        // The two items queued behind the stalled one still complete. A serial
+        // `handle(item).await` loop would hang here instead, so bound the wait
+        // to fail loudly rather than block the suite.
+        let recv_two = async {
+            vec![
+                done_rx.recv().await.expect("second item ran"),
+                done_rx.recv().await.expect("third item ran"),
+            ]
+        };
+        let mut finished = tokio::time::timeout(std::time::Duration::from_secs(5), recv_two)
+            .await
+            .expect("handlers ran concurrently");
+        finished.sort_unstable();
+        assert_eq!(finished, vec![1, 2]);
+        assert_eq!(started.load(Ordering::SeqCst), 3);
+    }
+
+    /// Dropping the receiver ends the loop instead of leaking a live task.
+    #[tokio::test]
+    async fn dispatch_loop_stops_when_sender_is_dropped() {
+        let (tx, rx) = mpsc::unbounded_channel::<usize>();
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel::<usize>();
+        spawn_dispatch_loop(rx, move |item| {
+            let done_tx = done_tx.clone();
+            async move {
+                let _ = done_tx.send(item);
+            }
+        });
+
+        tx.send(7).expect("consumer alive");
+        assert_eq!(done_rx.recv().await, Some(7));
+        drop(tx);
+        // The loop exits, dropping its clone of `done_tx` and closing the channel.
+        assert_eq!(done_rx.recv().await, None);
+    }
 }

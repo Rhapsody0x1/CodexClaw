@@ -8,19 +8,27 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
 use crate::{
-    app::App,
-    qq::types::{
-        C2CMessageEvent, DISPATCH_EVENT, GatewayEnvelope, HEARTBEAT_ACK_EVENT, HEARTBEAT_EVENT,
-        HELLO_EVENT, HelloPayload, IDENTIFY_EVENT, INTENT_GROUP_AND_C2C, INVALID_SESSION_EVENT,
-        RECONNECT_EVENT, RESUME_EVENT, ReadyPayload,
+    qq::{
+        api::QqApiClient,
+        types::{
+            C2CMessageEvent, DISPATCH_EVENT, GatewayEnvelope, HEARTBEAT_ACK_EVENT, HEARTBEAT_EVENT,
+            HELLO_EVENT, HelloPayload, IDENTIFY_EVENT, INTENT_GROUP_AND_C2C, INVALID_SESSION_EVENT,
+            RECONNECT_EVENT, RESUME_EVENT, ReadyPayload,
+        },
     },
     util::layout::DataLayout,
 };
+
+/// Outbound side of the gateway's only callback into the application: every
+/// decoded `C2C_MESSAGE_CREATE` event is forwarded here. The gateway never
+/// awaits the handling of an event, so the consumer must spawn per event to
+/// preserve the original detached-task concurrency.
+pub type C2CEventSender = mpsc::UnboundedSender<C2CMessageEvent>;
 
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 /// Floor for the server-provided heartbeat interval. Guards against a zero
@@ -95,19 +103,18 @@ impl GatewaySessionStore {
     }
 }
 
-pub fn spawn_gateway(app: Arc<App>) {
+pub fn spawn_gateway(data_dir: PathBuf, qq_client: Arc<QqApiClient>, events: C2CEventSender) {
     tokio::spawn(async move {
-        let session_store =
-            match GatewaySessionStore::load_or_init(&app.config.general.data_dir).await {
-                Ok(store) => store,
-                Err(err) => {
-                    error!("failed to initialize qq gateway session store: {err:#}");
-                    return;
-                }
-            };
+        let session_store = match GatewaySessionStore::load_or_init(&data_dir).await {
+            Ok(store) => store,
+            Err(err) => {
+                error!("failed to initialize qq gateway session store: {err:#}");
+                return;
+            }
+        };
         let mut reconnect_delay = Duration::from_secs(1);
         loop {
-            match connect_once(app.clone(), &session_store, &mut reconnect_delay).await {
+            match connect_once(&qq_client, &events, &session_store, &mut reconnect_delay).await {
                 Ok(()) => reconnect_delay = Duration::from_secs(1),
                 Err(err) => {
                     warn!(
@@ -123,14 +130,15 @@ pub fn spawn_gateway(app: Arc<App>) {
 }
 
 async fn connect_once(
-    app: Arc<App>,
+    qq_client: &QqApiClient,
+    events: &C2CEventSender,
     session_store: &GatewaySessionStore,
     reconnect_delay: &mut Duration,
 ) -> Result<()> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-    let token = app.qq_client.get_access_token().await?;
-    let gateway_url = app.qq_client.get_gateway_url().await?;
+    let token = qq_client.get_access_token().await?;
+    let gateway_url = qq_client.get_gateway_url().await?;
     info!("connecting to qq gateway at {}", gateway_url);
     let request = gateway_url
         .into_client_request()
@@ -229,12 +237,12 @@ async fn connect_once(
                                     }
                                     Some("C2C_MESSAGE_CREATE") => {
                                         let event = serde_json::from_value::<C2CMessageEvent>(payload.d)?;
-                                        let app = app.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(err) = app.handle_c2c_event(event).await {
-                                                warn!("failed to process c2c message from gateway: {err:#}");
-                                            }
-                                        });
+                                        // Non-blocking hand-off: the gateway must never await
+                                        // event handling, or one slow turn would stall the
+                                        // heartbeat and the whole receive loop.
+                                        if events.send(event).is_err() {
+                                            warn!("c2c event consumer is gone; dropping message from gateway");
+                                        }
                                     }
                                     Some(other) => {
                                         info!("ignoring gateway dispatch event {}", other);
@@ -253,7 +261,7 @@ async fn connect_once(
                                 warn!("qq gateway invalid session, can_resume={}", can_resume);
                                 if !can_resume {
                                     session_store.clear().await?;
-                                    app.qq_client.invalidate_access_token().await;
+                                    qq_client.invalidate_access_token().await;
                                 }
                                 return Err(anyhow!("qq gateway invalid session"));
                             }
@@ -272,5 +280,86 @@ async fn connect_once(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn reload(data_dir: &Path) -> GatewaySessionState {
+        GatewaySessionStore::load_or_init(data_dir)
+            .await
+            .expect("reload store")
+            .snapshot()
+            .await
+    }
+
+    #[tokio::test]
+    async fn load_or_init_creates_an_empty_session_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = GatewaySessionStore::load_or_init(dir.path())
+            .await
+            .expect("init store");
+
+        assert!(
+            store.path.exists(),
+            "session file should be created eagerly"
+        );
+        let state = store.snapshot().await;
+        assert_eq!(state.session_id, None);
+        assert_eq!(state.last_seq, None);
+    }
+
+    #[tokio::test]
+    async fn session_id_and_seq_survive_a_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = GatewaySessionStore::load_or_init(dir.path())
+            .await
+            .expect("init store");
+        store
+            .set_session_id(Some("sess-1".to_string()))
+            .await
+            .expect("set session id");
+        store.set_last_seq(Some(42)).await.expect("set last seq");
+
+        let state = reload(dir.path()).await;
+        assert_eq!(state.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(state.last_seq, Some(42));
+    }
+
+    #[tokio::test]
+    async fn clear_drops_both_fields_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = GatewaySessionStore::load_or_init(dir.path())
+            .await
+            .expect("init store");
+        store
+            .set_session_id(Some("sess-1".to_string()))
+            .await
+            .expect("set session id");
+        store.set_last_seq(Some(42)).await.expect("set last seq");
+        store.clear().await.expect("clear");
+
+        let state = reload(dir.path()).await;
+        assert_eq!(state.session_id, None);
+        assert_eq!(state.last_seq, None);
+    }
+
+    /// A *missing* file is a normal cold start (see the test above), but an
+    /// unparsable one is reported rather than silently reset, so `spawn_gateway`
+    /// refuses to start instead of quietly discarding a resumable session.
+    #[tokio::test]
+    async fn unparsable_session_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = DataLayout::new(dir.path());
+        tokio::fs::create_dir_all(layout.qq_dir())
+            .await
+            .expect("mkdir");
+        tokio::fs::write(layout.gateway_session_file(), "{ not json")
+            .await
+            .expect("write garbage");
+
+        assert!(GatewaySessionStore::load_or_init(dir.path()).await.is_err());
     }
 }
