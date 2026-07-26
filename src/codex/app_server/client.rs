@@ -164,16 +164,6 @@ impl JsonRpcClient {
         }
     }
 
-    pub async fn notify<P: Serialize>(&self, method: &str, params: &P) -> Result<()> {
-        let params_value = serde_json::to_value(params).context("serialize params")?;
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params_value,
-        });
-        self.transport.write_message(msg).await
-    }
-
     /// Fire-and-forget: parameter-less notification (e.g. `initialized`).
     pub async fn notify_empty(&self, method: &str) -> Result<()> {
         let msg = serde_json::json!({

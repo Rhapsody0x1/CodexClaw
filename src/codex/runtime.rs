@@ -80,10 +80,6 @@ struct RawModelEntry {
 
 const CODEX_MODELS_TOML: &str = include_str!("../../config/codex_models.toml");
 
-pub fn read_codex_runtime_profile() -> CodexRuntimeProfile {
-    read_codex_runtime_profile_from_path(&codex_config_path())
-}
-
 pub fn read_codex_runtime_profile_from_path(config_path: &Path) -> CodexRuntimeProfile {
     let Ok(raw) = std::fs::read_to_string(config_path) else {
         return CodexRuntimeProfile::default();
@@ -148,7 +144,7 @@ pub fn write_context_mode_to_config_path(
     )
 }
 
-/// Return the deduplicated list of model names available to the user.
+/// Return the deduplicated list of models available to the user.
 ///
 /// Merges, in order:
 ///   1. Canonical upstream list from `config/codex_models.toml`.
@@ -157,13 +153,6 @@ pub fn write_context_mode_to_config_path(
 ///   3. `model` values defined under `[profiles.*]` in that same file.
 ///   4. An optional `extra` slice for per-session overrides the caller wants
 ///      surfaced (e.g. the user's `model_override`).
-pub fn list_codex_models(runtime_profile: &CodexRuntimeProfile, extra: &[String]) -> Vec<String> {
-    list_codex_model_entries(runtime_profile, extra)
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect()
-}
-
 pub fn list_codex_model_entries(
     runtime_profile: &CodexRuntimeProfile,
     extra: &[String],
@@ -293,7 +282,8 @@ pub fn list_codex_model_entries_with_path(
     out
 }
 
-pub fn list_codex_models_with_path(
+#[cfg(test)]
+fn list_codex_models_with_path(
     runtime_profile: &CodexRuntimeProfile,
     extra: &[String],
     config_path: &Path,

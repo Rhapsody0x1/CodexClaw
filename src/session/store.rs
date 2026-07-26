@@ -157,16 +157,6 @@ impl SessionStore {
         .await
     }
 
-    pub async fn foreground_runtime_state(&self, openid: &str) -> Result<SessionState> {
-        let user = self.snapshot_for_user(openid).await?;
-        Ok(SessionState {
-            session_id: user.foreground.session_id.clone(),
-            settings: user
-                .settings
-                .merged_with_profile(user.foreground.profile.as_ref()),
-        })
-    }
-
     pub async fn update_settings_for_user<F>(
         &self,
         openid: &str,
@@ -936,16 +926,6 @@ impl SessionStore {
 
     pub fn default_workspace_dir(&self) -> &Path {
         &self.default_workspace_dir
-    }
-
-    pub fn rollout_path_for_session(&self, session_id: &str) -> Result<Option<PathBuf>> {
-        let mut files = Vec::new();
-        collect_rollout_files(&self.global_codex_home.join("sessions"), &mut files)?;
-        Ok(files.into_iter().find(|path| {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.contains(session_id))
-        }))
     }
 
     async fn migrate_inline_cron_jobs(&self) -> Result<()> {

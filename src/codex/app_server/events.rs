@@ -20,8 +20,7 @@ use crate::codex::{
 };
 
 use super::protocol::{
-    AgentMessageDeltaNotification, CommandOutputDeltaNotification, ItemNotification, ItemPayload,
-    ReasoningDeltaNotification, TokenUsagePayload, TurnCompleted, TurnPlanStep,
+    ItemNotification, ItemPayload, TokenUsagePayload, TurnCompleted, TurnPlanStep,
     TurnPlanUpdatedNotification,
 };
 
@@ -35,15 +34,6 @@ pub struct TurnState {
     pub changed_files: Vec<std::path::PathBuf>,
     pub token_usage: Option<TokenUsagePayload>,
     pub last_plan_signature: Option<String>,
-}
-
-/// What happened on a single translation step.
-#[derive(Debug, Clone, Default)]
-pub struct TranslationOutcome {
-    pub updates: Vec<ExecutionUpdate>,
-    /// `Some(true)` = turn completed successfully, `Some(false)` = failed,
-    /// `None` = still in progress.
-    pub turn_finished: Option<TurnOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,31 +180,6 @@ pub fn translate_compacted(
     ExecutionUpdate::ToolCall {
         display: "[Context Compacted]".to_string(),
     }
-}
-
-/// Translate a streaming assistant text delta. We do NOT emit a QQ message per
-/// delta (that would flood the channel); deltas are accumulated until the
-/// matching `item/completed agent_message` fires, which emits the full text.
-/// We keep this function so callers can easily opt into delta handling later.
-pub fn accumulate_agent_delta(
-    _state: &mut TurnState,
-    _notif: &AgentMessageDeltaNotification,
-) -> Vec<ExecutionUpdate> {
-    Vec::new()
-}
-
-pub fn accumulate_reasoning_delta(
-    _state: &mut TurnState,
-    _notif: &ReasoningDeltaNotification,
-) -> Vec<ExecutionUpdate> {
-    Vec::new()
-}
-
-pub fn accumulate_command_output(
-    _state: &mut TurnState,
-    _notif: &CommandOutputDeltaNotification,
-) -> Vec<ExecutionUpdate> {
-    Vec::new()
 }
 
 // ---------------------------------------------------------------------------

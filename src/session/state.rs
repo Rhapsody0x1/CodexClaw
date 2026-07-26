@@ -275,15 +275,6 @@ pub enum DialogOrigin {
     Global,
 }
 
-impl DialogOrigin {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "claw",
-            Self::Global => "native",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DialogProfile {
     pub model_override: Option<String>,
@@ -569,6 +560,10 @@ pub struct UserSessionState {
 }
 
 impl UserSessionState {
+    /// Canonical "fresh user" constructor. Currently only reached through
+    /// `Default`-ish literals in `session/store.rs`; kept as the single source
+    /// of truth for the initial field values so those literals can be folded
+    /// into it.
     pub fn new(default_workspace_dir: PathBuf) -> Self {
         Self {
             foreground: DialogState::new_temporary(default_workspace_dir),

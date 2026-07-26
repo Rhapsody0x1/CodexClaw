@@ -179,7 +179,8 @@ impl TokenUsage {
         }
     }
 
-    pub fn percent_of_context_window_remaining(&self, context_window: u64) -> u64 {
+    #[cfg(test)]
+    fn percent_of_context_window_remaining(&self, context_window: u64) -> u64 {
         const BASELINE_TOKENS: u64 = 12_000;
 
         if context_window <= BASELINE_TOKENS {

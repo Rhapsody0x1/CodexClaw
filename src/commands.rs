@@ -711,17 +711,6 @@ async fn handle_alias(
     }
 }
 
-pub async fn handle_selector_callback(
-    data: &str,
-    session: &SessionStore,
-    default_model: &str,
-    runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
-) -> Result<Option<CommandOutcome>> {
-    let _ = (data, session, default_model, runtime_profile, is_busy);
-    Ok(None)
-}
-
 async fn handle_model(
     args: &[&str],
     openid: &str,
@@ -1277,7 +1266,7 @@ async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<Com
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     let zh = lang.starts_with("zh");
-    let Some(plan) = snapshot.settings.pending_plan.clone() else {
+    if snapshot.settings.pending_plan.is_none() {
         let msg = if zh {
             "当前没有待执行的计划。"
         } else {
@@ -1286,33 +1275,21 @@ async fn handle_execute_plan(openid: &str, session: &SessionStore) -> Result<Com
         return Ok(CommandOutcome::Reply(CommandReply {
             text: msg.to_string(),
         }));
-    };
+    }
     session
         .update_settings_for_user(openid, |state| {
             state.plan_mode = false;
             state.pending_plan = None;
         })
         .await?;
-    let prefix = if zh {
-        "请按下列批准的计划执行，并按需重新读取文件验证：\n\n"
-    } else {
-        "Please implement the following approved plan. Re-read files as needed to verify:\n\n"
-    };
-    let kickoff = format!("{prefix}{plan}");
     // Return a direct reply acknowledging the switch. The user's next QQ
-    // message (or the stored plan, if we wanted to auto-kick) triggers the
-    // follow-up turn. We surface a short confirmation here.
+    // message carries the plan verbatim into the follow-up turn; we only
+    // surface a short confirmation here.
     let confirm = if zh {
         "已退出 Plan 模式并批准计划。你可以直接回复 “开始” 或描述下一步，我会按计划执行。"
     } else {
         "Plan approved. Reply with a follow-up (e.g. \"go\") and I'll implement the plan."
     };
-    // Stash the kickoff prompt in a future-proof way: we reuse
-    // `pending_setting = None` (cleared) and prepend the plan into the user's
-    // next prompt context. For the MVP we just echo the confirm message and
-    // rely on the user's next turn carrying the plan verbatim. A richer
-    // auto-kickoff is tracked as follow-up work.
-    let _ = kickoff; // avoid unused warning for now
     Ok(CommandOutcome::Reply(CommandReply {
         text: confirm.to_string(),
     }))

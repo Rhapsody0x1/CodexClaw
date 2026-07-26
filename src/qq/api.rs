@@ -272,10 +272,6 @@ impl QqApiClient {
             .await
     }
 
-    pub async fn send_text_proactive(&self, openid: &str, text: &str) -> Result<()> {
-        self.send_text_inner(openid, None, text, None).await
-    }
-
     pub async fn send_markdown_proactive(&self, openid: &str, markdown: &str) -> Result<()> {
         self.send_text_inner(openid, None, markdown, None).await
     }

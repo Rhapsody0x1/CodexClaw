@@ -311,16 +311,6 @@ pub enum SandboxPolicy {
     DangerFullAccess,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ReadOnlyAccess {
-    FullAccess,
-    Restricted {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        readable_roots: Vec<String>,
-    },
-}
-
 // ---------------------------------------------------------------------------
 // Collaboration mode
 // ---------------------------------------------------------------------------
@@ -361,25 +351,15 @@ pub struct CollaborationSettings {
 /// time so unknown methods don't crash the client).
 pub mod method {
     pub const THREAD_COMPACT_START: &str = "thread/compact/start";
-    pub const THREAD_STARTED: &str = "thread/started";
-    pub const THREAD_STATUS_CHANGED: &str = "thread/status/changed";
     pub const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
     pub const THREAD_COMPACTED: &str = "thread/compacted";
     pub const THREAD_CLOSED: &str = "thread/closed";
-    pub const TURN_STARTED: &str = "turn/started";
     pub const TURN_COMPLETED: &str = "turn/completed";
     pub const TURN_FAILED: &str = "turn/failed";
     pub const TURN_PLAN_UPDATED: &str = "turn/planUpdated";
     pub const ITEM_STARTED: &str = "item/started";
     pub const ITEM_UPDATED: &str = "item/updated";
     pub const ITEM_COMPLETED: &str = "item/completed";
-    pub const ITEM_AGENT_MESSAGE_DELTA: &str = "item/agentMessage/delta";
-    pub const ITEM_REASONING_TEXT_DELTA: &str = "item/reasoning/textDelta";
-    pub const ITEM_REASONING_SUMMARY_TEXT_DELTA: &str = "item/reasoning/summaryTextDelta";
-    pub const ITEM_COMMAND_EXECUTION_OUTPUT_DELTA: &str = "item/commandExecution/outputDelta";
-    pub const ACCOUNT_UPDATED: &str = "account/updated";
-    pub const ACCOUNT_RATE_LIMITS_UPDATED: &str = "account/rateLimits/updated";
-    pub const CONFIG_WARNING: &str = "configWarning";
     pub const MODEL_REROUTED: &str = "model/rerouted";
     pub const ERROR: &str = "error";
     pub const INITIALIZED: &str = "initialized";
@@ -398,13 +378,6 @@ pub mod method {
     pub const EXEC_COMMAND_APPROVAL: &str = "execCommandApproval";
     pub const MCP_SERVER_ELICITATION_REQUEST: &str = "mcpServer/elicitation/request";
     pub const CHATGPT_AUTH_TOKENS_REFRESH: &str = "account/chatgptAuthTokens/refresh";
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnStartedNotification {
-    pub thread_id: String,
-    pub turn: Turn,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -612,15 +585,6 @@ pub struct TurnPlanStep {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ErrorNotification {
-    #[serde(default)]
-    pub error: JsonValue,
-    #[serde(default)]
-    pub will_retry: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelReroutedNotification {
     #[serde(default)]
     pub thread_id: Option<String>,
@@ -648,15 +612,6 @@ pub struct ThreadCompactStartParams {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ThreadCompactStartResponse {}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigWarningNotification {
-    #[serde(default)]
-    pub message: Option<String>,
-    #[serde(default)]
-    pub detail: Option<JsonValue>,
-}
 
 // ---------------------------------------------------------------------------
 // Server-initiated requests (approvals & elicitations)

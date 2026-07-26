@@ -225,26 +225,6 @@ pub fn format_todo_items_public(items: &[crate::codex::events::TodoEntry]) -> St
     format_todo_items(items)
 }
 
-pub fn humanize_tool_label_public(value: &str) -> String {
-    humanize_tool_label(value)
-}
-
-pub fn short_json_public(value: &serde_json::Value) -> String {
-    short_json(value)
-}
-
-pub fn truncate_public(value: &str, max_chars: usize) -> String {
-    truncate(value, max_chars)
-}
-
-pub fn web_search_display_from_action_public(action: &WebSearchAction) -> String {
-    web_search_display_from_action(action)
-}
-
-pub fn web_search_display_from_detail_public(detail: &str) -> String {
-    web_search_display_from_detail(detail)
-}
-
 fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<String> {
     match item.item_type.as_str() {
         "command_execution" if phase == ToolEventPhase::Started => item

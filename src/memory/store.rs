@@ -148,12 +148,14 @@ impl MemoryStore {
         Ok(snapshot)
     }
 
-    pub fn with_entry_max_chars(mut self, limit: usize) -> Self {
+    #[cfg(test)]
+    fn with_entry_max_chars(mut self, limit: usize) -> Self {
         self.entry_max_chars = limit;
         self
     }
 
-    pub fn with_kind_limit(mut self, kind: MemoryKind, limit: usize) -> Self {
+    #[cfg(test)]
+    fn with_kind_limit(mut self, kind: MemoryKind, limit: usize) -> Self {
         match kind {
             MemoryKind::Memory => self.memory_char_limit = limit,
             MemoryKind::User => self.user_char_limit = limit,

@@ -128,8 +128,14 @@ pub enum SessionStrategy {
 pub enum DeliverPolicy {
     #[default]
     PushToOwner,
+    /// Part of the on-disk `jobs.json` format. The CLI has no flag that
+    /// produces it — only a hand-edited `jobs.json` can select it — but the
+    /// runner honours it, so the variant must stay for wire compatibility.
     PushIfNonEmpty,
     LogOnly,
+    /// Part of the on-disk `jobs.json` format. The CLI has no flag that
+    /// produces it — only a hand-edited `jobs.json` can select it — but the
+    /// runner honours it, so the variant must stay for wire compatibility.
     PushTruncated {
         max_chars: usize,
     },
@@ -146,6 +152,9 @@ pub enum RunStatus {
         error: String,
         attempt: u32,
     },
+    /// Part of the on-disk run-history format. Nothing in the current runner
+    /// emits it, but persisted histories may still contain it and the
+    /// failure-streak accounting reads it, so the variant must stay.
     Skipped {
         reason: String,
     },

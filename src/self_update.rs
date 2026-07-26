@@ -127,16 +127,6 @@ pub async fn run_build(config: &AppConfig) -> Result<BuildResult> {
     })
 }
 
-pub async fn load_last_build_record(data_dir: &Path) -> Result<Option<BuildRecord>> {
-    let path = last_build_path(data_dir);
-    let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-        return Ok(None);
-    };
-    let record = serde_json::from_str::<BuildRecord>(&raw)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(Some(record))
-}
-
 pub async fn save_last_build_record(data_dir: &Path, record: &BuildRecord) -> Result<()> {
     let path = last_build_path(data_dir);
     if let Some(parent) = path.parent() {
