@@ -342,8 +342,8 @@ fn maybe_handle_command_inner<'a>(
             }
             "/bg" => handle_bg(&rest, ctx).await,
             "/fg" => handle_fg(&rest, ctx).await,
-            "/resume" => handle_resume(&rest, ctx).await,
-            "/loadbg" => handle_loadbg(&rest, ctx).await,
+            "/resume" => handle_restore(RestoreMode::Resume, &rest, ctx).await,
+            "/loadbg" => handle_restore(RestoreMode::Loadbg, &rest, ctx).await,
             "/save" => handle_save(ctx).await,
             "/rename" => handle_rename(&rest, ctx).await,
             "/stop" => handle_stop(ctx).await,
@@ -533,6 +533,44 @@ async fn handle_alias(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> 
     }
 }
 
+/// Shared tail for the per-dialog profile settings (`model` / `reasoning` /
+/// `context`), used by both the direct handlers and the interactive
+/// consumers:
+/// - unsaved foreground: the setting applies globally instead — return the
+///   `SetGlobal*` outcome (clearing the pending picker first when the caller
+///   is a consumer);
+/// - saved foreground: apply to the active dialog profile, then re-snapshot
+///   and render the localized "updated" reply.
+async fn apply_active_or_global<T, F, Fut, R>(
+    ctx: CmdCtx<'_>,
+    snapshot: &UserSessionState,
+    clear_pending: bool,
+    next: Option<T>,
+    global: fn(Option<T>) -> CommandOutcome,
+    set_active: F,
+    updated: impl FnOnce(&UserSessionState) -> String,
+) -> Result<CommandOutcome>
+where
+    F: FnOnce(Option<T>) -> Fut,
+    Fut: Future<Output = Result<R>>,
+{
+    let CmdCtx {
+        openid, session, ..
+    } = ctx;
+    if !snapshot.foreground.saved {
+        if clear_pending {
+            session.set_pending_setting(openid, None).await?;
+        }
+        return Ok(global(next));
+    }
+    set_active(next).await?;
+    if clear_pending {
+        session.set_pending_setting(openid, None).await?;
+    }
+    let snapshot = session.snapshot_for_user(openid).await?;
+    Ok(CommandOutcome::reply(updated(&snapshot)))
+}
+
 async fn handle_model(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     let CmdCtx {
         openid,
@@ -571,18 +609,23 @@ async fn handle_model(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> 
     } else {
         Some(value.clone())
     };
-    if !snapshot.foreground.saved {
-        return Ok(CommandOutcome::SetGlobalModel(next));
-    }
-    session
-        .set_model_override_for_active(openid, next.clone())
-        .await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::reply(t!(
-        "commands.model.updated",
-        model = effective_model(&snapshot, default_model, runtime_profile),
-        locale = lang.as_str()
-    )))
+    apply_active_or_global(
+        ctx,
+        &snapshot,
+        false,
+        next,
+        CommandOutcome::SetGlobalModel,
+        |value| session.set_model_override_for_active(openid, value),
+        |snap: &UserSessionState| {
+            t!(
+                "commands.model.updated",
+                model = effective_model(snap, default_model, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned()
+        },
+    )
+    .await
 }
 
 async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
@@ -595,7 +638,15 @@ async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_fast_prompt(&snapshot, ctx).await;
+        return interactive::enter_simple_prompt(
+            ctx,
+            lang.as_str(),
+            "commands.fast.prompt_current",
+            "commands.fast.prompt_header",
+            effective_fast_label(&snapshot, runtime_profile),
+            PendingSetting::Fast,
+        )
+        .await;
     }
     if args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::reply(t!(
@@ -634,22 +685,37 @@ async fn handle_context(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome
         return Ok(busy_reply(lang.as_str()));
     }
     if args.is_empty() {
-        return interactive::enter_context_prompt(&snapshot, ctx).await;
+        return interactive::enter_simple_prompt(
+            ctx,
+            lang.as_str(),
+            "commands.context.prompt_current",
+            "commands.context.prompt_header",
+            effective_context_label(&snapshot, runtime_profile),
+            PendingSetting::Context,
+        )
+        .await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_context_input(&value).ok_or_else(|| {
         anyhow!(t!("commands.context.invalid", locale = lang.as_str()).into_owned())
     })?;
-    if !snapshot.foreground.saved {
-        return Ok(CommandOutcome::SetGlobalContext(next));
-    }
-    session.set_context_mode_for_active(openid, next).await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::reply(t!(
-        "commands.context.updated",
-        value = effective_context_label(&snapshot, runtime_profile),
-        locale = lang.as_str()
-    )))
+    apply_active_or_global(
+        ctx,
+        &snapshot,
+        false,
+        next,
+        CommandOutcome::SetGlobalContext,
+        |value| session.set_context_mode_for_active(openid, value),
+        |snap: &UserSessionState| {
+            t!(
+                "commands.context.updated",
+                value = effective_context_label(snap, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned()
+        },
+    )
+    .await
 }
 
 async fn handle_reasoning(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
@@ -676,22 +742,37 @@ async fn handle_reasoning(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutco
         return Ok(busy_reply(lang.as_str()));
     }
     if args.is_empty() {
-        return interactive::enter_reasoning_prompt(&snapshot, ctx).await;
+        return interactive::enter_simple_prompt(
+            ctx,
+            lang.as_str(),
+            "commands.reasoning.prompt_current",
+            "commands.reasoning.prompt_header",
+            effective_reasoning(&snapshot, runtime_profile),
+            PendingSetting::Reasoning,
+        )
+        .await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_reasoning_input(&value).ok_or_else(|| {
         anyhow!(t!("commands.reasoning.invalid", locale = lang.as_str()).into_owned())
     })?;
-    if !snapshot.foreground.saved {
-        return Ok(CommandOutcome::SetGlobalReasoning(next));
-    }
-    session.set_reasoning_for_active(openid, next).await?;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    Ok(CommandOutcome::reply(t!(
-        "commands.reasoning.updated",
-        value = effective_reasoning(&snapshot, runtime_profile),
-        locale = lang.as_str()
-    )))
+    apply_active_or_global(
+        ctx,
+        &snapshot,
+        false,
+        next,
+        CommandOutcome::SetGlobalReasoning,
+        |value| session.set_reasoning_for_active(openid, value),
+        |snap: &UserSessionState| {
+            t!(
+                "commands.reasoning.updated",
+                value = effective_reasoning(snap, runtime_profile),
+                locale = lang.as_str()
+            )
+            .into_owned()
+        },
+    )
+    .await
 }
 
 async fn handle_verbose(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
@@ -701,7 +782,19 @@ async fn handle_verbose(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_verbose_prompt(&snapshot, ctx).await;
+        return interactive::enter_simple_prompt(
+            ctx,
+            lang.as_str(),
+            "commands.verbose.prompt_current",
+            "commands.verbose.prompt_header",
+            if snapshot.settings.verbose {
+                "on"
+            } else {
+                "off"
+            },
+            PendingSetting::Verbose,
+        )
+        .await;
     }
     if args[0].eq_ignore_ascii_case("status") {
         let key = if snapshot.settings.verbose {
@@ -1209,13 +1302,51 @@ async fn handle_fg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     interactive::switch_foreground(args[0], ctx, lang.as_str()).await
 }
 
-async fn handle_resume(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
+/// `/resume` and `/loadbg` walk the same project/session picker flow and only
+/// differ in which `PendingSetting` variants they park and how the selected
+/// session is finally applied (restore to foreground vs. load to background).
+#[derive(Clone, Copy)]
+enum RestoreMode {
+    Resume,
+    Loadbg,
+}
+
+impl RestoreMode {
+    fn projects_pending(self) -> PendingSetting {
+        match self {
+            RestoreMode::Resume => PendingSetting::ResumeProjects,
+            RestoreMode::Loadbg => PendingSetting::LoadbgProjects,
+        }
+    }
+
+    fn sessions_pending(
+        self,
+        project_key: String,
+        page: usize,
+        alias: Option<String>,
+    ) -> PendingSetting {
+        match self {
+            RestoreMode::Resume => PendingSetting::ResumeSessions { project_key, page },
+            RestoreMode::Loadbg => PendingSetting::LoadbgSessions {
+                project_key,
+                page,
+                alias,
+            },
+        }
+    }
+}
+
+async fn handle_restore(
+    mode: RestoreMode,
+    args: &[&str],
+    ctx: CmdCtx<'_>,
+) -> Result<CommandOutcome> {
     let CmdCtx {
         openid, session, ..
     } = ctx;
     let lang = user_locale(session, openid).await;
     if args.is_empty() {
-        return interactive::enter_resume_projects_prompt(ctx, lang.as_str()).await;
+        return interactive::enter_restore_projects_prompt(mode, ctx, lang.as_str()).await;
     }
     let selector = args[0];
     // Try project selector first (if we have a recent projects view), otherwise
@@ -1228,37 +1359,8 @@ async fn handle_resume(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
             .get(1)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
-        return interactive::enter_resume_sessions_prompt(ctx, project_key, page, lang.as_str())
-            .await;
-    }
-    let sessions = session.list_disk_sessions(SessionListScope::All).await?;
-    let target = resolve_selector(
-        selector,
-        &sessions,
-        &session.last_sessions_view(openid).await?,
-        lang.as_str(),
-    )?;
-    interactive::execute_resume(ctx, &target).await
-}
-
-async fn handle_loadbg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
-    let CmdCtx {
-        openid, session, ..
-    } = ctx;
-    let lang = user_locale(session, openid).await;
-    if args.is_empty() {
-        return interactive::enter_loadbg_projects_prompt(ctx, lang.as_str()).await;
-    }
-    let selector = args[0];
-    let projects_view = session.last_projects_view(openid).await?;
-    if !projects_view.is_empty()
-        && let Ok(project_key) = resolve_project_selector(selector, &projects_view, lang.as_str())
-    {
-        let page = args
-            .get(1)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(1);
-        return interactive::enter_loadbg_sessions_prompt(
+        return interactive::enter_restore_sessions_prompt(
+            mode,
             ctx,
             project_key,
             page,
@@ -1274,7 +1376,12 @@ async fn handle_loadbg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
         &session.last_sessions_view(openid).await?,
         lang.as_str(),
     )?;
-    interactive::execute_loadbg(ctx, &target, args.get(1).copied()).await
+    match mode {
+        RestoreMode::Resume => interactive::execute_resume(ctx, &target).await,
+        RestoreMode::Loadbg => {
+            interactive::execute_loadbg(ctx, &target, args.get(1).copied()).await
+        }
+    }
 }
 
 async fn handle_save(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
@@ -1326,7 +1433,8 @@ async fn handle_sessions(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcom
         };
         let sessions = session.list_disk_sessions(scope).await?;
         let projects = collect_projects(&sessions);
-        let (text, project_keys) = format_projects_list(&projects, lang.as_str());
+        let (text, project_keys) =
+            format_projects_list(&SESSIONS_LIST_KEYS, &projects, lang.as_str());
         let has_projects = !project_keys.is_empty();
         session.set_last_projects_view(openid, project_keys).await?;
         session.set_last_sessions_view(openid, Vec::new()).await?;
@@ -1354,7 +1462,13 @@ async fn handle_sessions(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcom
         .into_iter()
         .filter(|item| item.cwd.display().to_string() == project_path)
         .collect::<Vec<_>>();
-    let (text, ids) = format_project_sessions_page(&project_path, &sessions, page, lang.as_str());
+    let (text, ids) = format_project_sessions_page(
+        &SESSIONS_LIST_KEYS,
+        &project_path,
+        &sessions,
+        page,
+        lang.as_str(),
+    );
     session.set_last_sessions_view(openid, ids).await?;
     session
         .set_pending_setting(
@@ -1379,27 +1493,13 @@ async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
         && !last_session_view.is_empty()
         && let Ok(target) = resolve_selector(selector, &all, &last_session_view, lang.as_str())
     {
-        let result = session.import_disk_session(&target).await?;
-        let profile = result.profile;
-        let action = if result.copied {
-            t!("commands.import.imported", locale = lang.as_str())
-        } else {
-            t!("commands.import.refreshed", locale = lang.as_str())
-        };
-        session.set_pending_setting(openid, None).await?;
-        return Ok(CommandOutcome::reply(t!(
-            "commands.import.result",
-            action = action.as_ref(),
-            summary = session_summary(&target, lang.as_str()),
-            workspace = profile.workspace_dir.display().to_string(),
-            model = compact_imported_profile_summary(&profile, lang.as_str()),
-            locale = lang.as_str()
-        )));
+        return import_and_reply(session, openid, &target, lang.as_str()).await;
     }
 
     if args.is_empty() {
         let projects = collect_projects(&all);
-        let (text, project_keys) = format_import_projects_list(&projects, lang.as_str());
+        let (text, project_keys) =
+            format_projects_list(&IMPORT_LIST_KEYS, &projects, lang.as_str());
         let has_projects = !project_keys.is_empty();
         session
             .set_last_import_projects_view(openid, project_keys)
@@ -1425,22 +1525,7 @@ async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
         Ok(value) => value,
         Err(_) => {
             let target = resolve_selector(selector, &all, &last_session_view, lang.as_str())?;
-            let result = session.import_disk_session(&target).await?;
-            let profile = result.profile;
-            let action = if result.copied {
-                t!("commands.import.imported", locale = lang.as_str())
-            } else {
-                t!("commands.import.refreshed", locale = lang.as_str())
-            };
-            session.set_pending_setting(openid, None).await?;
-            return Ok(CommandOutcome::reply(t!(
-                "commands.import.result",
-                action = action.as_ref(),
-                summary = session_summary(&target, lang.as_str()),
-                workspace = profile.workspace_dir.display().to_string(),
-                model = compact_imported_profile_summary(&profile, lang.as_str()),
-                locale = lang.as_str()
-            )));
+            return import_and_reply(session, openid, &target, lang.as_str()).await;
         }
     };
     let (_, project_path) = decode_project_key(&project_key)?;
@@ -1448,8 +1533,13 @@ async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
         .into_iter()
         .filter(|item| item.cwd.display().to_string() == project_path)
         .collect::<Vec<_>>();
-    let (text, ids) =
-        format_import_project_sessions_page(&project_path, &project_sessions, page, lang.as_str());
+    let (text, ids) = format_project_sessions_page(
+        &IMPORT_LIST_KEYS,
+        &project_path,
+        &project_sessions,
+        page,
+        lang.as_str(),
+    );
     session.set_last_import_sessions_view(openid, ids).await?;
     session
         .set_pending_setting(
@@ -1461,6 +1551,33 @@ async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome>
         )
         .await?;
     Ok(CommandOutcome::reply(text))
+}
+
+/// Imports `target` and renders the localized result reply. Shared by the two
+/// direct-selector paths in `handle_import` and by the interactive
+/// `consume_import_sessions` flow.
+async fn import_and_reply(
+    session: &SessionStore,
+    openid: &str,
+    target: &DiskSessionMeta,
+    locale: &str,
+) -> Result<CommandOutcome> {
+    let result = session.import_disk_session(target).await?;
+    let profile = result.profile;
+    let action = if result.copied {
+        t!("commands.import.imported", locale = locale)
+    } else {
+        t!("commands.import.refreshed", locale = locale)
+    };
+    session.set_pending_setting(openid, None).await?;
+    Ok(CommandOutcome::reply(t!(
+        "commands.import.result",
+        action = action.as_ref(),
+        summary = session_summary(target, locale),
+        workspace = profile.workspace_dir.display().to_string(),
+        model = compact_imported_profile_summary(&profile, locale),
+        locale = locale
+    )))
 }
 
 async fn handle_stop(ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
@@ -1869,61 +1986,57 @@ fn collect_projects(sessions: &[DiskSessionMeta]) -> Vec<ProjectBucket> {
     values
 }
 
-fn format_projects_list(projects: &[ProjectBucket], lang: &str) -> (String, Vec<String>) {
-    if projects.is_empty() {
-        return (
-            t!("commands.sessions.empty", locale = lang).into_owned(),
-            Vec::new(),
-        );
-    }
-    let mut lines = vec![
-        t!(
-            "commands.sessions.project_header",
-            count = projects.len(),
-            locale = lang
-        )
-        .into_owned(),
-    ];
-    let mut keys = Vec::new();
-    for (index, project) in projects.iter().enumerate() {
-        let latest = project
-            .latest
-            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
-        lines.push(
-            t!(
-                "commands.sessions.project_row",
-                index = index + 1,
-                path = project.path.as_str(),
-                sessions = project.count,
-                latest = latest,
-                locale = lang
-            )
-            .into_owned(),
-        );
-        keys.push(encode_project_key(SessionListScope::All, &project.path));
-    }
-    lines.push(String::new());
-    lines.push(t!("commands.sessions.projects_footer", locale = lang).into_owned());
-    (lines.join("\n"), keys)
+/// The i18n keys that distinguish the `/sessions` list views from the
+/// `/import` ones. The two key sets are structurally identical (verified in
+/// `locales/en.yml` + `zh.yml`), so a single pair of formatters below renders
+/// both flows.
+struct ListKeys {
+    empty: &'static str,
+    project_header: &'static str,
+    project_row: &'static str,
+    projects_footer: &'static str,
+    project_empty: &'static str,
+    page_out_of_range: &'static str,
+    page_header: &'static str,
+    row: &'static str,
+    page_footer: &'static str,
 }
 
-fn format_import_projects_list(projects: &[ProjectBucket], lang: &str) -> (String, Vec<String>) {
+const SESSIONS_LIST_KEYS: ListKeys = ListKeys {
+    empty: "commands.sessions.empty",
+    project_header: "commands.sessions.project_header",
+    project_row: "commands.sessions.project_row",
+    projects_footer: "commands.sessions.projects_footer",
+    project_empty: "commands.sessions.project_empty",
+    page_out_of_range: "commands.sessions.page_out_of_range",
+    page_header: "commands.sessions.page_header",
+    row: "commands.sessions.row",
+    page_footer: "commands.sessions.page_footer",
+};
+
+const IMPORT_LIST_KEYS: ListKeys = ListKeys {
+    empty: "commands.import.empty",
+    project_header: "commands.import.project_header",
+    project_row: "commands.import.project_row",
+    projects_footer: "commands.import.projects_footer",
+    project_empty: "commands.import.project_empty",
+    page_out_of_range: "commands.import.page_out_of_range",
+    page_header: "commands.import.page_header",
+    row: "commands.import.row",
+    page_footer: "commands.import.page_footer",
+};
+
+fn format_projects_list(
+    keys: &ListKeys,
+    projects: &[ProjectBucket],
+    lang: &str,
+) -> (String, Vec<String>) {
     if projects.is_empty() {
-        return (
-            t!("commands.import.empty", locale = lang).into_owned(),
-            Vec::new(),
-        );
+        return (t!(keys.empty, locale = lang).into_owned(), Vec::new());
     }
-    let mut lines = vec![
-        t!(
-            "commands.import.project_header",
-            count = projects.len(),
-            locale = lang
-        )
-        .into_owned(),
-    ];
-    let mut keys = Vec::new();
+    let mut lines =
+        vec![t!(keys.project_header, count = projects.len(), locale = lang).into_owned()];
+    let mut project_keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         let latest = project
             .latest
@@ -1931,7 +2044,7 @@ fn format_import_projects_list(projects: &[ProjectBucket], lang: &str) -> (Strin
             .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
         lines.push(
             t!(
-                "commands.import.project_row",
+                keys.project_row,
                 index = index + 1,
                 path = project.path.as_str(),
                 sessions = project.count,
@@ -1940,14 +2053,15 @@ fn format_import_projects_list(projects: &[ProjectBucket], lang: &str) -> (Strin
             )
             .into_owned(),
         );
-        keys.push(encode_project_key(SessionListScope::All, &project.path));
+        project_keys.push(encode_project_key(SessionListScope::All, &project.path));
     }
     lines.push(String::new());
-    lines.push(t!("commands.import.projects_footer", locale = lang).into_owned());
-    (lines.join("\n"), keys)
+    lines.push(t!(keys.projects_footer, locale = lang).into_owned());
+    (lines.join("\n"), project_keys)
 }
 
 fn format_project_sessions_page(
+    keys: &ListKeys,
     project_path: &str,
     sessions: &[DiskSessionMeta],
     page: usize,
@@ -1955,12 +2069,7 @@ fn format_project_sessions_page(
 ) -> (String, Vec<String>) {
     if sessions.is_empty() {
         return (
-            t!(
-                "commands.sessions.project_empty",
-                path = project_path,
-                locale = lang
-            )
-            .into_owned(),
+            t!(keys.project_empty, path = project_path, locale = lang).into_owned(),
             Vec::new(),
         );
     }
@@ -1970,7 +2079,7 @@ fn format_project_sessions_page(
     if start >= sessions.len() {
         return (
             t!(
-                "commands.sessions.page_out_of_range",
+                keys.page_out_of_range,
                 path = project_path,
                 total = sessions.len(),
                 size = page_size,
@@ -1985,7 +2094,7 @@ fn format_project_sessions_page(
     let total_pages = sessions.len().div_ceil(page_size);
     let mut lines = vec![
         t!(
-            "commands.sessions.page_header",
+            keys.page_header,
             path = project_path,
             page = safe_page,
             total_pages = total_pages,
@@ -2004,7 +2113,7 @@ fn format_project_sessions_page(
             .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
         lines.push(
             t!(
-                "commands.sessions.row",
+                keys.row,
                 index = index,
                 updated = updated,
                 summary = summary,
@@ -2015,78 +2124,7 @@ fn format_project_sessions_page(
         view_ids.push(session.id.clone());
     }
     lines.push(String::new());
-    lines.push(t!("commands.sessions.page_footer", locale = lang).into_owned());
-    (lines.join("\n"), view_ids)
-}
-
-fn format_import_project_sessions_page(
-    project_path: &str,
-    sessions: &[DiskSessionMeta],
-    page: usize,
-    lang: &str,
-) -> (String, Vec<String>) {
-    if sessions.is_empty() {
-        return (
-            t!(
-                "commands.import.project_empty",
-                path = project_path,
-                locale = lang
-            )
-            .into_owned(),
-            Vec::new(),
-        );
-    }
-    let page_size = 12usize;
-    let safe_page = page.max(1);
-    let start = (safe_page - 1) * page_size;
-    if start >= sessions.len() {
-        return (
-            t!(
-                "commands.import.page_out_of_range",
-                path = project_path,
-                total = sessions.len(),
-                size = page_size,
-                page = safe_page,
-                locale = lang
-            )
-            .into_owned(),
-            Vec::new(),
-        );
-    }
-    let end = (start + page_size).min(sessions.len());
-    let mut lines = vec![
-        t!(
-            "commands.import.page_header",
-            path = project_path,
-            page = safe_page,
-            total_pages = sessions.len().div_ceil(page_size),
-            total = sessions.len(),
-            locale = lang
-        )
-        .into_owned(),
-    ];
-    let mut view_ids = Vec::new();
-    for (offset, session) in sessions[start..end].iter().enumerate() {
-        let index = offset + 1;
-        let summary = session_summary(session, lang);
-        let updated = session
-            .updated_at
-            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
-        lines.push(
-            t!(
-                "commands.import.row",
-                index = index,
-                updated = updated,
-                summary = summary,
-                locale = lang
-            )
-            .into_owned(),
-        );
-        view_ids.push(session.id.clone());
-    }
-    lines.push(String::new());
-    lines.push(t!("commands.import.page_footer", locale = lang).into_owned());
+    lines.push(t!(keys.page_footer, locale = lang).into_owned());
     (lines.join("\n"), view_ids)
 }
 
@@ -2272,7 +2310,15 @@ async fn handle_lang(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     let snapshot = session.snapshot_for_user(openid).await?;
     let current_lang = snapshot.settings.language.clone();
     if args.is_empty() {
-        return interactive::enter_lang_prompt(&snapshot, ctx).await;
+        return interactive::enter_simple_prompt(
+            ctx,
+            current_lang.as_str(),
+            "commands.lang.prompt_current",
+            "commands.lang.prompt_header",
+            current_lang.as_str(),
+            PendingSetting::Lang,
+        )
+        .await;
     }
     if args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::reply(t!(
@@ -2676,6 +2722,19 @@ mod interactive {
         .into_owned()
     }
 
+    /// Renders the shared `Ambiguous` / `None` fallback replies of the fuzzy
+    /// pickers. Callers handle the `Exact` arm before delegating here.
+    fn fuzzy_fallback(outcome: FuzzyOutcome, locale: &str, input: &str) -> CommandOutcome {
+        match outcome {
+            FuzzyOutcome::Ambiguous(matches) => {
+                CommandOutcome::reply(ambiguous_reply(locale, input, &matches))
+            }
+            FuzzyOutcome::Exact(_) | FuzzyOutcome::None => {
+                CommandOutcome::reply(no_match_reply(locale, input))
+            }
+        }
+    }
+
     pub(super) fn model_extras(snapshot: &UserSessionState) -> Vec<String> {
         merged_settings(snapshot)
             .model_override
@@ -2718,136 +2777,25 @@ mod interactive {
         Ok(CommandOutcome::reply(join_prompt_blocks(sections)))
     }
 
-    pub(super) async fn enter_reasoning_prompt(
-        snapshot: &UserSessionState,
+    /// Shared skeleton for the single-value prompts (`/reasoning`, `/fast`,
+    /// `/context`, `/verbose`, `/lang`): a current-value line, an options
+    /// header, the input hint, then park the matching pending state.
+    pub(super) async fn enter_simple_prompt(
         ctx: CmdCtx<'_>,
+        locale: &str,
+        current_key: &'static str,
+        header_key: &'static str,
+        current: &str,
+        pending: PendingSetting,
     ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid,
-            session,
-            runtime_profile,
-            ..
-        } = ctx;
-        let locale = snapshot.settings.language.as_str();
         let text = format!(
             "{}\n{}\n{}",
-            t!(
-                "commands.reasoning.prompt_current",
-                current = effective_reasoning(snapshot, runtime_profile),
-                locale = locale
-            ),
-            t!("commands.reasoning.prompt_header", locale = locale),
+            t!(current_key, current = current, locale = locale),
+            t!(header_key, locale = locale),
             hint(locale),
         );
-        session
-            .set_pending_setting(openid, Some(PendingSetting::Reasoning))
-            .await?;
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_fast_prompt(
-        snapshot: &UserSessionState,
-        ctx: CmdCtx<'_>,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid,
-            session,
-            runtime_profile,
-            ..
-        } = ctx;
-        let locale = snapshot.settings.language.as_str();
-        let text = format!(
-            "{}\n{}\n{}",
-            t!(
-                "commands.fast.prompt_current",
-                current = effective_fast_label(snapshot, runtime_profile),
-                locale = locale
-            ),
-            t!("commands.fast.prompt_header", locale = locale),
-            hint(locale),
-        );
-        session
-            .set_pending_setting(openid, Some(PendingSetting::Fast))
-            .await?;
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_context_prompt(
-        snapshot: &UserSessionState,
-        ctx: CmdCtx<'_>,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid,
-            session,
-            runtime_profile,
-            ..
-        } = ctx;
-        let locale = snapshot.settings.language.as_str();
-        let text = format!(
-            "{}\n{}\n{}",
-            t!(
-                "commands.context.prompt_current",
-                current = effective_context_label(snapshot, runtime_profile),
-                locale = locale
-            ),
-            t!("commands.context.prompt_header", locale = locale),
-            hint(locale),
-        );
-        session
-            .set_pending_setting(openid, Some(PendingSetting::Context))
-            .await?;
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_verbose_prompt(
-        snapshot: &UserSessionState,
-        ctx: CmdCtx<'_>,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let locale = snapshot.settings.language.as_str();
-        let current = if snapshot.settings.verbose {
-            "on"
-        } else {
-            "off"
-        };
-        let text = format!(
-            "{}\n{}\n{}",
-            t!(
-                "commands.verbose.prompt_current",
-                current = current,
-                locale = locale
-            ),
-            t!("commands.verbose.prompt_header", locale = locale),
-            hint(locale),
-        );
-        session
-            .set_pending_setting(openid, Some(PendingSetting::Verbose))
-            .await?;
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_lang_prompt(
-        snapshot: &UserSessionState,
-        ctx: CmdCtx<'_>,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let locale = snapshot.settings.language.as_str();
-        let text = format!(
-            "{}\n{}\n{}",
-            t!(
-                "commands.lang.prompt_current",
-                current = locale,
-                locale = locale
-            ),
-            t!("commands.lang.prompt_header", locale = locale),
-            hint(locale),
-        );
-        session
-            .set_pending_setting(openid, Some(PendingSetting::Lang))
+        ctx.session
+            .set_pending_setting(ctx.openid, Some(pending))
             .await?;
         Ok(CommandOutcome::reply(text))
     }
@@ -2882,7 +2830,8 @@ mod interactive {
         Ok(CommandOutcome::reply(lines.join("\n")))
     }
 
-    pub(super) async fn enter_resume_projects_prompt(
+    pub(super) async fn enter_restore_projects_prompt(
+        mode: RestoreMode,
         ctx: CmdCtx<'_>,
         locale: &str,
     ) -> Result<CommandOutcome> {
@@ -2891,67 +2840,20 @@ mod interactive {
         } = ctx;
         let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let projects = collect_projects(&sessions);
-        let (text, project_keys) = format_projects_list(&projects, locale);
+        let (text, project_keys) = format_projects_list(&SESSIONS_LIST_KEYS, &projects, locale);
         let has_projects = !project_keys.is_empty();
         session.set_last_projects_view(openid, project_keys).await?;
         session.set_last_sessions_view(openid, Vec::new()).await?;
         if has_projects {
             session
-                .set_pending_setting(openid, Some(PendingSetting::ResumeProjects))
+                .set_pending_setting(openid, Some(mode.projects_pending()))
                 .await?;
         }
         Ok(CommandOutcome::reply(text))
     }
 
-    pub(super) async fn enter_resume_sessions_prompt(
-        ctx: CmdCtx<'_>,
-        project_key: String,
-        page: usize,
-        locale: &str,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let (scope, project_path) = decode_project_key(&project_key)?;
-        let all_sessions = session.list_disk_sessions(scope).await?;
-        let project_sessions = all_sessions
-            .into_iter()
-            .filter(|item| item.cwd.display().to_string() == project_path)
-            .collect::<Vec<_>>();
-        let (text, ids) =
-            format_project_sessions_page(&project_path, &project_sessions, page, locale);
-        session.set_last_sessions_view(openid, ids).await?;
-        session
-            .set_pending_setting(
-                openid,
-                Some(PendingSetting::ResumeSessions { project_key, page }),
-            )
-            .await?;
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_loadbg_projects_prompt(
-        ctx: CmdCtx<'_>,
-        locale: &str,
-    ) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
-        let projects = collect_projects(&sessions);
-        let (text, project_keys) = format_projects_list(&projects, locale);
-        let has_projects = !project_keys.is_empty();
-        session.set_last_projects_view(openid, project_keys).await?;
-        session.set_last_sessions_view(openid, Vec::new()).await?;
-        if has_projects {
-            session
-                .set_pending_setting(openid, Some(PendingSetting::LoadbgProjects))
-                .await?;
-        }
-        Ok(CommandOutcome::reply(text))
-    }
-
-    pub(super) async fn enter_loadbg_sessions_prompt(
+    pub(super) async fn enter_restore_sessions_prompt(
+        mode: RestoreMode,
         ctx: CmdCtx<'_>,
         project_key: String,
         page: usize,
@@ -2967,17 +2869,18 @@ mod interactive {
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
             .collect::<Vec<_>>();
-        let (text, ids) =
-            format_project_sessions_page(&project_path, &project_sessions, page, locale);
+        let (text, ids) = format_project_sessions_page(
+            &SESSIONS_LIST_KEYS,
+            &project_path,
+            &project_sessions,
+            page,
+            locale,
+        );
         session.set_last_sessions_view(openid, ids).await?;
         session
             .set_pending_setting(
                 openid,
-                Some(PendingSetting::LoadbgSessions {
-                    project_key,
-                    page,
-                    alias,
-                }),
+                Some(mode.sessions_pending(project_key, page, alias)),
             )
             .await?;
         Ok(CommandOutcome::reply(text))
@@ -3131,16 +3034,24 @@ mod interactive {
                 consume_import_sessions(text, ctx, project_key, page).await
             }
             PendingSetting::Fg => consume_fg(text, ctx).await,
-            PendingSetting::ResumeProjects => consume_resume_projects(text, ctx).await,
-            PendingSetting::ResumeSessions { project_key, page } => {
-                consume_resume_sessions(text, ctx, project_key, page).await
+            PendingSetting::ResumeProjects => {
+                consume_restore_projects(RestoreMode::Resume, text, ctx).await
             }
-            PendingSetting::LoadbgProjects => consume_loadbg_projects(text, ctx).await,
+            PendingSetting::ResumeSessions { project_key, page } => {
+                consume_restore_sessions(RestoreMode::Resume, text, ctx, project_key, page, None)
+                    .await
+            }
+            PendingSetting::LoadbgProjects => {
+                consume_restore_projects(RestoreMode::Loadbg, text, ctx).await
+            }
             PendingSetting::LoadbgSessions {
                 project_key,
                 page,
                 alias,
-            } => consume_loadbg_sessions(text, ctx, project_key, page, alias).await,
+            } => {
+                consume_restore_sessions(RestoreMode::Loadbg, text, ctx, project_key, page, alias)
+                    .await
+            }
             PendingSetting::Approvals => consume_approvals(text, ctx).await,
             PendingSetting::Plan => consume_plan(text, ctx).await,
             PendingSetting::ResumeRecovery => Ok(CommandOutcome::reply_t(
@@ -3182,23 +3093,25 @@ mod interactive {
                 } else {
                     Some(choice.clone())
                 };
-                if !snapshot.foreground.saved {
-                    session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::SetGlobalModel(next));
-                }
-                session.set_model_override_for_active(openid, next).await?;
-                session.set_pending_setting(openid, None).await?;
-                let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::reply(t!(
-                    "commands.model.updated",
-                    model = effective_model(&snapshot, default_model, runtime_profile),
-                    locale = locale
-                )))
+                super::apply_active_or_global(
+                    ctx,
+                    &snapshot,
+                    true,
+                    next,
+                    CommandOutcome::SetGlobalModel,
+                    |value| session.set_model_override_for_active(openid, value),
+                    |snap: &UserSessionState| {
+                        t!(
+                            "commands.model.updated",
+                            model = effective_model(snap, default_model, runtime_profile),
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
+                )
+                .await
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
-                locale, input, &matches,
-            ))),
-            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
+            other => Ok(fuzzy_fallback(other, locale, input)),
         }
     }
 
@@ -3220,23 +3133,25 @@ mod interactive {
                 } else {
                     ReasoningEffort::parse_supported(&choice)
                 };
-                if !snapshot.foreground.saved {
-                    session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::SetGlobalReasoning(next));
-                }
-                session.set_reasoning_for_active(openid, next).await?;
-                session.set_pending_setting(openid, None).await?;
-                let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::reply(t!(
-                    "commands.reasoning.updated",
-                    value = effective_reasoning(&snapshot, runtime_profile),
-                    locale = locale
-                )))
+                super::apply_active_or_global(
+                    ctx,
+                    &snapshot,
+                    true,
+                    next,
+                    CommandOutcome::SetGlobalReasoning,
+                    |value| session.set_reasoning_for_active(openid, value),
+                    |snap: &UserSessionState| {
+                        t!(
+                            "commands.reasoning.updated",
+                            value = effective_reasoning(snap, runtime_profile),
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
+                )
+                .await
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
-                locale, input, &matches,
-            ))),
-            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
+            other => Ok(fuzzy_fallback(other, locale, input)),
         }
     }
 
@@ -3270,18 +3185,23 @@ mod interactive {
         let input = text.trim();
         match resolve_context_input(input) {
             Some(next) => {
-                if !snapshot.foreground.saved {
-                    session.set_pending_setting(openid, None).await?;
-                    return Ok(CommandOutcome::SetGlobalContext(next));
-                }
-                session.set_context_mode_for_active(openid, next).await?;
-                session.set_pending_setting(openid, None).await?;
-                let snapshot = session.snapshot_for_user(openid).await?;
-                Ok(CommandOutcome::reply(t!(
-                    "commands.context.updated",
-                    value = effective_context_label(&snapshot, runtime_profile),
-                    locale = locale
-                )))
+                super::apply_active_or_global(
+                    ctx,
+                    &snapshot,
+                    true,
+                    next,
+                    CommandOutcome::SetGlobalContext,
+                    |value| session.set_context_mode_for_active(openid, value),
+                    |snap: &UserSessionState| {
+                        t!(
+                            "commands.context.updated",
+                            value = effective_context_label(snap, runtime_profile),
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
+                )
+                .await
             }
             None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
         }
@@ -3310,10 +3230,7 @@ mod interactive {
                 };
                 Ok(CommandOutcome::reply_t(key, locale))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
-                locale, input, &matches,
-            ))),
-            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
+            other => Ok(fuzzy_fallback(other, locale, input)),
         }
     }
 
@@ -3340,15 +3257,7 @@ mod interactive {
                     locale = normalized
                 )))
             }
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
-                current_locale.as_str(),
-                input,
-                &matches,
-            ))),
-            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(
-                current_locale.as_str(),
-                input,
-            ))),
+            other => Ok(fuzzy_fallback(other, current_locale.as_str(), input)),
         }
     }
 
@@ -3363,10 +3272,7 @@ mod interactive {
         let input = text.trim();
         match fuzzy_match_unique(input, &candidates) {
             FuzzyOutcome::Exact(alias) => switch_foreground(&alias, ctx, locale).await,
-            FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(ambiguous_reply(
-                locale, input, &matches,
-            ))),
-            FuzzyOutcome::None => Ok(CommandOutcome::reply(no_match_reply(locale, input))),
+            other => Ok(fuzzy_fallback(other, locale, input)),
         }
     }
 
@@ -3389,8 +3295,13 @@ mod interactive {
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
             .collect::<Vec<_>>();
-        let (text_out, ids) =
-            format_project_sessions_page(&project_path, &sessions, 1, locale.as_str());
+        let (text_out, ids) = format_project_sessions_page(
+            &SESSIONS_LIST_KEYS,
+            &project_path,
+            &sessions,
+            1,
+            locale.as_str(),
+        );
         session.set_last_sessions_view(openid, ids).await?;
         session
             .set_pending_setting(
@@ -3444,7 +3355,8 @@ mod interactive {
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
             .collect::<Vec<_>>();
-        let (text_out, ids) = format_import_project_sessions_page(
+        let (text_out, ids) = format_project_sessions_page(
+            &IMPORT_LIST_KEYS,
             &project_path,
             &project_sessions,
             1,
@@ -3488,72 +3400,18 @@ mod interactive {
                 return Ok(CommandOutcome::reply(err.to_string()));
             }
         };
-        let result = session.import_disk_session(&target).await?;
-        let profile = result.profile;
-        let action = if result.copied {
-            t!("commands.import.imported", locale = locale.as_str())
-        } else {
-            t!("commands.import.refreshed", locale = locale.as_str())
-        };
-        session.set_pending_setting(openid, None).await?;
-        Ok(CommandOutcome::reply(t!(
-            "commands.import.result",
-            action = action.as_ref(),
-            summary = session_summary(&target, locale.as_str()),
-            workspace = profile.workspace_dir.display().to_string(),
-            model = compact_imported_profile_summary(&profile, locale.as_str()),
-            locale = locale.as_str()
-        )))
+        super::import_and_reply(session, openid, &target, locale.as_str()).await
     }
 
-    async fn consume_resume_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let locale = user_locale(session, openid).await;
-        let projects_view = session.last_projects_view(openid).await?;
-        let project_key =
-            match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
-                Ok(value) => value,
-                Err(err) => {
-                    return Ok(CommandOutcome::reply(err.to_string()));
-                }
-            };
-        enter_resume_sessions_prompt(ctx, project_key, 1, locale.as_str()).await
-    }
-
-    async fn consume_resume_sessions(
+    async fn consume_restore_projects(
+        mode: RestoreMode,
         text: &str,
         ctx: CmdCtx<'_>,
-        project_key: String,
-        page: usize,
     ) -> Result<CommandOutcome> {
         let CmdCtx {
             openid, session, ..
         } = ctx;
         let locale = user_locale(session, openid).await;
-        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
-        let last_view = session.last_sessions_view(openid).await?;
-        let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
-            Ok(value) => value,
-            Err(err) => {
-                session
-                    .set_pending_setting(
-                        openid,
-                        Some(PendingSetting::ResumeSessions { project_key, page }),
-                    )
-                    .await?;
-                return Ok(CommandOutcome::reply(err.to_string()));
-            }
-        };
-        execute_resume(ctx, &target).await
-    }
-
-    async fn consume_loadbg_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
-        let CmdCtx {
-            openid, session, ..
-        } = ctx;
-        let locale = user_locale(session, openid).await;
         let projects_view = session.last_projects_view(openid).await?;
         let project_key =
             match resolve_project_selector(text.trim(), &projects_view, locale.as_str()) {
@@ -3562,10 +3420,11 @@ mod interactive {
                     return Ok(CommandOutcome::reply(err.to_string()));
                 }
             };
-        enter_loadbg_sessions_prompt(ctx, project_key, 1, None, locale.as_str()).await
+        enter_restore_sessions_prompt(mode, ctx, project_key, 1, None, locale.as_str()).await
     }
 
-    async fn consume_loadbg_sessions(
+    async fn consume_restore_sessions(
+        mode: RestoreMode,
         text: &str,
         ctx: CmdCtx<'_>,
         project_key: String,
@@ -3581,20 +3440,20 @@ mod interactive {
         let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
             Ok(value) => value,
             Err(err) => {
+                // Keep the pending state alive so the user can retry.
                 session
                     .set_pending_setting(
                         openid,
-                        Some(PendingSetting::LoadbgSessions {
-                            project_key,
-                            page,
-                            alias,
-                        }),
+                        Some(mode.sessions_pending(project_key, page, alias)),
                     )
                     .await?;
                 return Ok(CommandOutcome::reply(err.to_string()));
             }
         };
-        execute_loadbg(ctx, &target, alias.as_deref()).await
+        match mode {
+            RestoreMode::Resume => execute_resume(ctx, &target).await,
+            RestoreMode::Loadbg => execute_loadbg(ctx, &target, alias.as_deref()).await,
+        }
     }
 
     #[cfg(test)]
