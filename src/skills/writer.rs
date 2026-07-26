@@ -115,49 +115,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_lowercases_and_replaces_spaces() {
-        assert_eq!(
-            normalize_slug("My Cool Skill"),
-            Some("my-cool-skill".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_replaces_non_alnum_with_hyphen() {
-        assert_eq!(
-            normalize_slug("build/remotion.video!"),
-            Some("build-remotion-video".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_collapses_consecutive_hyphens_and_trims() {
-        assert_eq!(
-            normalize_slug("---foo---bar---"),
-            Some("foo-bar".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_truncates_to_slug_max_chars() {
-        let raw = "a".repeat(100);
-        let slug = normalize_slug(&raw).unwrap();
-        assert!(slug.chars().count() <= SLUG_MAX_CHARS);
-    }
-
-    #[test]
-    fn normalize_empty_or_all_invalid_returns_none() {
-        assert_eq!(normalize_slug(""), None);
-        assert_eq!(normalize_slug("!!!"), None);
-        assert_eq!(normalize_slug("   "), None);
-    }
-
-    #[test]
-    fn normalize_keeps_digits_and_hyphens() {
-        assert_eq!(
-            normalize_slug("api-v2-migration"),
-            Some("api-v2-migration".to_string())
-        );
+    fn normalize_slug_maps_raw_names_to_slugs() {
+        let long_input = "a".repeat(100);
+        let long_expected = "a".repeat(SLUG_MAX_CHARS);
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "lowercases and replaces spaces",
+                "My Cool Skill",
+                Some("my-cool-skill"),
+            ),
+            (
+                "replaces non-alnum with hyphen",
+                "build/remotion.video!",
+                Some("build-remotion-video"),
+            ),
+            (
+                "collapses consecutive hyphens and trims",
+                "---foo---bar---",
+                Some("foo-bar"),
+            ),
+            (
+                "keeps digits and hyphens",
+                "api-v2-migration",
+                Some("api-v2-migration"),
+            ),
+            (
+                "truncates to SLUG_MAX_CHARS",
+                &long_input,
+                Some(&long_expected),
+            ),
+            ("empty input", "", None),
+            ("all-invalid input", "!!!", None),
+            ("whitespace-only input", "   ", None),
+        ];
+        for (case, raw, expected) in cases {
+            let got = normalize_slug(raw);
+            assert_eq!(got.as_deref(), *expected, "case: {case}");
+            if let Some(slug) = got {
+                assert!(
+                    slug.chars().count() <= SLUG_MAX_CHARS,
+                    "case: {case} (slug longer than SLUG_MAX_CHARS)"
+                );
+            }
+        }
     }
 
     #[test]
@@ -171,28 +171,29 @@ mod tests {
     }
 
     #[test]
-    fn build_skill_md_rejects_name_with_invalid_chars() {
-        assert!(build_skill_md("has spaces", "d", "b").is_err());
-        assert!(build_skill_md("UPPER", "d", "b").is_err());
-        assert!(build_skill_md("has/slash", "d", "b").is_err());
-    }
-
-    #[test]
-    fn build_skill_md_rejects_empty_name_or_description_or_body() {
-        assert!(build_skill_md("", "d", "b").is_err());
-        assert!(build_skill_md("name", "", "b").is_err());
-        assert!(build_skill_md("name", "d", "  \n  ").is_err());
-    }
-
-    #[test]
-    fn build_skill_md_rejects_description_over_140_chars() {
-        let desc = "x".repeat(141);
-        assert!(build_skill_md("name", &desc, "b").is_err());
-    }
-
-    #[test]
-    fn build_skill_md_rejects_description_containing_newline() {
-        assert!(build_skill_md("name", "line1\nline2", "b").is_err());
+    fn build_skill_md_rejects_invalid_inputs() {
+        let long_desc = "x".repeat(DESCRIPTION_MAX_CHARS + 1);
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("name with spaces", "has spaces", "d", "b"),
+            ("uppercase name", "UPPER", "d", "b"),
+            ("name with slash", "has/slash", "d", "b"),
+            ("empty name", "", "d", "b"),
+            ("empty description", "name", "", "b"),
+            ("blank body", "name", "d", "  \n  "),
+            ("description over the char cap", "name", &long_desc, "b"),
+            (
+                "description containing a newline",
+                "name",
+                "line1\nline2",
+                "b",
+            ),
+        ];
+        for (case, name, description, body) in cases {
+            assert!(
+                build_skill_md(name, description, body).is_err(),
+                "case: {case}"
+            );
+        }
     }
 
     #[test]

@@ -332,16 +332,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outcome_converts_to_simple_decision() {
-        let d = ApprovalOutcome::AcceptForSession.to_decision();
-        let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v, serde_json::Value::String("acceptForSession".into()));
-    }
-
-    #[test]
-    fn decline_converts_to_decline_string() {
-        let d = ApprovalOutcome::Decline.to_decision();
-        let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v, serde_json::Value::String("decline".into()));
+    fn outcome_converts_to_simple_decision_string() {
+        let cases = [
+            ("acceptForSession", ApprovalOutcome::AcceptForSession),
+            ("decline", ApprovalOutcome::Decline),
+        ];
+        for (expected, outcome) in cases {
+            let value = serde_json::to_value(outcome.to_decision()).unwrap();
+            assert_eq!(
+                value,
+                serde_json::Value::String(expected.into()),
+                "case: {expected}"
+            );
+        }
     }
 }

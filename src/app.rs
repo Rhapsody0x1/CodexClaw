@@ -1687,7 +1687,7 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 #[cfg(test)]
 mod tests {
     use crate::codex::events::{TokenUsage, TokenUsageInfo};
-    use crate::qq::types::{EventAuthor, MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
+    use crate::qq::types::{MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 
     use super::{
@@ -1732,21 +1732,34 @@ mod tests {
         assert_eq!(quote.message_id.as_deref(), Some("ref-1"));
         assert!(quote.text.contains("hello"));
         assert!(quote.text.contains("a.txt"));
-        let _ = EventAuthor {
-            user_openid: "u".into(),
-        };
     }
 
     #[test]
-    fn context_warning_uses_context_window_percentage() {
-        let warning = build_context_warning(&usage(220_000, 272_000), "en").expect("warning");
-        assert!(
-            warning.contains("80% used"),
-            "unexpected warning: {warning}"
-        );
-        assert!(warning.contains("220K used / 272K"));
-        assert!(warning.contains("`/compact`"));
-        assert!(!warning.contains("`/压缩`"));
+    fn context_warning_is_localized_per_language() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            (
+                "en",
+                &["80% used", "220K used / 272K", "`/compact`"],
+                &["`/压缩`"],
+            ),
+            ("zh", &["`/压缩`"], &["`/compact`"]),
+        ];
+        for (lang, expected, forbidden) in cases {
+            let warning = build_context_warning(&usage(220_000, 272_000), lang)
+                .unwrap_or_else(|| panic!("case: {lang} produced no warning"));
+            for needle in *expected {
+                assert!(
+                    warning.contains(needle),
+                    "case: {lang} missing {needle:?} in {warning}"
+                );
+            }
+            for needle in *forbidden {
+                assert!(
+                    !warning.contains(needle),
+                    "case: {lang} unexpectedly contains {needle:?} in {warning}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1774,13 +1787,6 @@ mod tests {
         let snapshot = build_usage_snapshot(&info, Some(272_000)).expect("snapshot");
         assert_eq!(snapshot.window, 272_000);
         assert_eq!(snapshot.total_tokens, 100);
-    }
-
-    #[test]
-    fn context_warning_localizes_compact_command_name() {
-        let warning = build_context_warning(&usage(220_000, 272_000), "zh").expect("warning");
-        assert!(warning.contains("`/压缩`"), "unexpected warning: {warning}");
-        assert!(!warning.contains("`/compact`"));
     }
 
     #[test]

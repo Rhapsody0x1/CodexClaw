@@ -259,13 +259,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_entries_on_empty_input_returns_empty_vec() {
-        assert!(parse_entries("").is_empty());
-    }
-
-    #[test]
-    fn parse_entries_on_whitespace_only_returns_empty_vec() {
-        assert!(parse_entries("   \n\t  ").is_empty());
+    fn parse_entries_on_blank_input_returns_empty_vec() {
+        for (case, raw) in [("empty", ""), ("whitespace only", "   \n\t  ")] {
+            assert!(parse_entries(raw).is_empty(), "case: {case}");
+        }
     }
 
     #[test]
@@ -291,20 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn serialize_entries_on_empty_slice_returns_empty_string() {
-        assert_eq!(serialize_entries(&[]), "");
-    }
-
-    #[test]
-    fn serialize_entries_single_entry_is_bare_content() {
-        let entries = ["only".to_string()];
-        assert_eq!(serialize_entries(&entries), "only");
-    }
-
-    #[test]
-    fn serialize_entries_joins_with_delimiter() {
-        let entries = ["a".to_string(), "b".to_string(), "c".to_string()];
-        assert_eq!(serialize_entries(&entries), "a\n§\nb\n§\nc");
+    fn serialize_entries_joins_with_the_section_delimiter() {
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("empty slice", &[], ""),
+            ("single entry is bare content", &["only"], "only"),
+            ("multiple entries", &["a", "b", "c"], "a\n§\nb\n§\nc"),
+        ];
+        for (case, entries, expected) in cases {
+            let owned = entries.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+            assert_eq!(serialize_entries(&owned), *expected, "case: {case}");
+        }
     }
 
     #[test]
@@ -499,10 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn write_entries_is_atomic_via_rename() {
-        // Writing must not leave a half-written file visible at the target path.
-        // We simulate this indirectly: after write_entries, no leftover ".tmp"
-        // file should remain in the parent dir.
+    fn write_entries_leaves_no_tmp_residue() {
+        // This only pins the cleanup half of the atomic-write contract: no
+        // leftover ".tmp" file remains next to the target. It does NOT prove
+        // atomicity — a plain non-atomic write would pass it too.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("MEMORY.md");
         write_entries(&path, &["x".to_string()]).unwrap();

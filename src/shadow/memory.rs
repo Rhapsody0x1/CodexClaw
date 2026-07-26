@@ -232,28 +232,24 @@ mod tests {
     }
 
     #[test]
-    fn threshold_met_when_user_message_exceeds_min_chars() {
+    fn memory_threshold_fires_on_any_signal() {
         let cfg = ShadowConfig::default();
-        let long = "x".repeat(cfg.min_user_msg_chars);
-        assert!(memory_threshold_met(&ctx(&long, 0, 0), &cfg));
-    }
-
-    #[test]
-    fn threshold_met_when_tool_call_count_positive() {
-        let cfg = ShadowConfig::default();
-        assert!(memory_threshold_met(&ctx("hi", 1, 0), &cfg));
-    }
-
-    #[test]
-    fn threshold_met_when_files_modified() {
-        let cfg = ShadowConfig::default();
-        assert!(memory_threshold_met(&ctx("hi", 0, 1), &cfg));
-    }
-
-    #[test]
-    fn threshold_not_met_for_trivial_turn() {
-        let cfg = ShadowConfig::default();
-        assert!(!memory_threshold_met(&ctx("hi", 0, 0), &cfg));
+        let at_min = "x".repeat(cfg.min_user_msg_chars);
+        let below_min = "x".repeat(cfg.min_user_msg_chars - 1);
+        let cases: &[(&str, &str, usize, usize, bool)] = &[
+            ("user message exactly at min chars", &at_min, 0, 0, true),
+            ("tool call count positive", "hi", 1, 0, true),
+            ("files modified", "hi", 0, 1, true),
+            ("user message one char below min", &below_min, 0, 0, false),
+            ("trivial turn", "hi", 0, 0, false),
+        ];
+        for (case, user, tool, files, expected) in cases {
+            assert_eq!(
+                memory_threshold_met(&ctx(user, *tool, *files), &cfg),
+                *expected,
+                "case: {case}"
+            );
+        }
     }
 
     #[test]
