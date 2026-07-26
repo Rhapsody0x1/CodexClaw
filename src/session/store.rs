@@ -1468,6 +1468,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_skips_injected_user_texts() {
+        let env = TestEnv::new().await;
+        env.write_rollout(
+            "rollout-2026-07-26T00-00-00-thread-injected.jsonl",
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"thread-injected","timestamp":"2026-07-26T00:00:00Z","cwd":"/tmp/p"}}"#, "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"真正的问题在这里"}]}}"#, "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted> The user interrupted the previous turn on purpose."}]}}"#, "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":">>> APPROVAL REQUEST END"}]}}"#, "\n",
+            ),
+        )
+        .await;
+
+        let sessions = env
+            .store
+            .list_disk_sessions(SessionListScope::All)
+            .await
+            .unwrap();
+        let session = sessions
+            .iter()
+            .find(|s| s.id == "thread-injected")
+            .expect("session listed");
+        assert_eq!(
+            session.last_user_message.as_deref(),
+            Some("真正的问题在这里"),
+            "injected user-role texts must not win the preview"
+        );
+    }
+
+    #[tokio::test]
     async fn cron_sessions_listed_only_for_persistent_jobs() {
         use crate::model::cron::{JobAction, SessionStrategy, fixtures::shell_job};
 

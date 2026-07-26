@@ -84,7 +84,9 @@ fn read_session_index(codex_home: &Path) -> Result<HashMap<String, IndexEntry>> 
         let Some(id) = id else {
             continue;
         };
-        let thread_name = as_str_field(value.get("thread_name")).map(str::to_string);
+        let thread_name = as_str_field(value.get("thread_name"))
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty());
         let first_user_message = as_str_field(value.get("first_user_message"))
             .map(str::to_string)
             .filter(|value| !value.trim().is_empty());
@@ -203,6 +205,22 @@ fn parse_last_user_message(reader: &mut impl BufRead) -> Option<String> {
     }
 }
 
+/// `role=user` texts codex or CodexClaw injects that are not the human
+/// talking. A survey of real rollouts found each of these leaking into the
+/// `/sessions` preview as the "last user message"; anything matching is
+/// skipped so the scan falls back to the previous genuine message.
+const INJECTED_USER_TEXT_MARKERS: &[&str] = &[
+    "<environment_context>",
+    "<turn_aborted>",
+    "<codex_internal_context",
+    "<subagent_notification>",
+    "<user_shell_command>",
+    "<image",
+    "# AGENTS.md instructions",
+    ">>> APPROVAL REQUEST",
+    "[CLAW SCHEDULED",
+];
+
 fn extract_user_message_preview(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -215,7 +233,9 @@ fn extract_user_message_preview(raw: &str) -> Option<String> {
     };
     if message.is_empty()
         || message == "(User sent no text, only attachments.)"
-        || message.starts_with("<environment_context>")
+        || INJECTED_USER_TEXT_MARKERS
+            .iter()
+            .any(|marker| message.starts_with(marker))
     {
         return None;
     }
