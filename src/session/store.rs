@@ -158,9 +158,21 @@ impl SessionStore {
         if let Some(snapshot) = self.state.read().await.users.get(openid).cloned() {
             return Ok(snapshot);
         }
+        self.mutate_user(openid, |user| Ok(user.clone())).await
+    }
+
+    /// Runs `mutator` against the (ensured) user record inside one
+    /// [`Self::mutate_state`] commit. Use it when the mutation touches only
+    /// that user's record; mutations that also touch sibling state (e.g.
+    /// `imported_profiles`) stay on `mutate_state` directly.
+    async fn mutate_user<T>(
+        &self,
+        openid: &str,
+        mutator: impl FnOnce(&mut UserSessionState) -> Result<T>,
+    ) -> Result<T> {
         self.mutate_state(|state| {
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            Ok(user.clone())
+            mutator(user)
         })
         .await
     }
@@ -173,10 +185,42 @@ impl SessionStore {
     where
         F: FnOnce(&mut SessionSettings),
     {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             mutator(&mut user.settings);
             Ok(user.clone())
+        })
+        .await
+    }
+
+    /// Applies one setting to whatever the "active" target is: a temporary
+    /// foreground dialog routes the value into the user-wide defaults
+    /// (`set_settings`), a bound dialog routes it into that dialog's profile
+    /// (`set_profile`). Exactly one of the two closures runs.
+    async fn set_active_setting<T>(
+        &self,
+        openid: &str,
+        value: T,
+        set_settings: impl FnOnce(&mut SessionSettings, T),
+        set_profile: impl FnOnce(&mut DialogProfile, T),
+    ) -> Result<UserSessionState> {
+        self.mutate_state(|state| {
+            let (snapshot, cached_profile) = {
+                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                if user.foreground.is_temporary() {
+                    set_settings(&mut user.settings, value);
+                } else {
+                    let profile = user
+                        .foreground
+                        .profile
+                        .get_or_insert_with(DialogProfile::default);
+                    set_profile(profile, value);
+                }
+                let snapshot = user.clone();
+                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
+                (snapshot, cached_profile)
+            };
+            persist_cached_profile(state, cached_profile);
+            Ok(snapshot)
         })
         .await
     }
@@ -186,55 +230,12 @@ impl SessionStore {
         openid: &str,
         value: Option<String>,
     ) -> Result<UserSessionState> {
-        self.mutate_state(|state| {
-            let (snapshot, cached_profile) = {
-                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.is_temporary() {
-                    user.settings.model_override = value.clone();
-                } else {
-                    let profile = user
-                        .foreground
-                        .profile
-                        .get_or_insert_with(DialogProfile::default);
-                    profile.model_override = value.clone();
-                }
-                let snapshot = user.clone();
-                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
-                (snapshot, cached_profile)
-            };
-            persist_cached_profile(state, cached_profile);
-            Ok(snapshot)
-        })
-        .await
-    }
-
-    /// Production currently never changes the service tier per dialog; only the
-    /// settings round-trip test exercises this path.
-    #[allow(dead_code)]
-    pub(crate) async fn set_service_tier_for_active(
-        &self,
-        openid: &str,
-        value: Option<ServiceTier>,
-    ) -> Result<UserSessionState> {
-        self.mutate_state(|state| {
-            let (snapshot, cached_profile) = {
-                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.is_temporary() {
-                    user.settings.service_tier = value;
-                } else {
-                    let profile = user
-                        .foreground
-                        .profile
-                        .get_or_insert_with(DialogProfile::default);
-                    profile.service_tier = value;
-                }
-                let snapshot = user.clone();
-                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
-                (snapshot, cached_profile)
-            };
-            persist_cached_profile(state, cached_profile);
-            Ok(snapshot)
-        })
+        self.set_active_setting(
+            openid,
+            value,
+            |settings, value| settings.model_override = value,
+            |profile, value| profile.model_override = value,
+        )
         .await
     }
 
@@ -243,25 +244,12 @@ impl SessionStore {
         openid: &str,
         value: Option<ContextMode>,
     ) -> Result<UserSessionState> {
-        self.mutate_state(|state| {
-            let (snapshot, cached_profile) = {
-                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.is_temporary() {
-                    user.settings.context_mode = value;
-                } else {
-                    let profile = user
-                        .foreground
-                        .profile
-                        .get_or_insert_with(DialogProfile::default);
-                    profile.context_mode = value;
-                }
-                let snapshot = user.clone();
-                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
-                (snapshot, cached_profile)
-            };
-            persist_cached_profile(state, cached_profile);
-            Ok(snapshot)
-        })
+        self.set_active_setting(
+            openid,
+            value,
+            |settings, value| settings.context_mode = value,
+            |profile, value| profile.context_mode = value,
+        )
         .await
     }
 
@@ -270,25 +258,12 @@ impl SessionStore {
         openid: &str,
         value: Option<ReasoningEffort>,
     ) -> Result<UserSessionState> {
-        self.mutate_state(|state| {
-            let (snapshot, cached_profile) = {
-                let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.is_temporary() {
-                    user.settings.reasoning_effort = value;
-                } else {
-                    let profile = user
-                        .foreground
-                        .profile
-                        .get_or_insert_with(DialogProfile::default);
-                    profile.reasoning_effort = value;
-                }
-                let snapshot = user.clone();
-                let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
-                (snapshot, cached_profile)
-            };
-            persist_cached_profile(state, cached_profile);
-            Ok(snapshot)
-        })
+        self.set_active_setting(
+            openid,
+            value,
+            |settings, value| settings.reasoning_effort = value,
+            |profile, value| profile.reasoning_effort = value,
+        )
         .await
     }
 
@@ -357,8 +332,7 @@ impl SessionStore {
         openid: &str,
         session_id: Option<String>,
     ) -> Result<UserSessionState> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             user.foreground.session_id = session_id;
             Ok(user.clone())
         })
@@ -370,8 +344,7 @@ impl SessionStore {
         openid: &str,
         usage: TokenUsageSnapshot,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             user.foreground.last_usage = Some(usage);
             Ok(())
         })
@@ -383,8 +356,7 @@ impl SessionStore {
         openid: &str,
         pending: Option<PendingSetting>,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             user.pending_setting = pending;
             Ok(())
         })
@@ -396,8 +368,7 @@ impl SessionStore {
         openid: &str,
         alias: CommandAlias,
     ) -> Result<CommandAlias> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             user.command_aliases
                 .insert(alias.name.clone(), alias.clone());
             Ok(alias)
@@ -406,8 +377,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn remove_command_alias(&self, openid: &str, name: &str) -> Result<bool> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             Ok(user.command_aliases.remove(name).is_some())
         })
         .await
@@ -481,8 +451,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
                 self.new_temporary_dialog()
             })?;
@@ -497,8 +466,7 @@ impl SessionStore {
         workspace_dir: &Path,
     ) -> Result<SwitchResult> {
         let workspace_dir = workspace_dir.to_path_buf();
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
                 self.temporary_dialog_for_workspace(&workspace_dir)
             })?;
@@ -512,8 +480,7 @@ impl SessionStore {
         openid: &str,
         requested_alias: Option<&str>,
     ) -> Result<SwitchResult> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             let parked_alias = park_foreground(
                 user,
                 requested_alias,
@@ -564,12 +531,14 @@ impl SessionStore {
         .await
     }
 
-    pub(crate) async fn resume_disk_session(
+    /// Shared profile lookup for `resume_disk_session` /
+    /// `load_disk_session_to_background`: the cached imported profile wins,
+    /// otherwise the profile is re-extracted from the rollout file.
+    async fn resolve_disk_session_profile(
         &self,
-        openid: &str,
         target: &DiskSessionMeta,
-    ) -> Result<SwitchResult> {
-        let resolved_profile = self
+    ) -> Result<Option<ImportedSessionProfile>> {
+        Ok(self
             .state
             .read()
             .await
@@ -579,29 +548,22 @@ impl SessionStore {
             .or(extract_session_profile(
                 &target.rollout_path,
                 target.cwd.clone(),
-            )?);
+            )?))
+    }
+
+    pub(crate) async fn resume_disk_session(
+        &self,
+        openid: &str,
+        target: &DiskSessionMeta,
+    ) -> Result<SwitchResult> {
+        let resolved_profile = self.resolve_disk_session_profile(target).await?;
         self.mutate_state(|state| {
-            if let Some(profile) = resolved_profile.clone() {
-                state
-                    .imported_profiles
-                    .entry(target.id.clone())
-                    .or_insert(profile);
-            }
+            cache_imported_profile(state, &target.id, resolved_profile.as_ref());
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
                 self.new_temporary_dialog()
             })?;
-            user.foreground = DialogState {
-                session_id: Some(target.id.clone()),
-                origin: target.origin,
-                workspace_dir: resolved_profile
-                    .as_ref()
-                    .map(|value| value.workspace_dir.clone())
-                    .unwrap_or_else(|| target.cwd.clone()),
-                saved: true,
-                profile: resolved_profile.clone().map(|value| value.dialog_profile()),
-                last_usage: None,
-            };
+            user.foreground = dialog_from_disk_session(target, resolved_profile.as_ref());
             Ok(SwitchResult { parked_alias })
         })
         .await
@@ -613,39 +575,14 @@ impl SessionStore {
         target: &DiskSessionMeta,
         requested_alias: Option<&str>,
     ) -> Result<String> {
-        let resolved_profile = self
-            .state
-            .read()
-            .await
-            .imported_profiles
-            .get(&target.id)
-            .cloned()
-            .or(extract_session_profile(
-                &target.rollout_path,
-                target.cwd.clone(),
-            )?);
+        let resolved_profile = self.resolve_disk_session_profile(target).await?;
         self.mutate_state(|state| {
-            if let Some(profile) = resolved_profile.clone() {
-                state
-                    .imported_profiles
-                    .entry(target.id.clone())
-                    .or_insert(profile);
-            }
+            cache_imported_profile(state, &target.id, resolved_profile.as_ref());
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
             let alias = pick_alias(user, requested_alias)?;
             user.background.insert(
                 alias.clone(),
-                DialogState {
-                    session_id: Some(target.id.clone()),
-                    origin: target.origin,
-                    workspace_dir: resolved_profile
-                        .as_ref()
-                        .map(|value| value.workspace_dir.clone())
-                        .unwrap_or_else(|| target.cwd.clone()),
-                    saved: true,
-                    profile: resolved_profile.clone().map(|value| value.dialog_profile()),
-                    last_usage: None,
-                },
+                dialog_from_disk_session(target, resolved_profile.as_ref()),
             );
             record_background_alias(user, &alias);
             Ok(alias)
@@ -659,8 +596,7 @@ impl SessionStore {
         old_alias: &str,
         new_alias: &str,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             let new_alias = normalize_alias(new_alias)?;
             if user.background.contains_key(&new_alias) {
                 return Err(anyhow!("标签 `{new_alias}` 已存在"));
@@ -676,8 +612,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn save_foreground(&self, openid: &str) -> Result<bool> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+        self.mutate_user(openid, |user| {
             if user.foreground.saved {
                 return Ok(false);
             }
@@ -769,17 +704,38 @@ impl SessionStore {
         })
     }
 
+    /// Shared body of the four `set_last_*_view` setters: `field` selects
+    /// which cached view list on the user record receives `ids`.
+    async fn set_view(
+        &self,
+        openid: &str,
+        ids: Vec<String>,
+        field: impl FnOnce(&mut UserSessionState) -> &mut Vec<String>,
+    ) -> Result<()> {
+        self.mutate_user(openid, |user| {
+            *field(user) = ids;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Shared body of the four `last_*_view` getters: `field` moves the
+    /// selected view list out of the user snapshot.
+    async fn view(
+        &self,
+        openid: &str,
+        field: impl FnOnce(UserSessionState) -> Vec<String>,
+    ) -> Result<Vec<String>> {
+        Ok(field(self.snapshot_for_user(openid).await?))
+    }
+
     pub(crate) async fn set_last_sessions_view(
         &self,
         openid: &str,
         ids: Vec<String>,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.last_sessions_view = ids;
-            Ok(())
-        })
-        .await
+        self.set_view(openid, ids, |user| &mut user.last_sessions_view)
+            .await
     }
 
     pub(crate) async fn set_last_projects_view(
@@ -787,12 +743,8 @@ impl SessionStore {
         openid: &str,
         ids: Vec<String>,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.last_projects_view = ids;
-            Ok(())
-        })
-        .await
+        self.set_view(openid, ids, |user| &mut user.last_projects_view)
+            .await
     }
 
     pub(crate) async fn set_last_import_sessions_view(
@@ -800,12 +752,8 @@ impl SessionStore {
         openid: &str,
         ids: Vec<String>,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.last_import_sessions_view = ids;
-            Ok(())
-        })
-        .await
+        self.set_view(openid, ids, |user| &mut user.last_import_sessions_view)
+            .await
     }
 
     pub(crate) async fn set_last_import_projects_view(
@@ -813,39 +761,34 @@ impl SessionStore {
         openid: &str,
         ids: Vec<String>,
     ) -> Result<()> {
-        self.mutate_state(|state| {
-            let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.last_import_projects_view = ids;
-            Ok(())
-        })
-        .await
+        self.set_view(openid, ids, |user| &mut user.last_import_projects_view)
+            .await
     }
 
     pub(crate) async fn last_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
-        Ok(self.snapshot_for_user(openid).await?.last_sessions_view)
+        self.view(openid, |user| user.last_sessions_view).await
     }
 
     pub(crate) async fn last_projects_view(&self, openid: &str) -> Result<Vec<String>> {
-        Ok(self.snapshot_for_user(openid).await?.last_projects_view)
+        self.view(openid, |user| user.last_projects_view).await
     }
 
     pub(crate) async fn last_import_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
-        Ok(self
-            .snapshot_for_user(openid)
-            .await?
-            .last_import_sessions_view)
+        self.view(openid, |user| user.last_import_sessions_view)
+            .await
     }
 
     pub(crate) async fn last_import_projects_view(&self, openid: &str) -> Result<Vec<String>> {
-        Ok(self
-            .snapshot_for_user(openid)
-            .await?
-            .last_import_projects_view)
+        self.view(openid, |user| user.last_import_projects_view)
+            .await
     }
 
+    /// The scope is currently a no-op filter (every caller passes `All`), but
+    /// the parameter stays: commands.rs still encodes/decodes the project key
+    /// with [`SessionListScope`].
     pub(crate) async fn list_disk_sessions(
         &self,
-        scope: SessionListScope,
+        _scope: SessionListScope,
     ) -> Result<Vec<DiskSessionMeta>> {
         // scan_home_sessions recursively walks the sessions dir and reads every
         // rollout file to EOF; run it off the reactor so a /sessions with many
@@ -859,17 +802,6 @@ impl SessionStore {
             Ok(by_id.into_values().collect::<Vec<_>>())
         })
         .await??;
-        values.retain(|session| match scope {
-            SessionListScope::All => true,
-            SessionListScope::Local => {
-                let _ = session;
-                true
-            }
-            SessionListScope::Global => {
-                let _ = session;
-                true
-            }
-        });
         values.sort_by_key(|value| std::cmp::Reverse(value.updated_at));
         Ok(values)
     }
@@ -1057,35 +989,14 @@ fn load_legacy_state(
     };
     let legacy = serde_json::from_str::<SessionState>(&raw)
         .with_context(|| format!("failed to parse {}", legacy_path.display()))?;
+    let mut user = UserSessionState::new(prepare_workspace_dir(shared_workspace_dir)?);
+    user.foreground.session_id = legacy.session_id;
+    user.settings = legacy.settings;
     let mut users = BTreeMap::new();
-    users.insert(
-        "default".to_string(),
-        UserSessionState {
-            foreground: DialogState {
-                session_id: legacy.session_id,
-                origin: DialogOrigin::Local,
-                workspace_dir: prepare_workspace_dir(shared_workspace_dir)?,
-                saved: false,
-                profile: None,
-                last_usage: None,
-            },
-            background: BTreeMap::new(),
-            background_order: Vec::new(),
-            settings: legacy.settings,
-            alias_seq: 0,
-            last_projects_view: Vec::new(),
-            last_sessions_view: Vec::new(),
-            last_import_projects_view: Vec::new(),
-            last_import_sessions_view: Vec::new(),
-            saved_local_session_ids: Vec::new(),
-            command_aliases: BTreeMap::new(),
-            pending_setting: None,
-        },
-    );
+    users.insert("default".to_string(), user);
     Ok(PersistedSessionState {
         users,
-        imported_profiles: BTreeMap::new(),
-        cron_jobs: BTreeMap::new(),
+        ..PersistedSessionState::default()
     })
 }
 
@@ -1099,23 +1010,9 @@ fn ensure_user_mut<'a>(
         return Ok(state.users.get_mut(openid).expect("user entry must exist"));
     }
     let temporary = build_temporary()?;
-    state.users.insert(
-        openid.to_string(),
-        UserSessionState {
-            foreground: temporary,
-            background: BTreeMap::new(),
-            background_order: Vec::new(),
-            settings: SessionSettings::default(),
-            alias_seq: 0,
-            last_projects_view: Vec::new(),
-            last_sessions_view: Vec::new(),
-            last_import_projects_view: Vec::new(),
-            last_import_sessions_view: Vec::new(),
-            saved_local_session_ids: Vec::new(),
-            command_aliases: BTreeMap::new(),
-            pending_setting: None,
-        },
-    );
+    let mut user = UserSessionState::new(temporary.workspace_dir.clone());
+    user.foreground = temporary;
+    state.users.insert(openid.to_string(), user);
     Ok(state.users.get_mut(openid).expect("user entry must exist"))
 }
 
@@ -1127,6 +1024,39 @@ fn persist_cached_profile(
         return;
     };
     state.imported_profiles.insert(session_id, profile);
+}
+
+/// Caches a freshly resolved profile for `session_id`, keeping an existing
+/// cache entry if one appeared in the meantime (`or_insert` semantics).
+fn cache_imported_profile(
+    state: &mut PersistedSessionState,
+    session_id: &str,
+    profile: Option<&ImportedSessionProfile>,
+) {
+    if let Some(profile) = profile {
+        state
+            .imported_profiles
+            .entry(session_id.to_string())
+            .or_insert_with(|| profile.clone());
+    }
+}
+
+/// Builds the dialog record for a session picked from disk, preferring the
+/// resolved profile's workspace over the rollout `cwd`.
+fn dialog_from_disk_session(
+    target: &DiskSessionMeta,
+    profile: Option<&ImportedSessionProfile>,
+) -> DialogState {
+    DialogState {
+        session_id: Some(target.id.clone()),
+        origin: target.origin,
+        workspace_dir: profile
+            .map(|value| value.workspace_dir.clone())
+            .unwrap_or_else(|| target.cwd.clone()),
+        saved: true,
+        profile: profile.map(|value| value.dialog_profile()),
+        last_usage: None,
+    }
 }
 
 fn record_background_alias(user: &mut UserSessionState, alias: &str) {
@@ -2198,8 +2128,15 @@ mod tests {
             .set_context_mode_for_active("u1", Some(ContextMode::OneM))
             .await
             .unwrap();
+        // Production never changes the service tier per dialog; drive the
+        // shared routing helper directly to keep the profile branch covered.
         env.store
-            .set_service_tier_for_active("u1", Some(ServiceTier::Fast))
+            .set_active_setting(
+                "u1",
+                Some(ServiceTier::Fast),
+                |settings, value| settings.service_tier = value,
+                |profile, value| profile.service_tier = value,
+            )
             .await
             .unwrap();
 

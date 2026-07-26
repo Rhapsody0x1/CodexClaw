@@ -515,11 +515,10 @@ pub(crate) struct UserSessionState {
 }
 
 impl UserSessionState {
-    /// Canonical "fresh user" constructor. Currently only reached through
-    /// `Default`-ish literals in `session/store.rs`; kept as the single source
-    /// of truth for the initial field values so those literals can be folded
-    /// into it.
-    #[allow(dead_code)]
+    /// Canonical "fresh user" constructor: the single source of truth for the
+    /// initial field values. Callers that need a different foreground or
+    /// settings (legacy migration) construct via `new` and overwrite just the
+    /// fields that differ.
     pub(crate) fn new(default_workspace_dir: PathBuf) -> Self {
         Self {
             foreground: DialogState::new_temporary(default_workspace_dir),
