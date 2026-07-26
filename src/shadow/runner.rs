@@ -7,7 +7,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::codex::events::CodexEvent;
+use crate::codex::CodexEvent;
 
 pub fn extract_agent_messages_from_lines<I: IntoIterator<Item = String>>(lines: I) -> String {
     let mut parts = Vec::new();

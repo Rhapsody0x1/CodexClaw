@@ -3,11 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Result;
 use codex_claw::{
     app::App,
-    codex::{
-        app_server::{AppServerHandle, ClientInfo},
-        config_snapshot,
-        executor::{CodexExecutor, build_codex_path_env},
-    },
+    codex::{AppServerHandle, ClientInfo, CodexExecutor, build_codex_path_env, config_snapshot},
     config::AppConfig,
     memory::store::MemoryStore,
     qq::{api::QqApiClient, gateway},

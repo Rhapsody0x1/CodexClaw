@@ -12,8 +12,7 @@ use tokio::{
 
 use crate::{
     app::App,
-    codex::events::CodexEvent,
-    codex::executor::{ExecutionRequest, ExecutionUpdate},
+    codex::{CodexEvent, ExecutionRequest, ExecutionUpdate},
     session::state::{ApprovalPolicySetting, DialogProfile, SessionSettings, SessionState},
     util::{layout::DataLayout, text::truncate_middle},
 };
@@ -695,7 +694,7 @@ fn format_run_log(
 #[cfg(test)]
 mod tests {
     use super::{codex_exec_args, extract_codex_exec_agent_messages, keep_interrupted_thread};
-    use crate::codex::executor::ExecutionUpdate;
+    use crate::codex::ExecutionUpdate;
     use crate::model::cron::fixtures::shell_job;
     use crate::scheduler::store::{CronJob, JobAction, SessionStrategy};
     use crate::session::state::SessionState;

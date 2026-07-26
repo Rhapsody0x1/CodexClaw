@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rust_i18n::t;
 
 use crate::{
-    codex::runtime::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
+    codex::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
     session::{
         state::{
             ApprovalPolicySetting, CommandAlias, ContextMode, PendingSetting, ReasoningEffort,
@@ -4216,7 +4216,7 @@ mod tests {
     use tokio::fs;
 
     use crate::{
-        codex::runtime::CodexRuntimeProfile,
+        codex::CodexRuntimeProfile,
         session::{
             state::{
                 ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,

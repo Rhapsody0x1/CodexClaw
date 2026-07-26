@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::{
     codex::{
-        executor::ExecutionUpdate,
+        ExecutionUpdate,
         output::{Directive, parse_output},
     },
     qq::api::{QqApiClient, estimate_text_chunk_count},
@@ -291,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_captures_session_id_from_session_started() {
-        use crate::codex::executor::ExecutionUpdate;
+        use crate::codex::ExecutionUpdate;
         use tokio::sync::mpsc;
 
         let client = offline_client();

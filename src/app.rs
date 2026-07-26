@@ -16,19 +16,13 @@ use rust_i18n::t;
 
 use crate::{
     codex::{
-        app_server::{
-            ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, FileChangeApprovalEvent,
-            PermissionsApprovalEvent,
-        },
-        events::TokenUsageInfo,
-        executor::{CodexExecutor, CompactRequest, ExecutionRequest},
+        ApprovalOutcome, ApprovalRequest, CodexExecutor, CodexRuntimeProfile, CommandApprovalEvent,
+        CompactRequest, ExecutionRequest, FileChangeApprovalEvent, PermissionsApprovalEvent,
+        TokenUsageInfo, build_prompt,
         output::{Directive, parse_output},
-        prompt::build_prompt,
-        runtime::{
-            read_codex_runtime_profile_from_path, write_context_mode_to_config_path,
-            write_model_to_config_path, write_reasoning_effort_to_config_path,
-            write_service_tier_to_config_path,
-        },
+        read_codex_runtime_profile_from_path, write_context_mode_to_config_path,
+        write_model_to_config_path, write_reasoning_effort_to_config_path,
+        write_service_tier_to_config_path,
     },
     commands::{ApprovalIntent, CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
@@ -494,7 +488,7 @@ impl App {
     async fn run_normal_message(
         &self,
         normalized: IncomingMessage,
-        runtime_profile: crate::codex::runtime::CodexRuntimeProfile,
+        runtime_profile: CodexRuntimeProfile,
     ) -> Result<()> {
         if self.busy.swap(true, Ordering::SeqCst) {
             warn!(
@@ -582,7 +576,7 @@ impl App {
     async fn run_turn(
         &self,
         message: IncomingMessage,
-        runtime_profile: crate::codex::runtime::CodexRuntimeProfile,
+        runtime_profile: CodexRuntimeProfile,
     ) -> Result<()> {
         let user_snapshot = self
             .session
@@ -1132,7 +1126,7 @@ impl App {
         &self,
         openid: &str,
         message_id: &str,
-        runtime_profile: &crate::codex::runtime::CodexRuntimeProfile,
+        runtime_profile: &CodexRuntimeProfile,
     ) -> Result<()> {
         if self.busy.swap(true, Ordering::SeqCst) {
             let lang = self.command_locale(openid).await;
@@ -1158,7 +1152,7 @@ impl App {
         &self,
         openid: &str,
         message_id: &str,
-        runtime_profile: &crate::codex::runtime::CodexRuntimeProfile,
+        runtime_profile: &CodexRuntimeProfile,
     ) -> Result<()> {
         let user_snapshot = self.session.snapshot_for_user(openid).await?;
         let lang = user_snapshot.settings.language.clone();
@@ -1684,7 +1678,7 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use crate::codex::events::{TokenUsage, TokenUsageInfo};
+    use crate::codex::{TokenUsage, TokenUsageInfo};
     use crate::qq::types::{MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 

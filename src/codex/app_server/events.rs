@@ -4,19 +4,17 @@
 //! The aim is **byte-for-byte parity** with the current `codex exec --json`
 //! output: to achieve that, we convert each app-server `ItemPayload` into the
 //! pre-existing [`CodexItem`] shape and dispatch to
-//! [`crate::codex::executor::tool_display_for_item_public`] (the existing
-//! formatter). Only events that don't fit the legacy shape get new output
-//! paths (e.g. `[Model rerouted -> ...]`).
+//! [`crate::codex::display::tool_display_for_item`] (the existing formatter).
+//! Only events that don't fit the legacy shape get new output paths
+//! (e.g. `[Model rerouted -> ...]`).
 
 use serde_json::Value as JsonValue;
 use tracing::trace;
 
 use crate::codex::{
+    display::{ToolEventPhase, format_todo_items, tool_display_for_item},
     events::{CodexItem, FileUpdateChange, PatchChangeKind, TodoEntry, WebSearchAction},
-    executor::{
-        ExecutionUpdate, ToolEventPhasePublic, format_todo_items_public,
-        tool_display_for_item_public,
-    },
+    types::ExecutionUpdate,
 };
 
 use super::protocol::{
@@ -59,7 +57,7 @@ pub fn translate_item_started(
     }
     let item = to_codex_item(&notif.item);
     trace!(item_type = %item.item_type, "item/started");
-    match tool_display_for_item_public(&item, ToolEventPhasePublic::Started) {
+    match tool_display_for_item(&item, ToolEventPhase::Started) {
         Some(display) => vec![ExecutionUpdate::ToolCall { display }],
         None => Vec::new(),
     }
@@ -71,7 +69,7 @@ pub fn translate_item_updated(
 ) -> Vec<ExecutionUpdate> {
     let item = to_codex_item(&notif.item);
     trace!(item_type = %item.item_type, "item/updated");
-    match tool_display_for_item_public(&item, ToolEventPhasePublic::Updated) {
+    match tool_display_for_item(&item, ToolEventPhase::Updated) {
         Some(display) => vec![ExecutionUpdate::ToolCall { display }],
         None => Vec::new(),
     }
@@ -100,7 +98,7 @@ pub fn translate_item_completed(
                 .push(std::path::PathBuf::from(change.path.clone()));
         }
     }
-    match tool_display_for_item_public(&item, ToolEventPhasePublic::Completed) {
+    match tool_display_for_item(&item, ToolEventPhase::Completed) {
         Some(display) => vec![ExecutionUpdate::ToolCall { display }],
         None => Vec::new(),
     }
@@ -114,7 +112,7 @@ pub fn translate_turn_plan_updated(
     if entries.is_empty() {
         return Vec::new();
     }
-    let detail = format_todo_items_public(&entries);
+    let detail = format_todo_items(&entries);
     if detail.is_empty() {
         return Vec::new();
     }

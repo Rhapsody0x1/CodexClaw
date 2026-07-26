@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 use crate::{
     codex::{
         events::{TokenUsage, TokenUsageInfo},
-        executor::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
+        types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
     session::state::{ContextMode, ServiceTier},
 };

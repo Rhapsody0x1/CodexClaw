@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Result;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::codex::executor::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate};
+use crate::codex::types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate};
 
 pub use approvals::{
     ApprovalBroker, ApprovalOutcome, ApprovalRequest, CommandApprovalEvent, ElicitationEvent,
