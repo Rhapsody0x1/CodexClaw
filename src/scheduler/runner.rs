@@ -327,13 +327,10 @@ async fn run_shell(
         .await
         .map_err(|_| anyhow!("timed out after {}s", max_duration.as_secs()))?
         .with_context(|| format!("failed to execute `{program}`"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = if stderr.trim().is_empty() {
-        stdout.to_string()
-    } else {
-        format!("{stdout}\n[stderr]\n{stderr}")
-    };
+    let combined = combine_output(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    );
     if !output.status.success() {
         return Err(anyhow!(
             "process exited with {}: {}",
@@ -342,6 +339,17 @@ async fn run_shell(
         ));
     }
     Ok(combined)
+}
+
+/// Operator-facing rendering of a child's two streams: stdout, with stderr
+/// appended under a marker when it carries anything. Shared by `run_shell` and
+/// `run_codex_exec` so the two failure reports cannot drift apart.
+fn combine_output(stdout: &str, stderr: &str) -> String {
+    if stderr.trim().is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{stdout}\n[stderr]\n{stderr}")
+    }
 }
 
 async fn run_codex_exec(
@@ -354,33 +362,23 @@ async fn run_codex_exec(
     max_duration: std::time::Duration,
 ) -> Result<String> {
     let output = exec_cli::run(ExecSpec {
-        binary: &ctx.config.general.codex_binary,
-        codex_home: &ctx.config.general.codex_home_global,
-        cwd: &job.workspace_dir,
-        prompt,
         model,
-        reasoning: None,
-        sandbox: None,
-        ephemeral: false,
         extra_args,
         env: Some(env),
-        deadline: max_duration,
-        capture_stderr: true,
-        label: "codex exec",
+        ..ExecSpec::new(
+            &ctx.config.general.codex_binary,
+            &ctx.config.general.codex_home_global,
+            &job.workspace_dir,
+            prompt,
+            "codex exec",
+            max_duration,
+        )
     })
     .await?;
-    let stdout_text = output.stdout_lines.join("\n");
-    let combined = format!(
-        "{}{}{}",
-        stdout_text,
-        if output.stderr.is_empty() {
-            ""
-        } else {
-            "\n[stderr]\n"
-        },
-        output.stderr
-    );
+    // The raw stream is only rendered on the two cold paths below — a
+    // successful run with agent output (the normal case) never joins it.
     if !output.status.success() {
+        let combined = combine_output(&output.stdout_lines.join("\n"), &output.stderr);
         return Err(anyhow!(
             "codex exec exited with {}: {}",
             output.status,
@@ -389,7 +387,7 @@ async fn run_codex_exec(
     }
     let agent_output = agent_messages_from_lines(&output.stdout_lines);
     if agent_output.trim().is_empty() {
-        Ok(stdout_text.trim().to_string())
+        Ok(output.stdout_lines.join("\n").trim().to_string())
     } else {
         Ok(agent_output)
     }
@@ -689,7 +687,7 @@ fn format_run_log(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_messages_from_lines, keep_interrupted_thread};
+    use super::{combine_output, keep_interrupted_thread};
     use crate::codex::ExecutionUpdate;
     use crate::model::cron::fixtures::shell_job;
     use crate::scheduler::store::{CronJob, JobAction, SessionStrategy};
@@ -777,17 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn codex_exec_stdout_extraction_ignores_events_and_stderr_noise() {
-        let stdout = r#"{"type":"thread.started","thread_id":"x"}
-{"type":"item.completed","item":{"id":"a","type":"reasoning","text":"hidden"}}
-{"type":"item.completed","item":{"id":"b","type":"agent_message","text":"早餐正文"}}
-not json
-{"type":"turn.completed"}
-"#;
-
-        assert_eq!(
-            agent_messages_from_lines(stdout.lines()),
-            "早餐正文".to_string()
-        );
+    fn combine_output_appends_stderr_only_when_it_carries_text() {
+        assert_eq!(combine_output("out", "   \n"), "out");
+        assert_eq!(combine_output("out", "boom"), "out\n[stderr]\nboom");
     }
 }

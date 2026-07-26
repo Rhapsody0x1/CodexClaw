@@ -45,13 +45,39 @@ pub(crate) struct ExecSpec<'a> {
     /// Extra environment variables on top of `CODEX_HOME`.
     pub(crate) env: Option<&'a BTreeMap<String, String>>,
     pub(crate) deadline: Duration,
-    /// Collect stderr into [`ExecOutput::stderr`] (the cron path wants it in
-    /// error reports); when false it is drained and discarded.
-    pub(crate) capture_stderr: bool,
     /// Prefix for error messages, e.g. `codex exec` / `codex shadow`.
     /// Timeout messages keep the phrase "timed out" — the scheduler's retry
     /// classifier matches on it.
     pub(crate) label: &'a str,
+}
+
+impl<'a> ExecSpec<'a> {
+    /// A spec with every optional knob neutral, for callers that set only the
+    /// few fields they care about via struct-update syntax:
+    /// `ExecSpec { ephemeral: true, ..ExecSpec::new(bin, home, cwd, prompt, label, deadline) }`.
+    pub(crate) fn new(
+        binary: &'a str,
+        codex_home: &'a Path,
+        cwd: &'a Path,
+        prompt: &'a str,
+        label: &'a str,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            binary,
+            codex_home,
+            cwd,
+            prompt,
+            model: None,
+            reasoning: None,
+            sandbox: None,
+            ephemeral: false,
+            extra_args: &[],
+            env: None,
+            deadline,
+            label,
+        }
+    }
 }
 
 /// What the child produced. The exit status is data, not an error: each
@@ -59,14 +85,16 @@ pub(crate) struct ExecSpec<'a> {
 pub(crate) struct ExecOutput {
     pub(crate) status: std::process::ExitStatus,
     pub(crate) stdout_lines: Vec<String>,
-    /// Empty unless [`ExecSpec::capture_stderr`] was set.
+    /// Everything the child wrote to stderr (`codex exec` logs progress
+    /// there). Callers that don't want it just ignore the field — it has to
+    /// be drained either way, or the pipe fills and stalls the child.
     pub(crate) stderr: String,
 }
 
 /// The argv for `spec`, without the prompt (which goes over stdin).
 /// `--skip-git-repo-check` and `--json` are always present but never
 /// duplicated when the caller already passes them in `extra_args`.
-pub(crate) fn build_args(spec: &ExecSpec<'_>) -> Vec<String> {
+fn build_args(spec: &ExecSpec<'_>) -> Vec<String> {
     let mut args = vec!["exec".to_string()];
     if !spec
         .extra_args
@@ -142,12 +170,10 @@ pub(crate) async fn run(spec: ExecSpec<'_>) -> Result<ExecOutput> {
             if let Some(stderr) = stderr {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    if spec.capture_stderr {
-                        if !stderr_text.is_empty() {
-                            stderr_text.push('\n');
-                        }
-                        stderr_text.push_str(&line);
+                    if !stderr_text.is_empty() {
+                        stderr_text.push('\n');
                     }
+                    stderr_text.push_str(&line);
                 }
             }
         };
@@ -191,19 +217,15 @@ mod tests {
 
     fn spec<'a>(extra_args: &'a [String], home: &'a Path, cwd: &'a Path) -> ExecSpec<'a> {
         ExecSpec {
-            binary: "codex",
-            codex_home: home,
-            cwd,
-            prompt: "hello",
-            model: None,
-            reasoning: None,
-            sandbox: None,
-            ephemeral: false,
             extra_args,
-            env: None,
-            deadline: Duration::from_secs(1),
-            capture_stderr: false,
-            label: "codex exec",
+            ..ExecSpec::new(
+                "codex",
+                home,
+                cwd,
+                "hello",
+                "codex exec",
+                Duration::from_secs(1),
+            )
         }
     }
 

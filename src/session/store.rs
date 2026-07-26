@@ -310,11 +310,10 @@ impl SessionStore {
         session_id: String,
         profile: DialogProfile,
     ) -> Result<bool> {
-        let expected = expected.clone();
         self.mutate_state(|state| {
             let (applied, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if !Dialogs::of(user).bind_if_current(&expected, session_id, profile) {
+                if !Dialogs::of(user).bind_if_current(expected, session_id, profile) {
                     return Ok(false);
                 }
                 let cached_profile = cached_profile_from_dialog(&user.foreground);
@@ -449,16 +448,31 @@ impl SessionStore {
         .await
     }
 
+    /// The shell half of every foreground swap: park the current foreground
+    /// (under `requested` or a generated alias), install `incoming`, and act
+    /// on the workspace-GC decision [`Dialogs::park`] hands back. Every switch
+    /// entry point routes through here, so a new one cannot silently forget
+    /// the cleanup — and a second decision added to `ParkOutcome` is honoured
+    /// in one place.
+    fn park_and_install(
+        &self,
+        user: &mut UserSessionState,
+        requested: Option<&str>,
+        incoming: DialogState,
+    ) -> Result<SwitchResult> {
+        let outcome =
+            Dialogs::of(user).park(requested, &self.attachment_workspace_dir, incoming)?;
+        if let Some(workspace) = outcome.cleanup_workspace {
+            cleanup_workspace_if_empty(&workspace);
+        }
+        Ok(SwitchResult {
+            parked_alias: outcome.parked_alias,
+        })
+    }
+
     pub(crate) async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
         self.mutate_user(openid, |user| {
-            let incoming = self.new_temporary_dialog()?;
-            let outcome = Dialogs::of(user).park(None, &self.attachment_workspace_dir, incoming)?;
-            if let Some(workspace) = outcome.cleanup_workspace {
-                cleanup_workspace_if_empty(&workspace);
-            }
-            Ok(SwitchResult {
-                parked_alias: outcome.parked_alias,
-            })
+            self.park_and_install(user, None, self.new_temporary_dialog()?)
         })
         .await
     }
@@ -471,13 +485,7 @@ impl SessionStore {
         let workspace_dir = workspace_dir.to_path_buf();
         self.mutate_user(openid, |user| {
             let incoming = self.temporary_dialog_for_workspace(&workspace_dir)?;
-            let outcome = Dialogs::of(user).park(None, &self.attachment_workspace_dir, incoming)?;
-            if let Some(workspace) = outcome.cleanup_workspace {
-                cleanup_workspace_if_empty(&workspace);
-            }
-            Ok(SwitchResult {
-                parked_alias: outcome.parked_alias,
-            })
+            self.park_and_install(user, None, incoming)
         })
         .await
     }
@@ -488,18 +496,7 @@ impl SessionStore {
         requested_alias: Option<&str>,
     ) -> Result<SwitchResult> {
         self.mutate_user(openid, |user| {
-            let incoming = self.new_temporary_dialog()?;
-            let outcome = Dialogs::of(user).park(
-                requested_alias,
-                &self.attachment_workspace_dir,
-                incoming,
-            )?;
-            if let Some(workspace) = outcome.cleanup_workspace {
-                cleanup_workspace_if_empty(&workspace);
-            }
-            Ok(SwitchResult {
-                parked_alias: outcome.parked_alias,
-            })
+            self.park_and_install(user, requested_alias, self.new_temporary_dialog()?)
         })
         .await
     }
@@ -530,17 +527,8 @@ impl SessionStore {
                 state.imported_profiles.insert(session_id, profile);
             }
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            let incoming = self.new_temporary_dialog()?;
-            let mut dialogs = Dialogs::of(user);
-            dialogs.take_background(alias)?;
-            let outcome = dialogs.park(None, &self.attachment_workspace_dir, incoming)?;
-            dialogs.install(target.clone());
-            if let Some(workspace) = outcome.cleanup_workspace {
-                cleanup_workspace_if_empty(&workspace);
-            }
-            Ok(SwitchResult {
-                parked_alias: outcome.parked_alias,
-            })
+            Dialogs::of(user).take_background(alias)?;
+            self.park_and_install(user, None, target.clone())
         })
         .await
     }
@@ -574,16 +562,8 @@ impl SessionStore {
         self.mutate_state(|state| {
             cache_imported_profile(state, &target.id, resolved_profile.as_ref());
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            let incoming = self.new_temporary_dialog()?;
-            let mut dialogs = Dialogs::of(user);
-            let outcome = dialogs.park(None, &self.attachment_workspace_dir, incoming)?;
-            dialogs.install(dialog_from_disk_session(target, resolved_profile.as_ref()));
-            if let Some(workspace) = outcome.cleanup_workspace {
-                cleanup_workspace_if_empty(&workspace);
-            }
-            Ok(SwitchResult {
-                parked_alias: outcome.parked_alias,
-            })
+            let incoming = dialog_from_disk_session(target, resolved_profile.as_ref());
+            self.park_and_install(user, None, incoming)
         })
         .await
     }
@@ -655,10 +635,6 @@ impl SessionStore {
                     state.imported_profiles.insert(session_id, profile);
                 }
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                let fresh = restored
-                    .is_none()
-                    .then(|| self.new_temporary_dialog())
-                    .transpose()?;
                 let mut dialogs = Dialogs::of(user);
                 if dropped_unsaved && let Some(session_id) = current.session_id.as_deref() {
                     dialogs.drop_saved_session(session_id);
@@ -677,8 +653,7 @@ impl SessionStore {
                     dialogs.install(dialog);
                     Ok(Some(alias))
                 } else {
-                    let fresh = fresh.expect("fresh temporary built when nothing to restore");
-                    dialogs.install(fresh);
+                    dialogs.install(self.new_temporary_dialog()?);
                     Ok(None)
                 }
             })

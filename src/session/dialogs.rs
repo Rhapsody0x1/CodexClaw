@@ -198,8 +198,7 @@ impl<'a> Dialogs<'a> {
         {
             return false;
         }
-        self.user.foreground.session_id = Some(session_id);
-        self.user.foreground.profile = Some(profile);
+        self.bind(Some(session_id), profile);
         true
     }
 
@@ -311,7 +310,7 @@ fn record_alias(user: &mut UserSessionState, alias: &str) {
     user.background_order.push(alias.to_string());
 }
 
-pub(super) fn normalize_alias(input: &str) -> Result<String> {
+fn normalize_alias(input: &str) -> Result<String> {
     let alias = input.trim().to_ascii_lowercase();
     let is_valid = !alias.is_empty()
         && alias.len() <= 16

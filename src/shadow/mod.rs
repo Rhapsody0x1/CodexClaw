@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::memory::store::MemoryStore;
+use crate::{codex::exec_cli::ExecSpec, memory::store::MemoryStore};
 
 pub(crate) mod memory;
 pub(crate) mod prompt;
@@ -88,16 +88,19 @@ impl ShadowWorker {
             &ctx.last_user_text,
             &ctx.last_assistant_text,
         );
-        let oneshot = runner::OneshotConfig {
-            codex_binary: &self.codex_binary,
-            workspace_dir: &self.workspace_dir,
-            codex_home: &self.codex_home,
+        let output = runner::run_codex_oneshot(ExecSpec {
             model: self.memory_config.model_override.as_deref(),
             reasoning: Some(&self.memory_config.reasoning),
-            prompt: &prompt_text,
-            deadline: self.memory_config.deadline,
-        };
-        let output = runner::run_codex_oneshot(oneshot).await?;
+            ..ExecSpec::new(
+                &self.codex_binary,
+                &self.codex_home,
+                &self.workspace_dir,
+                &prompt_text,
+                "codex shadow",
+                self.memory_config.deadline,
+            )
+        })
+        .await?;
         let response = memory::parse_memory_response(&output)?;
         // apply_memory_response writes + fsyncs to disk; keep it off the reactor.
         let report = {

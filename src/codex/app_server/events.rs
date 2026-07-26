@@ -12,8 +12,10 @@ use serde_json::Value as JsonValue;
 use tracing::trace;
 
 use crate::codex::{
-    display::{DisplayItem, FileUpdateChange, PatchChangeKind, TodoEntry, WebSearchAction},
-    display::{ToolEventPhase, format_todo_items, tool_display_for_item},
+    display::{
+        DisplayItem, FileUpdateChange, McpToolCallError, McpToolCallResult, PatchChangeKind,
+        TodoEntry, ToolEventPhase, WebSearchAction, format_todo_items, tool_display_for_item,
+    },
     types::ExecutionUpdate,
 };
 
@@ -295,25 +297,23 @@ fn parse_web_search_action(raw: &Option<JsonValue>) -> Option<WebSearchAction> {
 fn parse_mcp_result_error(
     result: &Option<JsonValue>,
     error: &Option<JsonValue>,
-) -> (
-    Option<crate::codex::display::McpToolCallResult>,
-    Option<crate::codex::display::McpToolCallError>,
-) {
-    let parsed_result = result.as_ref().and_then(|v| {
-        serde_json::from_value::<crate::codex::display::McpToolCallResult>(v.clone()).ok()
+) -> (Option<McpToolCallResult>, Option<McpToolCallError>) {
+    let parsed_result = result.as_ref().map(|v| McpToolCallResult {
+        content: v
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        structured_content: v.get("structured_content").cloned(),
     });
     let parsed_error = error.as_ref().and_then(|v| {
         // Error may be shaped as {"message":"..."} or {"error":{"message":"..."}}.
-        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            Some(crate::codex::display::McpToolCallError {
+        v.get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| v.as_str())
+            .map(|msg| McpToolCallError {
                 message: msg.to_string(),
             })
-        } else {
-            v.as_str()
-                .map(|msg| crate::codex::display::McpToolCallError {
-                    message: msg.to_string(),
-                })
-        }
     });
     (parsed_result, parsed_error)
 }

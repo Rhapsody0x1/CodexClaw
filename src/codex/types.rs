@@ -4,7 +4,6 @@
 //! This module is a leaf — it depends only on value types, never on the
 //! app-server transport or the display formatters.
 
-use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::model::settings::{ContextMode, ReasoningEffort, ServiceTier, SessionState};
@@ -61,15 +60,14 @@ pub enum ExecutionUpdate {
     },
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Token counters as the display layer needs them. Not a wire type: the
+/// app-server payload is parsed by `app_server::protocol::TokenCountBucket`
+/// and copied across in `app_server::session::build_token_usage_info`.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct TokenUsage {
-    #[serde(default)]
     pub(crate) input_tokens: u64,
-    #[serde(default)]
     pub(crate) cached_input_tokens: u64,
-    #[serde(default)]
     pub(crate) output_tokens: u64,
-    #[serde(default)]
     pub(crate) total_tokens: u64,
 }
 
@@ -105,13 +103,10 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenUsageInfo {
-    #[serde(default)]
     pub(crate) total_token_usage: TokenUsage,
-    #[serde(default)]
     pub(crate) last_token_usage: TokenUsage,
-    #[serde(default)]
     pub(crate) model_context_window: Option<u64>,
 }
 

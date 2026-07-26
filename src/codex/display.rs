@@ -4,99 +4,76 @@
 //! translates every app-server notification into a [`DisplayItem`] and dispatches
 //! here rather than growing a second set of strings.
 //!
-//! This module is a leaf inside `codex/`: it depends on `codex::events` and
-//! `util::text` only, never on the executor or the app-server.
+//! This module is a leaf inside `codex/`: it depends on `util::text` only,
+//! never on the executor or the app-server. The types below are a
+//! *presentation* vocabulary, not a wire schema — `app_server::events` builds
+//! them field-by-field from `protocol::ItemPayload`, which is the one place
+//! that parses JSON.
 
-use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use crate::util::text::{humanize_tool_label, short_json, truncate_with_marker};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct DisplayItem {
-    #[serde(rename = "type")]
     pub(crate) item_type: String,
-    #[serde(default)]
     pub(crate) text: Option<String>,
-    #[serde(default)]
     pub(crate) message: Option<String>,
-    #[serde(default)]
     pub(crate) command: Option<String>,
-    #[serde(default)]
     pub(crate) query: Option<String>,
-    #[serde(default)]
     pub(crate) action: Option<WebSearchAction>,
-    #[serde(default)]
     pub(crate) changes: Vec<FileUpdateChange>,
-    #[serde(default)]
     pub(crate) server: Option<String>,
-    #[serde(default)]
     pub(crate) tool: Option<String>,
-    #[serde(default)]
     pub(crate) arguments: Option<JsonValue>,
-    #[serde(default)]
     pub(crate) result: Option<McpToolCallResult>,
-    #[serde(default)]
     pub(crate) error: Option<McpToolCallError>,
-    #[serde(default)]
     pub(crate) prompt: Option<String>,
-    #[serde(default)]
     pub(crate) receiver_thread_ids: Vec<String>,
-    #[serde(default)]
     pub(crate) items: Vec<TodoEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub(crate) enum WebSearchAction {
     Search {
-        #[serde(default)]
         query: Option<String>,
-        #[serde(default)]
         queries: Option<Vec<String>>,
     },
     OpenPage {
-        #[serde(default)]
         url: Option<String>,
     },
     FindInPage {
-        #[serde(default)]
         url: Option<String>,
-        #[serde(default)]
         pattern: Option<String>,
     },
-    #[serde(other)]
     Other,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct FileUpdateChange {
     pub(crate) path: String,
     pub(crate) kind: PatchChangeKind,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub(crate) enum PatchChangeKind {
     Add,
     Delete,
     Update,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct McpToolCallResult {
-    #[serde(default)]
     pub(crate) content: Vec<JsonValue>,
-    #[serde(default)]
     pub(crate) structured_content: Option<JsonValue>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct McpToolCallError {
     pub(crate) message: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct TodoEntry {
     pub(crate) text: String,
     pub(crate) completed: bool,
