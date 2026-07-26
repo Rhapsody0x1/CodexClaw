@@ -101,13 +101,8 @@ impl App {
         codex: Arc<CodexExecutor>,
         memory: Arc<MemoryStore>,
         shadow: Option<Arc<ShadowWorker>>,
+        scheduler_ctx: Arc<SchedulerCtx>,
     ) -> Arc<Self> {
-        let scheduler_ctx = Arc::new(SchedulerCtx {
-            config: config.clone(),
-            session: session.clone(),
-            codex: codex.clone(),
-            notifier: qq_client.clone(),
-        });
         let app = Arc::new(Self {
             config,
             session,

@@ -13,8 +13,6 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use crate::app::App;
-
 use super::{cron_expr, ctx::SchedulerCtx, interactive, runner, store};
 
 pub struct Scheduler {
@@ -24,11 +22,11 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn spawn(app: Arc<App>) {
-        // The app keeps the only strong `SchedulerCtx` reference; the tick
-        // loop below holds it weakly so dropping the `App` parks the
-        // scheduler.
-        let ctx = app.scheduler_ctx.clone();
+    /// Start the tick loop against `ctx`. Only a `Weak` is retained here: the
+    /// caller (the composition root in `main`) must park the strong reference
+    /// somewhere long-lived — in production the `App` owns it — so dropping
+    /// that owner silently parks the scheduler.
+    pub fn spawn(ctx: Arc<SchedulerCtx>) {
         if !ctx.config.scheduler.enabled {
             info!("scheduler disabled");
             return;

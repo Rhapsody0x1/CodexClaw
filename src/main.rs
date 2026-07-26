@@ -8,7 +8,7 @@ use codex_claw::{
     config::AppConfig,
     memory::MemoryStore,
     qq::{C2CMessageEvent, QqApiClient, spawn_gateway},
-    scheduler,
+    scheduler::{self, SchedulerCtx},
     session::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
     skills::SkillIndex,
@@ -146,8 +146,25 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     } else {
         None
     };
-    let app = App::new(config, session, qq_client, codex, memory, shadow);
-    scheduler::Scheduler::spawn(app.clone());
+    // Composition root for the scheduler: build its slice of the app here and
+    // hand the strong reference to the `App`; the tick loop only keeps a
+    // `Weak`, so the scheduler parks itself once the `App` is dropped.
+    let scheduler_ctx = Arc::new(SchedulerCtx {
+        config: config.clone(),
+        session: session.clone(),
+        codex: codex.clone(),
+        notifier: qq_client.clone(),
+    });
+    let app = App::new(
+        config,
+        session,
+        qq_client,
+        codex,
+        memory,
+        shadow,
+        scheduler_ctx.clone(),
+    );
+    scheduler::Scheduler::spawn(scheduler_ctx);
     let (c2c_tx, c2c_rx) = mpsc::unbounded_channel();
     spawn_gateway(
         app.config.general.data_dir.clone(),
