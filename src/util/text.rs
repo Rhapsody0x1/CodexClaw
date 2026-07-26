@@ -83,6 +83,24 @@ pub(crate) fn extract_json_block(raw: &str) -> String {
     trimmed.to_string()
 }
 
+/// Remove every occurrence of an end-of-interaction `signal` token from `text`,
+/// reporting whether it was present at all. Standalone lines holding only the
+/// token are dropped entirely; inline occurrences are spliced out.
+pub(crate) fn strip_end_signal(text: &str, signal: &str) -> (String, bool) {
+    if !text.contains(signal) {
+        return (text.to_string(), false);
+    }
+    let stripped = text
+        .lines()
+        .filter(|line| line.trim() != signal)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(signal, "")
+        .trim()
+        .to_string();
+    (stripped, true)
+}
+
 /// Strip a leading ```` ```json ```` / ```` ``` ```` fence and its closing
 /// fence, returning the trimmed body.
 pub(crate) fn strip_fenced(s: &str) -> Option<&str> {
@@ -148,6 +166,17 @@ mod tests {
             "{\"a\":1}"
         );
         assert_eq!(extract_json_block("not json"), "not json");
+    }
+
+    #[test]
+    fn strip_end_signal_removes_standalone_and_inline_tokens() {
+        let (text, ended) = strip_end_signal("答案正确\n<<<CLAW_END>>>", "<<<CLAW_END>>>");
+        assert!(ended);
+        assert_eq!(text, "答案正确");
+
+        let (text, ended) = strip_end_signal("done <<<CLAW_END>>>", "<<<CLAW_END>>>");
+        assert!(ended);
+        assert_eq!(text, "done");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::{
     codex::events::TokenUsageInfo,
-    session::state::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
+    model::settings::{ContextMode, ReasoningEffort, ServiceTier, SessionState},
 };
 
 #[derive(Debug, Clone)]

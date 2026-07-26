@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{message::IncomingMessage, session::state::SessionSettings};
+use crate::{message::IncomingMessage, model::settings::SessionSettings};
 
 pub fn build_prompt(
     message: &IncomingMessage,
@@ -100,7 +100,7 @@ mod tests {
 
     use super::*;
     use crate::message::IncomingMessage;
-    use crate::session::state::SessionSettings;
+    use crate::model::settings::SessionSettings;
 
     fn test_message(text: &str) -> IncomingMessage {
         IncomingMessage {

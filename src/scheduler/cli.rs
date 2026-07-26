@@ -5,8 +5,7 @@ use chrono::Utc;
 
 use crate::{
     config::AppConfig,
-    session::state::ApprovalPolicySetting,
-    session::store::SessionStore,
+    session::{SessionStore, state::ApprovalPolicySetting},
     util::time::{fmt_rfc3339_or, parse_utc_strict},
 };
 

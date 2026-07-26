@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::session::state::{ContextMode, ReasoningEffort, ServiceTier};
+use crate::model::settings::{ContextMode, ReasoningEffort, ServiceTier};
 use crate::util::{
     fs::{atomic_write, read_to_string_opt},
     path::home_dir,

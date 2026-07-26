@@ -7,11 +7,11 @@ use rust_i18n::t;
 use crate::{
     codex::{CodexModelEntry, CodexRuntimeProfile, list_codex_model_entries},
     session::{
+        DiskSessionMeta, SessionListScope, SessionStore,
         state::{
             ApprovalPolicySetting, CommandAlias, ContextMode, PendingSetting, ReasoningEffort,
             ServiceTier, UserSessionState,
         },
-        store::{DiskSessionMeta, SessionListScope, SessionStore},
     },
     util::{
         lang::{is_supported_lang, normalize_lang},
@@ -1160,13 +1160,9 @@ async fn handle_cron(
                     session
                         .update_cron_job(id, |job| {
                             job.disabled = false;
-                            job.next_run_at =
-                                crate::scheduler::cron_expr::next_after(&job.kind, Utc::now())?;
+                            job.next_run_at = crate::scheduler::next_after(&job.kind, Utc::now())?;
                             if job.next_run_at.is_none()
-                                && matches!(
-                                    job.kind,
-                                    crate::scheduler::store::CronKind::OneShot { .. }
-                                )
+                                && matches!(job.kind, crate::model::cron::CronKind::OneShot { .. })
                             {
                                 job.run_now_at = Some(Utc::now());
                             }
@@ -1184,7 +1180,7 @@ async fn handle_cron(
                 }
                 "rm" | "remove" => {
                     session.remove_cron_job(id).await?;
-                    crate::scheduler::store::remove_job_files(
+                    crate::scheduler::remove_job_files(
                         session.data_dir(),
                         session.codex_home(),
                         id,
@@ -4218,11 +4214,11 @@ mod tests {
     use crate::{
         codex::CodexRuntimeProfile,
         session::{
+            SessionStore,
             state::{
                 ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,
                 UserSessionState, fixtures::usage,
             },
-            store::SessionStore,
         },
     };
 

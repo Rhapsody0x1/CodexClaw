@@ -16,7 +16,7 @@ use crate::{
         },
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
-    session::state::ApprovalPolicySetting,
+    model::settings::ApprovalPolicySetting,
     util::{layout::DataLayout, path::search_path_dirs},
 };
 

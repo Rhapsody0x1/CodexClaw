@@ -6,9 +6,9 @@ use codex_claw::{
     codex::{AppServerHandle, ClientInfo, CodexExecutor, build_codex_path_env, config_snapshot},
     config::AppConfig,
     memory::store::MemoryStore,
-    qq::{api::QqApiClient, gateway},
+    qq::{QqApiClient, spawn_gateway},
     scheduler,
-    session::store::SessionStore,
+    session::SessionStore,
     shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
     skills::index::SkillIndex,
     util::{layout::DataLayout, path::home_dir},
@@ -151,7 +151,7 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     };
     let app = App::new(config, session, qq_client, codex, memory, shadow);
     scheduler::Scheduler::spawn(app.clone());
-    gateway::spawn_gateway(app.clone());
+    spawn_gateway(app.clone());
 
     wait_for_shutdown_signal().await;
     tracing::info!("shutdown signal received, terminating app-server child");

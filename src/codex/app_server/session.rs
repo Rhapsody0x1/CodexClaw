@@ -21,7 +21,7 @@ use crate::{
         events::{TokenUsage, TokenUsageInfo},
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
-    session::state::{ContextMode, ServiceTier},
+    model::settings::{ContextMode, ServiceTier},
 };
 
 use super::{
@@ -1033,11 +1033,11 @@ mod tests {
             codex_home: std::path::PathBuf::from("/tmp/codex-home"),
             config_overrides: Vec::new(),
             add_dirs: Vec::new(),
-            session_state: crate::session::state::SessionState::default(),
+            session_state: crate::model::settings::SessionState::default(),
             model: Some("gpt-5.5".to_string()),
             service_tier: None,
             context_mode: None,
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
+            reasoning_effort: crate::model::settings::ReasoningEffort::High,
             image_paths: Vec::new(),
         }
     }
@@ -1052,7 +1052,7 @@ mod tests {
             model: Some("gpt-5.5".to_string()),
             service_tier: None,
             context_mode: Some(ContextMode::Standard),
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
+            reasoning_effort: crate::model::settings::ReasoningEffort::High,
         }
     }
 
@@ -1229,10 +1229,10 @@ mod tests {
         assert_ne!(RuntimeConfigSignature::from_request(&req), original);
 
         req.context_mode = Some(ContextMode::Standard);
-        req.reasoning_effort = crate::session::state::ReasoningEffort::Low;
+        req.reasoning_effort = crate::model::settings::ReasoningEffort::Low;
         assert_ne!(RuntimeConfigSignature::from_request(&req), original);
 
-        req.reasoning_effort = crate::session::state::ReasoningEffort::High;
+        req.reasoning_effort = crate::model::settings::ReasoningEffort::High;
         req.model = Some("gpt-5.4".to_string());
         assert_ne!(RuntimeConfigSignature::from_request(&req), original);
     }
@@ -1246,10 +1246,10 @@ mod tests {
         assert_ne!(RuntimeConfigSignature::from_compact_request(&req), original);
 
         req.context_mode = Some(ContextMode::Standard);
-        req.reasoning_effort = crate::session::state::ReasoningEffort::Low;
+        req.reasoning_effort = crate::model::settings::ReasoningEffort::Low;
         assert_ne!(RuntimeConfigSignature::from_compact_request(&req), original);
 
-        req.reasoning_effort = crate::session::state::ReasoningEffort::High;
+        req.reasoning_effort = crate::model::settings::ReasoningEffort::High;
         req.model = Some("gpt-5.4".to_string());
         assert_ne!(RuntimeConfigSignature::from_compact_request(&req), original);
     }

@@ -1,3 +1,7 @@
+//! Renders a stream of [`ExecutionUpdate`]s into QQ passive replies: tool
+//! summaries, agent text, and the attachments requested by a ```` ```qqbot ````
+//! block (see [`super::directive`]).
+
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
@@ -5,11 +9,12 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
-    codex::{
-        ExecutionUpdate,
-        output::{Directive, parse_output},
+    codex::ExecutionUpdate,
+    qq::{
+        api::{QqApiClient, estimate_text_chunk_count},
+        directive::{Directive, parse_output},
     },
-    qq::api::{QqApiClient, estimate_text_chunk_count},
+    util::text::strip_end_signal,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,7 +134,7 @@ impl PassiveTurnEmitter {
     async fn handle_agent_message(&mut self, raw_text: String) -> Result<()> {
         self.saw_agent_message = true;
         let raw_text = if let Some(signal) = self.strip_signal.as_deref() {
-            crate::scheduler::interactive::strip_end_signal(&raw_text, signal).0
+            strip_end_signal(&raw_text, signal).0
         } else {
             raw_text
         };

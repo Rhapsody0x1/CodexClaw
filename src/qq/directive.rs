@@ -1,3 +1,7 @@
+//! The ```` ```qqbot ```` fence protocol: a trailing fenced block in an agent
+//! reply that asks codex-claw to attach an image or a file to the QQ message.
+//! Purely a QQ presentation concern — nothing here knows about codex.
+
 use std::path::{Path, PathBuf};
 
 use shlex::split;

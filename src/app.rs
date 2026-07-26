@@ -18,28 +18,25 @@ use crate::{
     codex::{
         ApprovalOutcome, ApprovalRequest, CodexExecutor, CodexRuntimeProfile, CommandApprovalEvent,
         CompactRequest, ExecutionRequest, FileChangeApprovalEvent, PermissionsApprovalEvent,
-        TokenUsageInfo, build_prompt,
-        output::{Directive, parse_output},
-        read_codex_runtime_profile_from_path, write_context_mode_to_config_path,
-        write_model_to_config_path, write_reasoning_effort_to_config_path,
-        write_service_tier_to_config_path,
+        TokenUsageInfo, build_prompt, read_codex_runtime_profile_from_path,
+        write_context_mode_to_config_path, write_model_to_config_path,
+        write_reasoning_effort_to_config_path, write_service_tier_to_config_path,
     },
     commands::{ApprovalIntent, CommandOutcome, CommandReply, maybe_handle_command},
     config::AppConfig,
     memory::{inject as memory_inject, store::MemoryStore},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
     qq::{
-        api::QqApiClient,
-        passive::{PassiveDispatchReport, PassiveTurnEmitter},
-        types::{C2CMessageEvent, MSG_TYPE_QUOTE, MessageAttachment, MsgElement},
+        C2CMessageEvent, Directive, MSG_TYPE_QUOTE, MessageAttachment, MsgElement,
+        PassiveDispatchReport, PassiveTurnEmitter, QqApiClient, parse_output,
     },
     self_update,
     session::{
+        SessionStore,
         state::{
             ContextMode, DialogProfile, PendingSetting, ServiceTier, SessionState,
             TokenUsageSnapshot, UserSessionState,
         },
-        store::SessionStore,
     },
     shadow::{ShadowContext, ShadowWorker},
     util::{lang::normalize_lang, layout::DataLayout},
@@ -212,19 +209,15 @@ impl App {
             .await;
         let trimmed_command = normalized.text.trim();
         if matches!(trimmed_command, "/stop" | "/停止")
-            && crate::scheduler::interactive::pending_for_owner(
+            && crate::scheduler::pending_for_owner(
                 &self.config.general.data_dir,
                 &normalized.sender_openid,
             )
             .await?
             .is_some()
         {
-            crate::scheduler::interactive::finish_job_for_owner(
-                self,
-                &normalized.sender_openid,
-                "stopped",
-            )
-            .await?;
+            crate::scheduler::finish_job_for_owner(self, &normalized.sender_openid, "stopped")
+                .await?;
             let lang = self.command_locale(&normalized.sender_openid).await;
             self.qq_client
                 .send_text(
@@ -534,7 +527,7 @@ impl App {
     }
 
     async fn flush_pending_scheduler_deliveries(&self, openid: &str, message_id: &str) {
-        let deliveries = match crate::scheduler::store::take_pending_deliveries(
+        let deliveries = match crate::scheduler::take_pending_deliveries(
             &self.config.general.data_dir,
             openid,
         )
@@ -562,7 +555,7 @@ impl App {
                 .await
             {
                 warn!(openid = %openid, job_id = %delivery.job_id, error = %err, "failed to flush pending scheduler delivery");
-                let _ = crate::scheduler::store::queue_pending_delivery(
+                let _ = crate::scheduler::queue_pending_delivery(
                     &self.config.general.data_dir,
                     openid,
                     &delivery,
@@ -655,7 +648,7 @@ impl App {
         );
 
         let (update_tx, update_rx) = mpsc::unbounded_channel();
-        let strip_signal = match crate::scheduler::interactive::pending_for_owner(
+        let strip_signal = match crate::scheduler::pending_for_owner(
             &self.config.general.data_dir,
             &message.sender_openid,
         )
@@ -825,7 +818,7 @@ impl App {
                         .await?;
                 }
 
-                if let Err(err) = crate::scheduler::interactive::on_fg_turn_completed(
+                if let Err(err) = crate::scheduler::on_fg_turn_completed(
                     self,
                     &message.sender_openid,
                     &output.text,
@@ -1679,7 +1672,7 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 #[cfg(test)]
 mod tests {
     use crate::codex::{TokenUsage, TokenUsageInfo};
-    use crate::qq::types::{MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
+    use crate::qq::{MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
     use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 
     use super::{

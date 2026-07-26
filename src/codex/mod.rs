@@ -4,7 +4,6 @@ pub mod display;
 pub mod events;
 pub mod exec_output;
 pub mod executor;
-pub mod output;
 pub mod prompt;
 pub mod runtime;
 pub mod types;

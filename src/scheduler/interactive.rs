@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::app::App;
-use crate::util::{fs::read_json_opt_async, layout::DataLayout};
+use crate::util::{fs::read_json_opt_async, layout::DataLayout, text::strip_end_signal};
 
 use super::store::{CronJob, InteractiveSpec, JobAction, SessionStrategy, new_job_dir};
 
@@ -44,21 +44,6 @@ Do not emit the token until the interaction is truly complete. Hard cap: at most
 {}\n",
         spec.end_signal, spec.max_rounds_hard_cap, prompt
     )
-}
-
-pub fn strip_end_signal(text: &str, signal: &str) -> (String, bool) {
-    if !text.contains(signal) {
-        return (text.to_string(), false);
-    }
-    let stripped = text
-        .lines()
-        .filter(|line| line.trim() != signal)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace(signal, "")
-        .trim()
-        .to_string();
-    (stripped, true)
 }
 
 pub async fn prepare_foreground(
@@ -416,17 +401,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn strip_end_signal_removes_standalone_and_inline_tokens() {
-        let (text, ended) = strip_end_signal("答案正确\n<<<CLAW_END>>>", "<<<CLAW_END>>>");
-        assert!(ended);
-        assert_eq!(text, "答案正确");
-
-        let (text, ended) = strip_end_signal("done <<<CLAW_END>>>", "<<<CLAW_END>>>");
-        assert!(ended);
-        assert_eq!(text, "done");
     }
 
     #[test]
