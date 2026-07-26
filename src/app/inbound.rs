@@ -65,7 +65,7 @@ impl App {
             return Ok(());
         }
 
-        let command_outcome = maybe_handle_command(
+        let command_outcome = match maybe_handle_command(
             &normalized.text,
             &normalized.sender_openid,
             &self.session,
@@ -73,7 +73,22 @@ impl App {
             &runtime_profile,
             self.busy.load(Ordering::SeqCst),
         )
-        .await?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            // Command failures carry user-facing text (e.g. "后台会话 `x` 不
+            // 存在"). Propagating them only reaches the dispatch loop's warn!,
+            // so the user watches their slash command vanish; reply instead.
+            Err(err) => {
+                self.reply_text(
+                    &normalized.sender_openid,
+                    &normalized.message_id,
+                    &format!("{err:#}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         if normalized.text.trim_start().starts_with('/')
             && !matches!(command_outcome, CommandOutcome::RetryResume)
         {
