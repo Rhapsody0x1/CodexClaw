@@ -4213,7 +4213,9 @@ mod interactive {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
+    use std::path::Path;
+
+    use tempfile::{TempDir, tempdir};
     use tokio::fs;
 
     use crate::{
@@ -4221,74 +4223,160 @@ mod tests {
         session::{
             state::{
                 ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,
-                TokenUsageSnapshot,
+                UserSessionState, fixtures::usage,
             },
             store::SessionStore,
         },
     };
 
-    use super::{CommandOutcome, maybe_handle_command};
+    use super::{CommandOutcome, CommandReply, maybe_handle_command};
+
+    /// Every command test drives the same single user.
+    const USER: &str = "u1";
+
+    /// Shared harness for the command tests.
+    ///
+    /// The `TempDir` handles must live as long as the store: dropping them is
+    /// what deletes the directories on disk, so they are owned here rather than
+    /// returned separately.
+    struct TestEnv {
+        data: TempDir,
+        home: TempDir,
+        session: SessionStore,
+        default_model: &'static str,
+    }
+
+    impl TestEnv {
+        async fn new() -> Self {
+            Self::with_default_model("default").await
+        }
+
+        async fn with_default_model(default_model: &'static str) -> Self {
+            let data = tempdir().unwrap();
+            let home = tempdir().unwrap();
+            let session = SessionStore::load_or_init(data.path(), home.path(), home.path())
+                .await
+                .unwrap();
+            Self {
+                data,
+                home,
+                session,
+                default_model,
+            }
+        }
+
+        fn data_path(&self) -> &Path {
+            self.data.path()
+        }
+
+        /// Codex home used both as the global and the system rollout root.
+        fn home_path(&self) -> &Path {
+            self.home.path()
+        }
+
+        async fn run(&self, text: &str) -> CommandOutcome {
+            self.dispatch(text, &CodexRuntimeProfile::default(), false)
+                .await
+        }
+
+        async fn run_busy(&self, text: &str) -> CommandOutcome {
+            self.dispatch(text, &CodexRuntimeProfile::default(), true)
+                .await
+        }
+
+        async fn run_with_runtime(
+            &self,
+            text: &str,
+            runtime: &CodexRuntimeProfile,
+        ) -> CommandOutcome {
+            self.dispatch(text, runtime, false).await
+        }
+
+        async fn dispatch(
+            &self,
+            text: &str,
+            runtime: &CodexRuntimeProfile,
+            is_busy: bool,
+        ) -> CommandOutcome {
+            maybe_handle_command(
+                text,
+                USER,
+                &self.session,
+                self.default_model,
+                runtime,
+                is_busy,
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn reply(&self, text: &str) -> CommandReply {
+            match self.run(text).await {
+                CommandOutcome::Reply(reply) => reply,
+                _ => panic!("expected `{text}` to reply"),
+            }
+        }
+
+        async fn reply_busy(&self, text: &str) -> CommandReply {
+            match self.run_busy(text).await {
+                CommandOutcome::Reply(reply) => reply,
+                _ => panic!("expected busy `{text}` to reply"),
+            }
+        }
+
+        async fn snapshot(&self) -> UserSessionState {
+            self.session.snapshot_for_user(USER).await.unwrap()
+        }
+
+        async fn set_lang(&self, lang: &str) {
+            self.session
+                .update_settings_for_user(USER, |state| state.language = lang.into())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[track_caller]
+    fn expect_reply(outcome: CommandOutcome) -> CommandReply {
+        match outcome {
+            CommandOutcome::Reply(reply) => reply,
+            _ => panic!("expected a reply outcome"),
+        }
+    }
 
     #[tokio::test]
     async fn resume_recovery_retry_enters_retry_outcome_and_clears_pending() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_pending_setting("u1", Some(PendingSetting::ResumeRecovery))
+        let env = TestEnv::new().await;
+        env.session
+            .set_pending_setting(USER, Some(PendingSetting::ResumeRecovery))
             .await
             .unwrap();
 
-        let runtime = CodexRuntimeProfile::default();
-        let outcome = maybe_handle_command("/retry", "u1", &session, "default", &runtime, false)
-            .await
-            .unwrap();
+        let outcome = env.run("/retry").await;
 
         assert!(matches!(outcome, CommandOutcome::RetryResume));
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting
-                .is_none()
-        );
+        assert!(env.snapshot().await.pending_setting.is_none());
     }
 
     #[tokio::test]
     async fn new_command_keeps_settings() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread".into()))
+        let env = TestEnv::new().await;
+        env.session
+            .set_foreground_session_id(USER, Some("thread".into()))
             .await
             .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
+        env.session
+            .update_settings_for_user(USER, |state| {
                 state.model_override = Some("gpt-x".into());
                 state.verbose = true;
             })
             .await
             .unwrap();
-        let outcome = maybe_handle_command(
-            "/new",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+
+        let outcome = env.run("/new").await;
+
         assert!(matches!(outcome, CommandOutcome::Reply(_)));
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert!(snapshot.foreground.session_id.is_none());
         assert_eq!(snapshot.settings.model_override.as_deref(), Some("gpt-x"));
         assert!(snapshot.settings.verbose);
@@ -4296,29 +4384,13 @@ mod tests {
 
     #[tokio::test]
     async fn new_command_accepts_manual_workspace() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        let outcome = maybe_handle_command(
-            "/new custom folder",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let env = TestEnv::new().await;
 
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let reply = env.reply("/new custom folder").await;
+
+        let snapshot = env.snapshot().await;
         let expected =
-            std::fs::canonicalize(data.path().join("session/workspace/custom folder")).unwrap();
+            std::fs::canonicalize(env.data_path().join("session/workspace/custom folder")).unwrap();
         assert_eq!(snapshot.foreground.workspace_dir, expected);
         assert!(reply.text.to_lowercase().contains("workdir"));
         assert!(reply.text.contains("custom folder"));
@@ -4326,14 +4398,9 @@ mod tests {
 
     #[tokio::test]
     async fn new_command_reports_effective_runtime_settings() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
+        let env = TestEnv::new().await;
+        env.session
+            .update_settings_for_user(USER, |state| {
                 state.model_override = Some("ignored-legacy".into());
                 state.reasoning_effort = Some(ReasoningEffort::Low);
                 state.context_mode = Some(ContextMode::Standard);
@@ -4348,21 +4415,15 @@ mod tests {
             context_mode: Some(ContextMode::OneM),
             ..CodexRuntimeProfile::default()
         };
-        let outcome = maybe_handle_command("/new", "u1", &session, "default", &runtime, false)
-            .await
-            .unwrap();
+        let reply = expect_reply(env.run_with_runtime("/new", &runtime).await);
 
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
         assert!(reply.text.contains("gpt-global high 1M fast"));
     }
 
     #[tokio::test]
     async fn resume_command_reports_profile_and_last_user_message_preview() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_dir = global_home.path().join("sessions/2026/04/11");
+        let env = TestEnv::new().await;
+        let session_dir = env.home_path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         fs::write(
             session_dir.join("rollout-2026-04-11T00-00-00-thread-1.jsonl"),
@@ -4374,42 +4435,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
 
-        let outcome = maybe_handle_command(
-            "/resume thread-1",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let reply = env.reply("/resume thread-1").await;
 
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
         assert!(reply.text.contains("请帮我处理发布失败"));
         assert!(reply.text.contains("gpt-5.4 high 1M"));
     }
 
     #[tokio::test]
     async fn stop_command_restores_most_recent_background_dialog() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
+        let env = TestEnv::new().await;
+        env.session
             .bind_foreground_session_profile(
-                "u1",
+                USER,
                 Some("thread-older".into()),
-                crate::session::state::DialogProfile {
+                DialogProfile {
                     model_override: Some("gpt-older".into()),
                     reasoning_effort: Some(ReasoningEffort::Low),
                     service_tier: None,
@@ -4418,15 +4458,15 @@ mod tests {
             )
             .await
             .unwrap();
-        session
-            .move_foreground_to_background("u1", Some("older"))
+        env.session
+            .move_foreground_to_background(USER, Some("older"))
             .await
             .unwrap();
-        session
+        env.session
             .bind_foreground_session_profile(
-                "u1",
+                USER,
                 Some("thread-newer".into()),
-                crate::session::state::DialogProfile {
+                DialogProfile {
                     model_override: Some("gpt-newer".into()),
                     reasoning_effort: Some(ReasoningEffort::High),
                     service_tier: None,
@@ -4435,25 +4475,16 @@ mod tests {
             )
             .await
             .unwrap();
-        session
-            .move_foreground_to_background("u1", Some("newer"))
+        env.session
+            .move_foreground_to_background(USER, Some("newer"))
             .await
             .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread-current".into()))
+        env.session
+            .set_foreground_session_id(USER, Some("thread-current".into()))
             .await
             .unwrap();
 
-        let outcome = maybe_handle_command(
-            "/stop",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let outcome = env.run("/stop").await;
 
         let CommandOutcome::StopCurrent(reply) = outcome else {
             panic!("expected stop current");
@@ -4464,92 +4495,50 @@ mod tests {
 
     #[tokio::test]
     async fn stop_command_ends_session() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread".into()))
+        let env = TestEnv::new().await;
+        env.session
+            .set_foreground_session_id(USER, Some("thread".into()))
             .await
             .unwrap();
-        let outcome = maybe_handle_command(
-            "/stop",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+
+        let outcome = env.run("/stop").await;
+
         assert!(matches!(outcome, CommandOutcome::StopCurrent(_)));
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
-        assert!(snapshot.foreground.session_id.is_none());
+        assert!(env.snapshot().await.foreground.session_id.is_none());
     }
 
     #[tokio::test]
     async fn interrupt_command_does_not_end_session() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread".into()))
+        let env = TestEnv::new().await;
+        env.session
+            .set_foreground_session_id(USER, Some("thread".into()))
             .await
             .unwrap();
-        let outcome = maybe_handle_command(
-            "/interrupt",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            true,
-        )
-        .await
-        .unwrap();
+
+        let outcome = env.run_busy("/interrupt").await;
+
         assert!(matches!(outcome, CommandOutcome::CancelCurrent(_)));
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert_eq!(snapshot.foreground.session_id.as_deref(), Some("thread"));
     }
 
     #[tokio::test]
     async fn busy_profile_commands_do_not_mutate_saved_foreground_profile() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
         let original = DialogProfile {
             model_override: Some("gpt-original".into()),
             reasoning_effort: Some(ReasoningEffort::Low),
             service_tier: None,
             context_mode: Some(ContextMode::Standard),
         };
-        session
-            .bind_foreground_session_profile("u1", Some("thread".into()), original.clone())
+        env.session
+            .bind_foreground_session_profile(USER, Some("thread".into()), original.clone())
             .await
             .unwrap();
-        session.save_foreground("u1").await.unwrap();
+        env.session.save_foreground(USER).await.unwrap();
 
         for command in ["/model gpt-next", "/reasoning xhigh", "/context 1m"] {
-            let outcome = maybe_handle_command(
-                command,
-                "u1",
-                &session,
-                "default",
-                &CodexRuntimeProfile::default(),
-                true,
-            )
-            .await
-            .unwrap();
-            let CommandOutcome::Reply(reply) = outcome else {
-                panic!("expected busy reply for {command}");
-            };
+            let reply = env.reply_busy(command).await;
             assert!(
                 reply.text.to_lowercase().contains("already running"),
                 "unexpected busy reply: {}",
@@ -4557,49 +4546,22 @@ mod tests {
             );
         }
 
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert_eq!(snapshot.foreground.profile.as_ref(), Some(&original));
     }
 
     #[tokio::test]
     async fn compact_command_routes_to_manual_compaction() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
 
-        let outcome = maybe_handle_command(
-            "/compact",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(outcome, CommandOutcome::Compact));
-
-        let zh_outcome = maybe_handle_command(
-            "/压缩",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(zh_outcome, CommandOutcome::Compact));
+        assert!(matches!(env.run("/compact").await, CommandOutcome::Compact));
+        assert!(matches!(env.run("/压缩").await, CommandOutcome::Compact));
     }
 
     #[tokio::test]
     async fn sessions_command_supports_project_then_session_view() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_dir = global_home.path().join("sessions/2026/04/11");
+        let env = TestEnv::new().await;
+        let session_dir = env.home_path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         fs::write(
             session_dir.join("rollout-2026-04-11T00-00-00-thread-a.jsonl"),
@@ -4607,106 +4569,37 @@ mod tests {
         )
         .await
         .unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread-a".into()))
+        env.session
+            .set_foreground_session_id(USER, Some("thread-a".into()))
             .await
             .unwrap();
-        session.save_foreground("u1").await.unwrap();
+        env.session.save_foreground(USER).await.unwrap();
 
-        let project_list = maybe_handle_command(
-            "/sessions",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(project_reply) = project_list else {
-            panic!("expected /sessions to reply with project list");
-        };
+        let project_reply = env.reply("/sessions").await;
         assert!(project_reply.text.to_lowercase().contains("projects"));
 
-        let session_list = maybe_handle_command(
-            "/sessions 1",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(session_reply) = session_list else {
-            panic!("expected /sessions 1 to reply with session list");
-        };
+        let session_reply = env.reply("/sessions 1").await;
         assert!(session_reply.text.to_lowercase().contains("no summary"));
         assert!(!session_reply.text.contains("thread-a"));
     }
 
     #[tokio::test]
     async fn lang_switch_affects_help_output() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
 
         // Default (en) help
-        let outcome = maybe_handle_command(
-            "/help",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /help to reply");
-        };
+        let reply = env.reply("/help").await;
         assert!(reply.text.starts_with("# Command Guide"));
         assert!(reply.text.contains("## Basic Commands"));
         assert!(reply.text.contains("## Model Settings"));
         assert!(reply.text.contains("## Session Management"));
 
         // Switch to zh, verify Chinese
-        let outcome = maybe_handle_command(
-            "/lang zh",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /lang zh to reply");
-        };
+        let reply = env.reply("/lang zh").await;
         assert!(reply.text.contains("zh"));
 
         // Chinese command alias: /帮助
-        let outcome = maybe_handle_command(
-            "/帮助",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /帮助 to reply");
-        };
+        let reply = env.reply("/帮助").await;
         assert!(reply.text.starts_with("# 命令指南"));
         assert!(reply.text.contains("## 基础命令"));
         assert!(reply.text.contains("## 模型设置命令"));
@@ -4715,60 +4608,33 @@ mod tests {
 
     #[tokio::test]
     async fn alias_add_and_expand_executes_each_step() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
 
-        let add_out = maybe_handle_command(
-            "/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = add_out else {
-            panic!("expected /alias add to reply");
-        };
+        let reply = env
+            .reply("/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on")
+            .await;
         assert!(reply.text.contains("expert"));
 
-        let aliases = session.list_command_aliases("u1").await.unwrap();
+        let aliases = env.session.list_command_aliases(USER).await.unwrap();
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].commands.len(), 3);
 
-        session
-            .set_foreground_session_id("u1", Some("thread-1".into()))
+        env.session
+            .set_foreground_session_id(USER, Some("thread-1".into()))
             .await
             .unwrap();
-        session
-            .move_foreground_to_background("u1", Some("saved"))
+        env.session
+            .move_foreground_to_background(USER, Some("saved"))
             .await
             .unwrap();
-        session
-            .foreground_from_background("u1", "saved")
+        env.session
+            .foreground_from_background(USER, "saved")
             .await
             .unwrap();
 
-        let invoke = maybe_handle_command(
-            "/expert",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = invoke else {
-            panic!("expected /expert to reply");
-        };
+        let reply = env.reply("/expert").await;
         // verbose step should have flipped user state
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         let profile = snapshot.foreground.profile.expect("saved dialog profile");
         assert!(snapshot.settings.verbose);
         assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::Xhigh));
@@ -4776,193 +4642,61 @@ mod tests {
         assert!(reply.text.contains("expert"));
 
         // Protected name rejected
-        let protected = maybe_handle_command(
-            "/alias add help /status",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = protected else {
-            panic!("expected /alias add help to reply");
-        };
+        let reply = env.reply("/alias add help /status").await;
         assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
 
-        let protected = maybe_handle_command(
-            "/alias add compact /status",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = protected else {
-            panic!("expected /alias add compact to reply");
-        };
+        let reply = env.reply("/alias add compact /status").await;
         assert!(reply.text.to_lowercase().contains("built-in") || reply.text.contains("内置命令"));
     }
 
     #[tokio::test]
     async fn alias_names_are_normalized_to_lowercase() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
 
-        let add_out = maybe_handle_command(
-            "/alias add Expert /verbose on",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = add_out else {
-            panic!("expected /alias add to reply");
-        };
+        let reply = env.reply("/alias add Expert /verbose on").await;
         assert!(reply.text.contains("/expert"));
 
-        let invoke = maybe_handle_command(
-            "/EXPERT",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let invoke = env.run("/EXPERT").await;
         assert!(matches!(invoke, CommandOutcome::Reply(_)));
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .settings
-                .verbose
-        );
+        assert!(env.snapshot().await.settings.verbose);
     }
 
     #[tokio::test]
     async fn lang_switch_affects_foreground_switch_messages() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread".into()))
+        let env = TestEnv::new().await;
+        env.session
+            .set_foreground_session_id(USER, Some("thread".into()))
             .await
             .unwrap();
-        let _ = maybe_handle_command(
-            "/bg focus",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let _ = maybe_handle_command(
-            "/lang en",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let _ = env.run("/bg focus").await;
+        let _ = env.run("/lang en").await;
 
-        let outcome = maybe_handle_command(
-            "/fg focus",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /fg to reply");
-        };
+        let reply = env.reply("/fg focus").await;
+
         assert!(reply.text.contains("Switched to background session"));
     }
 
     #[tokio::test]
     async fn alias_recursion_capped_at_max_depth() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::new().await;
 
         // Three-step recursion chain: a -> b -> c -> a (cycle)
         for (name, step) in [("a", "/b"), ("b", "/c"), ("c", "/a")] {
-            let add = format!("/alias add {name} {step}");
-            let _ = maybe_handle_command(
-                &add,
-                "u1",
-                &session,
-                "default",
-                &CodexRuntimeProfile::default(),
-                false,
-            )
-            .await
-            .unwrap();
+            let _ = env.run(&format!("/alias add {name} {step}")).await;
         }
-        let outcome = maybe_handle_command(
-            "/a",
-            "u1",
-            &session,
-            "default",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected alias cycle to terminate with reply");
-        };
+
+        let reply = env.reply("/a").await;
+
         // Must have produced some text and terminated (no panic / stack overflow)
         assert!(!reply.text.is_empty());
     }
 
     #[tokio::test]
     async fn model_empty_args_enters_interactive_prompt() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        let outcome = maybe_handle_command(
-            "/model",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /model to prompt");
-        };
+        let reply = env.reply("/model").await;
+
         assert!(reply.text.to_lowercase().contains("gpt-5.4"));
         assert!(reply.text.contains("`gpt-5.4`"));
         assert!(reply.text.contains("aliases") || reply.text.contains("别名"));
@@ -4970,41 +4704,18 @@ mod tests {
             reply.text.contains("Latest flagship GPT-5.6 model")
                 || reply.text.contains("最新旗舰 GPT-5.6 模型")
         );
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(matches!(
-            snapshot.pending_setting,
-            Some(crate::session::state::PendingSetting::Model)
+            env.snapshot().await.pending_setting,
+            Some(PendingSetting::Model)
         ));
     }
 
     #[tokio::test]
     async fn model_prompt_keeps_hint_out_of_markdown_sublist() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
-                state.language = "zh".into();
-            })
-            .await
-            .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.set_lang("zh").await;
 
-        let outcome = maybe_handle_command(
-            "/model",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /model to prompt");
-        };
+        let reply = env.reply("/model").await;
 
         assert!(
             reply.text.contains("\n\n请输入一个值，或 `/返回` 取消。"),
@@ -5015,63 +4726,27 @@ mod tests {
 
     #[tokio::test]
     async fn pending_model_fuzzy_match_applies_and_clears() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        let _ = maybe_handle_command(
-            "/model",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let _ = env.run("/model").await;
 
         // Ambiguous prefix: "gpt-5." hits multiple canonical models.
-        let outcome = maybe_handle_command(
-            "gpt-5.",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply for ambiguous match");
-        };
+        let reply = env.reply("gpt-5.").await;
         assert!(
             reply.text.to_lowercase().contains("multiple") || reply.text.contains("匹配到多个")
         );
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
         assert!(
-            snapshot.pending_setting.is_some(),
+            env.snapshot().await.pending_setting.is_some(),
             "pending must stay on ambiguous input"
         );
 
         // Unique fuzzy: "mini" hits only gpt-5.4-mini
-        let outcome = maybe_handle_command(
-            "mini",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let outcome = env.run("mini").await;
         let CommandOutcome::SetGlobalModel(Some(model)) = outcome else {
             panic!("expected apply reply");
         };
         assert_eq!(model, "gpt-5.4-mini");
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert!(
             snapshot.pending_setting.is_none(),
             "pending should clear on apply"
@@ -5081,55 +4756,29 @@ mod tests {
 
     #[tokio::test]
     async fn busy_pending_profile_input_does_not_apply_or_clear_picker() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
         let original = DialogProfile {
             model_override: Some("gpt-original".into()),
             reasoning_effort: Some(ReasoningEffort::Low),
             service_tier: None,
             context_mode: Some(ContextMode::Standard),
         };
-        session
-            .bind_foreground_session_profile("u1", Some("thread".into()), original.clone())
+        env.session
+            .bind_foreground_session_profile(USER, Some("thread".into()), original.clone())
             .await
             .unwrap();
-        session.save_foreground("u1").await.unwrap();
+        env.session.save_foreground(USER).await.unwrap();
 
-        let _ = maybe_handle_command(
-            "/model",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let _ = env.run("/model").await;
 
-        let outcome = maybe_handle_command(
-            "gpt-next",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            true,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected busy reply");
-        };
+        let reply = env.reply_busy("gpt-next").await;
         assert!(
             reply.text.to_lowercase().contains("already running"),
             "unexpected busy reply: {}",
             reply.text
         );
 
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert_eq!(snapshot.foreground.profile.as_ref(), Some(&original));
         assert!(matches!(
             snapshot.pending_setting,
@@ -5139,157 +4788,49 @@ mod tests {
 
     #[tokio::test]
     async fn back_exits_pending_and_reports_idle_otherwise() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
         // idle /back → "not in any interactive setting"
-        let outcome = maybe_handle_command(
-            "/back",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let reply = env.reply("/back").await;
         assert!(
             reply.text.to_lowercase().contains("not currently") || reply.text.contains("当前没有")
         );
 
         // Enter reasoning pending, then /back exits it.
-        let _ = maybe_handle_command(
-            "/reasoning",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting
-                .is_some()
-        );
-        let outcome = maybe_handle_command(
-            "/back",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let _ = env.run("/reasoning").await;
+        assert!(env.snapshot().await.pending_setting.is_some());
+
+        let reply = env.reply("/back").await;
         assert!(reply.text.contains("/reasoning"));
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting
-                .is_none()
-        );
+        assert!(env.snapshot().await.pending_setting.is_none());
     }
 
     #[tokio::test]
     async fn other_command_during_pending_clears_and_prefixes() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        let _ = maybe_handle_command(
-            "/model",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let outcome = maybe_handle_command(
-            "/status",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let _ = env.run("/model").await;
+
+        let reply = env.reply("/status").await;
+
         assert!(
             reply.text.contains("/model"),
             "exit notice must name the prior command"
         );
         assert!(reply.text.to_lowercase().contains("workdir"));
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting
-                .is_none()
-        );
+        assert!(env.snapshot().await.pending_setting.is_none());
     }
 
     #[tokio::test]
     async fn status_uses_context_window_remaining_format() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_usage(
-                "u1",
-                TokenUsageSnapshot {
-                    total_tokens: 13_700,
-                    window: 272_000,
-                    input_tokens: 0,
-                    cached_input_tokens: 0,
-                    output_tokens: 0,
-                    updated_at: chrono::Utc::now(),
-                },
-            )
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.session
+            .set_foreground_usage(USER, usage(13_700, 272_000))
             .await
             .unwrap();
 
-        let outcome = maybe_handle_command(
-            "/status",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let reply = env.reply("/status").await;
+
         assert!(
             reply.text.contains("99% left"),
             "unexpected status: {}",
@@ -5300,40 +4841,17 @@ mod tests {
 
     #[tokio::test]
     async fn status_hides_implausible_legacy_cumulative_usage() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.session
             .set_foreground_usage(
-                "u1",
-                TokenUsageSnapshot {
-                    total_tokens: 19_668_612,
-                    window: 1_000_000,
-                    input_tokens: 19_568_077,
-                    cached_input_tokens: 18_968_448,
-                    output_tokens: 100_535,
-                    updated_at: chrono::Utc::now(),
-                },
+                USER,
+                crate::session::state::fixtures::legacy_cumulative_usage(),
             )
             .await
             .unwrap();
 
-        let outcome = maybe_handle_command(
-            "/status",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let reply = env.reply("/status").await;
+
         assert!(
             reply.text.contains("context window: —"),
             "unexpected status: {}",
@@ -5343,110 +4861,33 @@ mod tests {
 
     #[tokio::test]
     async fn chinese_command_aliases_route_correctly() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
         // /模型 should enter the same interactive Model pending as /model.
-        let outcome = maybe_handle_command(
-            "/模型",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let outcome = env.run("/模型").await;
         assert!(matches!(outcome, CommandOutcome::Reply(_)));
         assert!(matches!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting,
-            Some(crate::session::state::PendingSetting::Model)
+            env.snapshot().await.pending_setting,
+            Some(PendingSetting::Model)
         ));
 
-        let _ = maybe_handle_command(
-            "/语言 zh",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-
-        let _ = maybe_handle_command(
-            "/模型",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let _ = env.run("/语言 zh").await;
+        let _ = env.run("/模型").await;
 
         // /返回 clears.
-        let outcome = maybe_handle_command(
-            "/返回",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let reply = env.reply("/返回").await;
         assert!(reply.text.contains("/模型"));
         assert!(!reply.text.contains("/model"));
-        assert!(
-            session
-                .snapshot_for_user("u1")
-                .await
-                .unwrap()
-                .pending_setting
-                .is_none()
-        );
+        assert!(env.snapshot().await.pending_setting.is_none());
     }
 
     #[tokio::test]
     async fn reasoning_prompt_uses_supported_values_and_aliases() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
-                state.language = "zh".into();
-            })
-            .await
-            .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.set_lang("zh").await;
 
-        let outcome = maybe_handle_command(
-            "/reasoning",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /reasoning to prompt");
-        };
+        let reply = env.reply("/reasoning").await;
+
         assert!(reply.text.contains("当前思考深度：medium"));
         assert!(
             reply
@@ -5460,32 +4901,11 @@ mod tests {
 
     #[tokio::test]
     async fn reasoning_prompt_uses_compact_three_line_layout() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
-                state.language = "zh".into();
-            })
-            .await
-            .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.set_lang("zh").await;
 
-        let outcome = maybe_handle_command(
-            "/reasoning",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /reasoning to prompt");
-        };
+        let reply = env.reply("/reasoning").await;
+
         assert_eq!(
             reply.text.lines().count(),
             3,
@@ -5496,126 +4916,51 @@ mod tests {
 
     #[tokio::test]
     async fn pending_reasoning_alias_applies_supported_value() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        let _ = maybe_handle_command(
-            "/reasoning",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let _ = env.run("/reasoning").await;
 
-        let outcome = maybe_handle_command(
-            "高",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let outcome = env.run("高").await;
+
         let CommandOutcome::SetGlobalReasoning(Some(ReasoningEffort::High)) = outcome else {
             panic!("expected global reasoning update");
         };
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert_eq!(snapshot.settings.reasoning_effort, None);
         assert!(snapshot.pending_setting.is_none());
     }
 
     #[tokio::test]
     async fn direct_fast_and_context_commands_accept_chinese_aliases() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
-        let fast = maybe_handle_command(
-            "/fast 开",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let fast = env.run("/fast 开").await;
         let CommandOutcome::SetGlobalFast(Some(ServiceTier::Fast)) = fast else {
             panic!("expected /fast 开 to request a global fast update");
         };
 
-        let context = maybe_handle_command(
-            "/context 长",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let context = env.run("/context 长").await;
         let CommandOutcome::SetGlobalContext(Some(ContextMode::OneM)) = context else {
             panic!("expected /context 长 to request a global context update");
         };
 
-        let snapshot = session.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot().await;
         assert_eq!(snapshot.settings.service_tier, None);
         assert_eq!(snapshot.settings.context_mode, None);
     }
 
     #[tokio::test]
     async fn fg_prompt_keeps_hint_out_of_markdown_sublist() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .set_foreground_session_id("u1", Some("thread".into()))
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.session
+            .set_foreground_session_id(USER, Some("thread".into()))
             .await
             .unwrap();
-        let _ = maybe_handle_command(
-            "/bg focus",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
-                state.language = "zh".into();
-            })
-            .await
-            .unwrap();
+        let _ = env.run("/bg focus").await;
+        env.set_lang("zh").await;
 
-        let outcome = maybe_handle_command(
-            "/fg",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /fg to prompt");
-        };
+        let reply = env.reply("/fg").await;
+
         assert!(
             reply.text.contains("\n\n请输入一个值，或 `/返回` 取消。"),
             "hint should be separated from the markdown list: {}",
@@ -5625,32 +4970,10 @@ mod tests {
 
     #[tokio::test]
     async fn help_groups_commands_in_requested_order() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
-        session
-            .update_settings_for_user("u1", |state| {
-                state.language = "zh".into();
-            })
-            .await
-            .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
+        env.set_lang("zh").await;
 
-        let outcome = maybe_handle_command(
-            "/帮助",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected /帮助 to reply");
-        };
+        let reply = env.reply("/帮助").await;
 
         let model_section = reply
             .text
@@ -5735,56 +5058,18 @@ mod tests {
 
     #[tokio::test]
     async fn help_entry_rendered_in_active_language_only() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session =
-            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-                .await
-                .unwrap();
+        let env = TestEnv::with_default_model("gpt-5.4").await;
 
         // English: /help should show English command names, no Chinese.
-        let outcome = maybe_handle_command(
-            "/help",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let reply = env.reply("/help").await;
         assert!(reply.text.contains("`/model`"));
         assert!(!reply.text.contains("`/模型`"));
         assert!(reply.text.contains("`/compact`"));
         assert!(!reply.text.contains("`/压缩`"));
 
         // Switch to zh and the same /help should mirror the behavior.
-        let _ = maybe_handle_command(
-            "/lang zh",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let outcome = maybe_handle_command(
-            "/help",
-            "u1",
-            &session,
-            "gpt-5.4",
-            &CodexRuntimeProfile::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let CommandOutcome::Reply(reply) = outcome else {
-            panic!("expected reply");
-        };
+        let _ = env.run("/lang zh").await;
+        let reply = env.reply("/help").await;
         assert!(reply.text.contains("`/模型`"));
         assert!(!reply.text.contains("`/model`"));
         assert!(reply.text.contains("`/压缩`"));
