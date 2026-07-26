@@ -164,29 +164,6 @@ fn truncate(input: &str, max_chars: usize) -> String {
 /// arg handling, env drift) is caught BEFORE it overwrites the running binary.
 /// `--smoke-test` loads and normalizes config, unlike `--help` which returns
 /// before any startup work.
-pub(crate) async fn smoke_test_binary(binary: &Path) -> Result<()> {
-    use std::process::Stdio;
-    use std::time::Duration;
-
-    let mut child = Command::new(binary)
-        .arg("--smoke-test")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("failed to spawn {} for smoke test", binary.display()))?;
-    match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(anyhow!("smoke test exited with {status}")),
-        Ok(Err(err)) => Err(anyhow!("smoke test wait failed: {err}")),
-        Err(_) => {
-            child.start_kill().ok();
-            Err(anyhow!("smoke test timed out after 30s"))
-        }
-    }
-}
-
 pub(crate) async fn replace_binary_for_restart(
     source_binary: &Path,
     target_binary: &Path,

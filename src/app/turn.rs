@@ -542,21 +542,6 @@ impl App {
                 .await?;
             return Ok(());
         }
-        // Smoke-test the freshly built binary before overwriting the running one,
-        // so a binary that compiles but panics on startup can't brick the
-        // service via an external supervisor's crash loop.
-        if let Err(err) = self_update::smoke_test_binary(&build_result.binary_path).await {
-            warn!(error = %err, "self-update smoke test failed; aborting update");
-            // Same as the build-failure path: free the slot before replying.
-            drop(busy);
-            self.reply_text(
-                openid,
-                message_id,
-                &format!("新构建的二进制启动自检失败，已放弃本次更新：{err}"),
-            )
-            .await?;
-            return Ok(());
-        }
         let running_binary =
             std::env::current_exe().context("failed to detect current executable")?;
         self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await?;

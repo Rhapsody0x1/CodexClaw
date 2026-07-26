@@ -33,10 +33,12 @@ async fn main() -> Result<()> {
     }
     let mut config = AppConfig::load()?;
     config.normalize_paths().await?;
-    // Startup self-check used by the self-update smoke test: exercises arg
-    // handling + config load/normalization (the common startup-panic surface)
-    // and exits 0 without starting the service. Placed after config load so a
-    // bad config is caught before a freshly built binary is installed.
+    // Standalone startup self-check: exercises arg handling + config
+    // load/normalization and exits 0 without starting the service. No longer
+    // invoked by /self-update (older binaries treat unknown args as "start the
+    // bot", which made the pre-replace smoke test hazardous on downgrades);
+    // kept so a stray `--smoke-test` from an old script exits fast instead of
+    // booting a second bot instance.
     if args.first().is_some_and(|arg| arg == "--smoke-test") {
         println!("codex-claw smoke test ok");
         return Ok(());
