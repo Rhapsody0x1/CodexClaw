@@ -1,28 +1,27 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    fs::{File, OpenOptions},
-    io::{BufRead, BufReader},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::model::cron::CronJob;
+use crate::scheduler::jobs_file;
+use crate::session::rollout::{
+    cache_imported_profile, copy_session_index_entry, copy_session_rollout,
+    dialog_from_disk_session, extract_session_profile, insert_prefer_recent, prune_session_files,
+    scan_home_sessions,
+};
 use crate::session::state::{
     CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
-    PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
-    SessionState, TokenUsageSnapshot, UserSessionState,
+    PendingSetting, PersistedSessionState, ReasoningEffort, SessionSettings, SessionState,
+    TokenUsageSnapshot, UserSessionState,
 };
-use crate::util::{
-    fs::{atomic_write, read_json_opt, walk_files},
-    layout::DataLayout,
-    time::parse_utc,
-};
+use crate::util::{fs::atomic_write, layout::DataLayout};
 
 const ALIAS_WORDS: &[&str] = &[
     "sage", "oak", "mint", "lark", "wave", "nova", "reef", "kite", "fern", "dawn", "ember",
@@ -900,22 +899,14 @@ impl SessionStore {
 
     async fn read_cron_jobs_from_disk(&self) -> Result<BTreeMap<String, CronJob>> {
         let path = self.cron_jobs_path.clone();
-        let lock_path = cron_jobs_lock_path(&path);
         let fallback = self.state.read().await.cron_jobs.clone();
-        tokio::task::spawn_blocking(move || {
-            with_cron_jobs_lock(&lock_path, false, || read_cron_jobs_file(&path, fallback))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || jobs_file::read_jobs(&path, fallback)).await?
     }
 
     async fn persist_cron_jobs(&self, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
         let path = self.cron_jobs_path.clone();
-        let lock_path = cron_jobs_lock_path(&path);
         let jobs = jobs.clone();
-        tokio::task::spawn_blocking(move || {
-            with_cron_jobs_lock(&lock_path, true, || write_cron_jobs_file(&path, &jobs))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || jobs_file::write_jobs(&path, &jobs)).await?
     }
 
     async fn mutate_cron_jobs_on_disk<T, F>(&self, mutator: F) -> Result<T>
@@ -924,17 +915,9 @@ impl SessionStore {
         F: FnOnce(&mut BTreeMap<String, CronJob>) -> Result<T> + Send + 'static,
     {
         let path = self.cron_jobs_path.clone();
-        let lock_path = cron_jobs_lock_path(&path);
         let fallback = self.state.read().await.cron_jobs.clone();
-        tokio::task::spawn_blocking(move || {
-            with_cron_jobs_lock(&lock_path, true, || {
-                let mut jobs = read_cron_jobs_file(&path, fallback)?;
-                let result = mutator(&mut jobs)?;
-                write_cron_jobs_file(&path, &jobs)?;
-                Ok(result)
-            })
-        })
-        .await?
+        tokio::task::spawn_blocking(move || jobs_file::mutate_jobs(&path, fallback, mutator))
+            .await?
     }
 
     async fn mutate_state<T, F>(&self, mutator: F) -> Result<T>
@@ -1024,39 +1007,6 @@ fn persist_cached_profile(
         return;
     };
     state.imported_profiles.insert(session_id, profile);
-}
-
-/// Caches a freshly resolved profile for `session_id`, keeping an existing
-/// cache entry if one appeared in the meantime (`or_insert` semantics).
-fn cache_imported_profile(
-    state: &mut PersistedSessionState,
-    session_id: &str,
-    profile: Option<&ImportedSessionProfile>,
-) {
-    if let Some(profile) = profile {
-        state
-            .imported_profiles
-            .entry(session_id.to_string())
-            .or_insert_with(|| profile.clone());
-    }
-}
-
-/// Builds the dialog record for a session picked from disk, preferring the
-/// resolved profile's workspace over the rollout `cwd`.
-fn dialog_from_disk_session(
-    target: &DiskSessionMeta,
-    profile: Option<&ImportedSessionProfile>,
-) -> DialogState {
-    DialogState {
-        session_id: Some(target.id.clone()),
-        origin: target.origin,
-        workspace_dir: profile
-            .map(|value| value.workspace_dir.clone())
-            .unwrap_or_else(|| target.cwd.clone()),
-        saved: true,
-        profile: profile.map(|value| value.dialog_profile()),
-        last_usage: None,
-    }
 }
 
 fn record_background_alias(user: &mut UserSessionState, alias: &str) {
@@ -1216,14 +1166,6 @@ fn register_local_saved_session(user: &mut UserSessionState, session_id: &str) {
     }
 }
 
-fn prune_session_files(codex_home: &Path, session_id: &str) -> Result<()> {
-    walk_files(&codex_home.join("sessions"), |path, name| {
-        if name.ends_with(".jsonl") && name.contains(session_id) {
-            let _ = std::fs::remove_file(path);
-        }
-    })
-}
-
 fn cleanup_workspace_if_empty(path: &Path) {
     let Ok(meta) = std::fs::metadata(path) else {
         return;
@@ -1240,357 +1182,6 @@ fn cleanup_workspace_if_empty(path: &Path) {
     let _ = std::fs::remove_dir(path);
 }
 
-fn scan_home_sessions(codex_home: &Path) -> Result<Vec<DiskSessionMeta>> {
-    let index = read_session_index(codex_home)?;
-    let mut files = Vec::new();
-    collect_rollout_files(&codex_home.join("sessions"), &mut files)?;
-    let mut sessions = Vec::new();
-    for path in files {
-        if let Some(meta) = parse_rollout_meta(&path, &index)? {
-            sessions.push(meta);
-        }
-    }
-    Ok(sessions)
-}
-
-fn collect_rollout_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    walk_files(root, |path, name| {
-        if name.starts_with("rollout-") && name.ends_with(".jsonl") {
-            out.push(path.to_path_buf());
-        }
-    })
-}
-
-#[derive(Debug, Clone)]
-struct IndexEntry {
-    thread_name: Option<String>,
-    first_user_message: Option<String>,
-    updated_at: Option<DateTime<Utc>>,
-}
-
-fn read_session_index(codex_home: &Path) -> Result<HashMap<String, IndexEntry>> {
-    let path = codex_home.join("session_index.jsonl");
-    let Ok(file) = File::open(&path) else {
-        return Ok(HashMap::new());
-    };
-    let reader = BufReader::new(file);
-    let mut map = HashMap::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value = match serde_json::from_str::<serde_json::Value>(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let id = value
-            .get("id")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-        let Some(id) = id else {
-            continue;
-        };
-        let thread_name = value
-            .get("thread_name")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-        let first_user_message = value
-            .get("first_user_message")
-            .and_then(|item| item.as_str())
-            .map(str::to_string)
-            .filter(|value| !value.trim().is_empty());
-        let updated_at = value
-            .get("updated_at")
-            .and_then(|item| item.as_str())
-            .and_then(parse_utc);
-        map.insert(
-            id,
-            IndexEntry {
-                thread_name,
-                first_user_message,
-                updated_at,
-            },
-        );
-    }
-    Ok(map)
-}
-
-fn parse_rollout_meta(
-    path: &Path,
-    index: &HashMap<String, IndexEntry>,
-) -> Result<Option<DiskSessionMeta>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
-    if reader.read_line(&mut first_line)? == 0 {
-        return Ok(None);
-    }
-    let value = match serde_json::from_str::<serde_json::Value>(&first_line) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    if value.get("type").and_then(|item| item.as_str()) != Some("session_meta") {
-        return Ok(None);
-    }
-    let payload = value.get("payload").and_then(|item| item.as_object());
-    let Some(payload) = payload else {
-        return Ok(None);
-    };
-    let id = payload
-        .get("id")
-        .and_then(|item| item.as_str())
-        .ok_or_else(|| anyhow!("session meta missing id in {}", path.display()))?
-        .to_string();
-    let cwd = payload
-        .get("cwd")
-        .and_then(|item| item.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let created_at = payload
-        .get("timestamp")
-        .and_then(|item| item.as_str())
-        .and_then(parse_utc);
-    let index_entry = index.get(&id);
-    let updated_at = index_entry
-        .and_then(|entry| entry.updated_at)
-        .or(created_at);
-    let last_user_message = parse_last_user_message(&mut reader);
-    let title = index_entry
-        .and_then(|entry| entry.thread_name.clone())
-        .or_else(|| last_user_message.clone())
-        .or_else(|| {
-            index_entry
-                .and_then(|entry| entry.first_user_message.as_deref())
-                .and_then(extract_user_message_preview)
-        });
-    Ok(Some(DiskSessionMeta {
-        id,
-        cwd,
-        title,
-        last_user_message,
-        updated_at,
-        origin: DialogOrigin::Global,
-        rollout_path: path.to_path_buf(),
-    }))
-}
-
-fn insert_prefer_recent(map: &mut BTreeMap<String, DiskSessionMeta>, candidate: DiskSessionMeta) {
-    match map.get(&candidate.id) {
-        Some(existing) if existing.updated_at >= candidate.updated_at => {}
-        _ => {
-            map.insert(candidate.id.clone(), candidate);
-        }
-    }
-}
-
-fn parse_last_user_message(reader: &mut impl BufRead) -> Option<String> {
-    let mut line = String::new();
-    let mut last_message = None;
-    loop {
-        line.clear();
-        let size = reader.read_line(&mut line).ok()?;
-        if size == 0 {
-            return last_message;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(|item| item.as_str()) != Some("response_item") {
-            continue;
-        }
-        let Some(payload) = value.get("payload") else {
-            continue;
-        };
-        if payload.get("type").and_then(|item| item.as_str()) != Some("message") {
-            continue;
-        }
-        if payload.get("role").and_then(|item| item.as_str()) != Some("user") {
-            continue;
-        }
-        let Some(content) = payload.get("content").and_then(|item| item.as_array()) else {
-            continue;
-        };
-        for item in content {
-            let Some(text) = item.get("text").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if let Some(message) = extract_user_message_preview(text) {
-                last_message = Some(message);
-            }
-        }
-    }
-}
-
-fn extract_user_message_preview(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let message = if let Some((_, tail)) = trimmed.rsplit_once("User message:\n") {
-        tail.trim()
-    } else {
-        trimmed
-    };
-    if message.is_empty()
-        || message == "(User sent no text, only attachments.)"
-        || message.starts_with("<environment_context>")
-    {
-        return None;
-    }
-    Some(message.to_string())
-}
-
-fn copy_session_rollout(
-    source_home: &Path,
-    destination_home: &Path,
-    source_rollout_path: &Path,
-) -> Result<bool> {
-    let source_root = source_home.join("sessions");
-    let rel = source_rollout_path
-        .strip_prefix(&source_root)
-        .with_context(|| {
-            format!(
-                "session rollout {} is not under {}",
-                source_rollout_path.display(),
-                source_root.display()
-            )
-        })?;
-    let destination = destination_home.join("sessions").join(rel);
-    if destination.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::copy(source_rollout_path, &destination).with_context(|| {
-        format!(
-            "failed to copy session rollout from {} to {}",
-            source_rollout_path.display(),
-            destination.display()
-        )
-    })?;
-    Ok(true)
-}
-
-fn copy_session_index_entry(
-    source_home: &Path,
-    destination_home: &Path,
-    session_id: &str,
-) -> Result<()> {
-    let source_path = source_home.join("session_index.jsonl");
-    let Ok(source_raw) = std::fs::read_to_string(&source_path) else {
-        return Ok(());
-    };
-    let Some(line) = source_raw
-        .lines()
-        .find(|value| value.contains(&format!("\"id\":\"{session_id}\"")))
-    else {
-        return Ok(());
-    };
-
-    let destination_path = destination_home.join("session_index.jsonl");
-    if let Ok(existing) = std::fs::read_to_string(&destination_path)
-        && existing
-            .lines()
-            .any(|value| value.contains(&format!("\"id\":\"{session_id}\"")))
-    {
-        return Ok(());
-    }
-    if let Some(parent) = destination_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&destination_path)
-        .with_context(|| format!("failed to open {}", destination_path.display()))?;
-    use std::io::Write;
-    writeln!(file, "{line}")
-        .with_context(|| format!("failed to append {}", destination_path.display()))?;
-    Ok(())
-}
-
-fn extract_session_profile(
-    rollout_path: &Path,
-    fallback_workspace: PathBuf,
-) -> Result<Option<ImportedSessionProfile>> {
-    let file = File::open(rollout_path)
-        .with_context(|| format!("failed to open {}", rollout_path.display()))?;
-    let reader = BufReader::new(file);
-    let mut profile = ImportedSessionProfile {
-        workspace_dir: fallback_workspace,
-        ..ImportedSessionProfile::default()
-    };
-    let mut seen = false;
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let Some(item_type) = value.get("type").and_then(|item| item.as_str()) else {
-            continue;
-        };
-        match item_type {
-            "turn_context" => {
-                let Some(payload) = value.get("payload").and_then(|item| item.as_object()) else {
-                    continue;
-                };
-                if let Some(cwd) = payload.get("cwd").and_then(|item| item.as_str()) {
-                    profile.workspace_dir = PathBuf::from(cwd);
-                    seen = true;
-                }
-                if let Some(model) = payload.get("model").and_then(|item| item.as_str()) {
-                    let model = model.trim();
-                    if !model.is_empty() {
-                        profile.model_override = Some(model.to_string());
-                        seen = true;
-                    }
-                }
-                if let Some(effort) = payload.get("effort").and_then(|item| item.as_str())
-                    && let Some(parsed) = ReasoningEffort::parse(effort)
-                {
-                    profile.reasoning_effort = Some(parsed);
-                    seen = true;
-                }
-                if let Some(service_tier) =
-                    payload.get("service_tier").and_then(|item| item.as_str())
-                    && let Some(parsed) = ServiceTier::parse(service_tier)
-                {
-                    profile.service_tier = Some(parsed);
-                    seen = true;
-                }
-            }
-            "event_msg" => {
-                let Some(payload) = value.get("payload").and_then(|item| item.as_object()) else {
-                    continue;
-                };
-                if payload.get("type").and_then(|item| item.as_str()) != Some("token_count") {
-                    continue;
-                }
-                let Some(window) = payload
-                    .get("info")
-                    .and_then(|item| item.get("model_context_window"))
-                    .and_then(|item| item.as_u64())
-                else {
-                    continue;
-                };
-                profile.context_mode = Some(ContextMode::from_model_context_window(window));
-                seen = true;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(if seen { Some(profile) } else { None })
-}
-
 fn prepare_workspace_dir(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         anyhow::ensure!(path.is_dir(), "工作目录不是文件夹：{}", path.display());
@@ -1599,49 +1190,6 @@ fn prepare_workspace_dir(path: &Path) -> Result<PathBuf> {
             .with_context(|| format!("failed to create workspace {}", path.display()))?;
     }
     std::fs::canonicalize(path).or_else(|_| Ok(path.to_path_buf()))
-}
-
-fn cron_jobs_lock_path(path: &Path) -> PathBuf {
-    path.with_extension("json.lock")
-}
-
-fn with_cron_jobs_lock<T, F>(lock_path: &Path, exclusive: bool, f: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .with_context(|| format!("failed to open {}", lock_path.display()))?;
-    if exclusive {
-        FileExt::lock_exclusive(&lock_file)
-            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
-    } else {
-        FileExt::lock_shared(&lock_file)
-            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
-    }
-    let result = f();
-    FileExt::unlock(&lock_file)
-        .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
-    result
-}
-
-fn read_cron_jobs_file(
-    path: &Path,
-    fallback: BTreeMap<String, CronJob>,
-) -> Result<BTreeMap<String, CronJob>> {
-    Ok(read_json_opt::<BTreeMap<String, CronJob>>(path)?.unwrap_or(fallback))
-}
-
-fn write_cron_jobs_file(path: &Path, jobs: &BTreeMap<String, CronJob>) -> Result<()> {
-    atomic_write(path, &serde_json::to_string_pretty(jobs)?)
 }
 
 #[cfg(test)]
