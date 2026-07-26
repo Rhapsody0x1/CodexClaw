@@ -14,11 +14,14 @@ use ulid::Ulid;
 /// the bytes go to a unique temporary sibling, are fsynced, and only then get
 /// renamed over the target. Missing parent directories are created.
 ///
-/// An existing target keeps its permission bits: `File::create` gives the
-/// temporary file umask-derived permissions, so without this an operator's
-/// deliberately tightened file (e.g. `chmod 600 state.json`) would silently
-/// loosen on the next rewrite. Note that fsync errors propagate — callers that
-/// used to swallow them get the stricter behavior on purpose.
+/// Permissions: the temporary is born `0600` (`create_new`, so a leftover
+/// sibling is an error, not a takeover), meaning the content is never
+/// readable by other users — not even between write and rename. A brand-new
+/// target therefore ends up `0600`; when the target already exists its
+/// permission bits are copied over before the rename, so an operator's
+/// deliberate mode (tighter or looser) survives rewrites. Note that fsync
+/// errors propagate — callers that used to swallow them get the stricter
+/// behavior on purpose.
 pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -27,7 +30,7 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let tmp = tmp_path_for(path);
     {
         let mut file =
-            File::create(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
+            create_private(&tmp).with_context(|| format!("failed to write {}", tmp.display()))?;
         file.write_all(contents.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
         match std::fs::metadata(path) {
@@ -51,6 +54,26 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+/// Exclusively create `path` readable/writable by the owner only.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Non-unix fallback: exclusive create with platform-default permissions.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 /// A unique `<name>.<ulid>.tmp` sibling of `path`, so concurrent writers (even
@@ -244,5 +267,34 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "rewrite must not loosen a chmod 600 file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_loosened_permissions_too() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.md");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        atomic_write(&path, "new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "an operator's deliberate mode must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_new_files_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.json");
+        atomic_write(&path, "secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "new files must not be world-readable");
     }
 }
