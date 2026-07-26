@@ -1,16 +1,106 @@
 //! Human-readable one-liners for the codex items streamed during a turn.
 //!
 //! These formatters define the QQ-facing wire text, so `app_server::events`
-//! translates every app-server notification into a [`CodexItem`] and dispatches
+//! translates every app-server notification into a [`DisplayItem`] and dispatches
 //! here rather than growing a second set of strings.
 //!
 //! This module is a leaf inside `codex/`: it depends on `codex::events` and
 //! `util::text` only, never on the executor or the app-server.
 
-use crate::{
-    codex::events::{CodexItem, FileUpdateChange, PatchChangeKind, TodoEntry, WebSearchAction},
-    util::text::{humanize_tool_label, short_json, truncate_with_marker},
-};
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
+
+use crate::util::text::{humanize_tool_label, short_json, truncate_with_marker};
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DisplayItem {
+    #[serde(rename = "type")]
+    pub(crate) item_type: String,
+    #[serde(default)]
+    pub(crate) text: Option<String>,
+    #[serde(default)]
+    pub(crate) message: Option<String>,
+    #[serde(default)]
+    pub(crate) command: Option<String>,
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+    #[serde(default)]
+    pub(crate) action: Option<WebSearchAction>,
+    #[serde(default)]
+    pub(crate) changes: Vec<FileUpdateChange>,
+    #[serde(default)]
+    pub(crate) server: Option<String>,
+    #[serde(default)]
+    pub(crate) tool: Option<String>,
+    #[serde(default)]
+    pub(crate) arguments: Option<JsonValue>,
+    #[serde(default)]
+    pub(crate) result: Option<McpToolCallResult>,
+    #[serde(default)]
+    pub(crate) error: Option<McpToolCallError>,
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) receiver_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) items: Vec<TodoEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebSearchAction {
+    Search {
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        queries: Option<Vec<String>>,
+    },
+    OpenPage {
+        #[serde(default)]
+        url: Option<String>,
+    },
+    FindInPage {
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        pattern: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FileUpdateChange {
+    pub(crate) path: String,
+    pub(crate) kind: PatchChangeKind,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PatchChangeKind {
+    Add,
+    Delete,
+    Update,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct McpToolCallResult {
+    #[serde(default)]
+    pub(crate) content: Vec<JsonValue>,
+    #[serde(default)]
+    pub(crate) structured_content: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct McpToolCallError {
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TodoEntry {
+    pub(crate) text: String,
+    pub(crate) completed: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolEventPhase {
@@ -19,7 +109,7 @@ pub(crate) enum ToolEventPhase {
     Completed,
 }
 
-pub(crate) fn tool_display_for_item(item: &CodexItem, phase: ToolEventPhase) -> Option<String> {
+pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -> Option<String> {
     match item.item_type.as_str() {
         "command_execution" if phase == ToolEventPhase::Started => item
             .command
@@ -135,7 +225,7 @@ fn web_search_action_detail(action: &WebSearchAction) -> String {
     }
 }
 
-fn web_search_display_from_item(item: &CodexItem) -> String {
+fn web_search_display_from_item(item: &DisplayItem) -> String {
     let detail = item.query.clone().unwrap_or_default();
     match item.action.as_ref() {
         Some(WebSearchAction::Other) | None => web_search_display_from_detail(&detail),
@@ -206,19 +296,16 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::codex::{
-        display::{
-            ToolEventPhase, format_todo_items, tool_display_for_item, web_search_action_detail,
-            web_search_display_from_action, web_search_display_from_detail,
-        },
-        events::{CodexItem, TodoEntry, WebSearchAction},
+    use crate::codex::display::{
+        DisplayItem, TodoEntry, ToolEventPhase, WebSearchAction, format_todo_items,
+        tool_display_for_item, web_search_action_detail, web_search_display_from_action,
+        web_search_display_from_detail,
     };
 
-    /// A `CodexItem` with every optional field cleared; tests fill in only the
+    /// A `DisplayItem` with every optional field cleared; tests fill in only the
     /// ones the formatter under test reads.
-    fn empty_item(item_type: &str) -> CodexItem {
-        CodexItem {
-            id: None,
+    fn empty_item(item_type: &str) -> DisplayItem {
+        DisplayItem {
             item_type: item_type.to_string(),
             text: None,
             message: None,
@@ -232,12 +319,8 @@ mod tests {
             result: None,
             error: None,
             prompt: None,
-            sender_thread_id: None,
             receiver_thread_ids: Vec::new(),
             items: Vec::new(),
-            aggregated_output: None,
-            exit_code: None,
-            status: None,
         }
     }
 

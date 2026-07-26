@@ -3,7 +3,7 @@
 //!
 //! The aim is **byte-for-byte parity** with the current `codex exec --json`
 //! output: to achieve that, we convert each app-server `ItemPayload` into the
-//! pre-existing [`CodexItem`] shape and dispatch to
+//! pre-existing [`DisplayItem`] shape and dispatch to
 //! [`crate::codex::display::tool_display_for_item`] (the existing formatter).
 //! Only events that don't fit the legacy shape get new output paths
 //! (e.g. `[Model rerouted -> ...]`).
@@ -12,8 +12,8 @@ use serde_json::Value as JsonValue;
 use tracing::trace;
 
 use crate::codex::{
+    display::{DisplayItem, FileUpdateChange, PatchChangeKind, TodoEntry, WebSearchAction},
     display::{ToolEventPhase, format_todo_items, tool_display_for_item},
-    events::{CodexItem, FileUpdateChange, PatchChangeKind, TodoEntry, WebSearchAction},
     types::ExecutionUpdate,
 };
 
@@ -55,7 +55,7 @@ pub(crate) fn translate_item_started(
     if state.turn_id.is_none() {
         state.turn_id = notif.turn_id.clone();
     }
-    let item = to_codex_item(&notif.item);
+    let item = to_display_item(&notif.item);
     trace!(item_type = %item.item_type, "item/started");
     match tool_display_for_item(&item, ToolEventPhase::Started) {
         Some(display) => vec![ExecutionUpdate::ToolCall { display }],
@@ -67,7 +67,7 @@ pub(crate) fn translate_item_updated(
     _state: &mut TurnState,
     notif: &ItemNotification,
 ) -> Vec<ExecutionUpdate> {
-    let item = to_codex_item(&notif.item);
+    let item = to_display_item(&notif.item);
     trace!(item_type = %item.item_type, "item/updated");
     match tool_display_for_item(&item, ToolEventPhase::Updated) {
         Some(display) => vec![ExecutionUpdate::ToolCall { display }],
@@ -79,7 +79,7 @@ pub(crate) fn translate_item_completed(
     state: &mut TurnState,
     notif: &ItemNotification,
 ) -> Vec<ExecutionUpdate> {
-    let item = to_codex_item(&notif.item);
+    let item = to_display_item(&notif.item);
     trace!(item_type = %item.item_type, "item/completed");
     let item_type = item.item_type.as_str();
     if item_type == "agent_message" {
@@ -184,10 +184,10 @@ pub(crate) fn translate_compacted(
 }
 
 // ---------------------------------------------------------------------------
-// ItemPayload → CodexItem converter
+// ItemPayload → DisplayItem converter
 // ---------------------------------------------------------------------------
 
-fn to_codex_item(p: &ItemPayload) -> CodexItem {
+fn to_display_item(p: &ItemPayload) -> DisplayItem {
     let item_type = map_item_type(&p.item_type);
     let (result, error) = parse_mcp_result_error(&p.result, &p.error);
     let action = parse_web_search_action(&p.action);
@@ -206,8 +206,7 @@ fn to_codex_item(p: &ItemPayload) -> CodexItem {
         }
     });
 
-    CodexItem {
-        id: p.id.clone(),
+    DisplayItem {
         item_type,
         text,
         message,
@@ -221,12 +220,8 @@ fn to_codex_item(p: &ItemPayload) -> CodexItem {
         result,
         error,
         prompt: p.prompt.clone(),
-        sender_thread_id: p.sender_thread_id.clone(),
         receiver_thread_ids: p.receiver_thread_ids.clone(),
         items,
-        aggregated_output: p.aggregated_output.clone(),
-        exit_code: p.exit_code,
-        status: p.status.clone(),
     }
 }
 
@@ -301,21 +296,21 @@ fn parse_mcp_result_error(
     result: &Option<JsonValue>,
     error: &Option<JsonValue>,
 ) -> (
-    Option<crate::codex::events::McpToolCallResult>,
-    Option<crate::codex::events::McpToolCallError>,
+    Option<crate::codex::display::McpToolCallResult>,
+    Option<crate::codex::display::McpToolCallError>,
 ) {
     let parsed_result = result.as_ref().and_then(|v| {
-        serde_json::from_value::<crate::codex::events::McpToolCallResult>(v.clone()).ok()
+        serde_json::from_value::<crate::codex::display::McpToolCallResult>(v.clone()).ok()
     });
     let parsed_error = error.as_ref().and_then(|v| {
         // Error may be shaped as {"message":"..."} or {"error":{"message":"..."}}.
         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            Some(crate::codex::events::McpToolCallError {
+            Some(crate::codex::display::McpToolCallError {
                 message: msg.to_string(),
             })
         } else {
             v.as_str()
-                .map(|msg| crate::codex::events::McpToolCallError {
+                .map(|msg| crate::codex::display::McpToolCallError {
                     message: msg.to_string(),
                 })
         }

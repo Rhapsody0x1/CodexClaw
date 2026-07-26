@@ -16,8 +16,8 @@ pub(crate) mod types;
 // everything else is `pub(crate)` so the compiler keeps reporting unused items
 // instead of treating "some external crate might want it" as a use.
 pub use app_server::{AppServerHandle, ClientInfo};
-pub use events::TokenUsageInfo;
 pub use executor::{CodexExecutor, build_codex_path_env};
+pub use types::TokenUsageInfo;
 pub use types::{ExecutionRequest, ExecutionResult, ExecutionUpdate};
 
 pub(crate) use app_server::{

@@ -110,7 +110,7 @@ pub(super) fn build_usage_snapshot(
 #[cfg(test)]
 mod tests {
     use crate::codex::TokenUsageInfo;
-    use crate::codex::events::TokenUsage;
+    use crate::codex::types::TokenUsage;
     use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 
     use super::{build_context_warning, build_usage_snapshot};
@@ -150,14 +150,12 @@ mod tests {
                 input_tokens: 100,
                 cached_input_tokens: 0,
                 output_tokens: 50,
-                reasoning_output_tokens: 0,
                 total_tokens: 150,
             },
             last_token_usage: TokenUsage {
                 input_tokens: 80,
                 cached_input_tokens: 0,
                 output_tokens: 20,
-                reasoning_output_tokens: 0,
                 total_tokens: 100,
             },
             model_context_window: None,

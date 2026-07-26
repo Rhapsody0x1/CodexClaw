@@ -23,8 +23,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     codex::{
-        events::{TokenUsage, TokenUsageInfo},
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
+        types::{TokenUsage, TokenUsageInfo},
     },
     model::settings::{ContextMode, ReasoningEffort, ServiceTier},
 };
@@ -907,14 +907,12 @@ impl TurnRunner {
                 input_tokens: payload.total.input_tokens,
                 cached_input_tokens: payload.total.cached_input_tokens,
                 output_tokens: payload.total.output_tokens,
-                reasoning_output_tokens: payload.total.reasoning_output_tokens,
                 total_tokens: payload.total.total_tokens,
             },
             last_token_usage: TokenUsage {
                 input_tokens: payload.last.input_tokens,
                 cached_input_tokens: payload.last.cached_input_tokens,
                 output_tokens: payload.last.output_tokens,
-                reasoning_output_tokens: payload.last.reasoning_output_tokens,
                 total_tokens: payload.last.total_tokens,
             },
             model_context_window: payload.model_context_window,
