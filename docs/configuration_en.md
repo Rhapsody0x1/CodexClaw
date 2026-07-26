@@ -67,17 +67,15 @@ Configures authentication credentials and API endpoints for the QQ Open Platform
 
 ## `[shadow]` — Shadow Distillation Settings
 
-Controls the behavior of the background memory distillation and skill distillation modules. When `enabled = false`, the entire shadow subsystem will not run.
+Controls the behavior of the background memory distillation module. When `enabled = false`, the entire shadow subsystem will not run.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Whether to enable background memory/skill distillation |
+| `enabled` | bool | `true` | Whether to enable background memory distillation |
 | `memory_min_user_chars` | usize | `40` | Minimum user message length (in characters) to trigger memory distillation |
 | `memory_reasoning` | String | `"low"` | Reasoning depth used for memory distillation |
 | `memory_model` | String | `""` | Model used for memory distillation. Leave empty to follow the current session model |
 | `memory_deadline_secs` | u64 | `120` | Timeout for a single distillation run (in seconds) |
-| `skill_files_threshold` | usize | `2` | Minimum number of modified files to trigger skill distillation |
-| `skill_tool_threshold` | usize | `5` | Minimum number of tool calls to trigger skill distillation |
 
 ---
 
@@ -139,8 +137,6 @@ memory_min_user_chars = 40               # Memory distillation not triggered if 
 memory_reasoning     = "low"
 memory_model         = ""                # Leave empty = follow session model
 memory_deadline_secs = 120
-skill_files_threshold = 2                # Trigger skill distillation when modified files >= 2
-skill_tool_threshold  = 5                # Trigger skill distillation when tool calls >= 5
 
 # --- Scheduler -----------------------------------------------------
 [scheduler]

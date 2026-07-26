@@ -10,8 +10,7 @@ use codex_claw::{
     qq::{C2CMessageEvent, QqApiClient, spawn_gateway},
     scheduler::{self, SchedulerCtx},
     session::SessionStore,
-    shadow::{ShadowConfig, ShadowWorker, SkillShadowConfig},
-    skills::SkillIndex,
+    shadow::{ShadowConfig, ShadowWorker},
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -114,9 +113,6 @@ async fn run_bot(config: AppConfig) -> Result<()> {
     let codex = Arc::new(CodexExecutor::new(app_server));
     let layout = DataLayout::new(&config.general.data_dir);
     let memory = Arc::new(MemoryStore::new(layout.memory_dir()));
-    let skills_root = config.general.codex_home_global.join("skills");
-    tokio::fs::create_dir_all(&skills_root).await.ok();
-    let skill_index = Arc::new(SkillIndex::new(skills_root.clone()));
     let shadow_workspace = layout.shadow_workspace_dir();
     tokio::fs::create_dir_all(&shadow_workspace).await.ok();
     let shadow = if config.shadow.enabled {
@@ -131,19 +127,12 @@ async fn run_bot(config: AppConfig) -> Result<()> {
             reasoning: config.shadow.memory_reasoning.clone(),
             deadline: std::time::Duration::from_secs(config.shadow.memory_deadline_secs),
         };
-        let skill_cfg = SkillShadowConfig {
-            files_threshold: config.shadow.skill_files_threshold,
-            tool_threshold: config.shadow.skill_tool_threshold,
-        };
         Some(Arc::new(ShadowWorker::new(
             memory.clone(),
-            skill_index.clone(),
-            skills_root,
             config.general.codex_binary.clone(),
             config.general.codex_home_global.clone(),
             shadow_workspace,
             memory_cfg,
-            skill_cfg,
         )))
     } else {
         None

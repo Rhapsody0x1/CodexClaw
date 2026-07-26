@@ -29,10 +29,6 @@ pub struct ShadowSection {
     pub memory_model: String,
     #[serde(default = "default_shadow_deadline_secs")]
     pub memory_deadline_secs: u64,
-    #[serde(default = "default_shadow_files_threshold")]
-    pub skill_files_threshold: usize,
-    #[serde(default = "default_shadow_tool_threshold")]
-    pub skill_tool_threshold: usize,
 }
 
 impl Default for ShadowSection {
@@ -43,8 +39,6 @@ impl Default for ShadowSection {
             memory_reasoning: default_shadow_reasoning(),
             memory_model: String::new(),
             memory_deadline_secs: default_shadow_deadline_secs(),
-            skill_files_threshold: default_shadow_files_threshold(),
-            skill_tool_threshold: default_shadow_tool_threshold(),
         }
     }
 }
@@ -61,13 +55,6 @@ fn default_shadow_reasoning() -> String {
 fn default_shadow_deadline_secs() -> u64 {
     120
 }
-fn default_shadow_files_threshold() -> usize {
-    2
-}
-fn default_shadow_tool_threshold() -> usize {
-    5
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerConfig {
     #[serde(default = "default_scheduler_enabled")]

@@ -68,17 +68,15 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ## `[shadow]` — 后台蒸馏配置
 
-控制后台记忆蒸馏和技能蒸馏模块的行为。当 `enabled = false` 时，整个 shadow 子系统不会运行。
+控制后台记忆蒸馏模块的行为。当 `enabled = false` 时，整个 shadow 子系统不会运行。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用后台记忆/技能蒸馏 |
+| `enabled` | bool | `true` | 是否启用后台记忆蒸馏 |
 | `memory_min_user_chars` | usize | `40` | 触发记忆蒸馏的最小用户消息长度（字符数） |
 | `memory_reasoning` | String | `"low"` | 记忆蒸馏使用的推理深度 |
 | `memory_model` | String | `""` | 记忆蒸馏使用的模型。留空则跟随当前会话模型 |
 | `memory_deadline_secs` | u64 | `120` | 单次蒸馏超时时间（秒） |
-| `skill_files_threshold` | usize | `2` | 触发技能蒸馏的最小修改文件数 |
-| `skill_tool_threshold` | usize | `5` | 触发技能蒸馏的最小工具调用次数 |
 
 ---
 
@@ -140,8 +138,6 @@ memory_min_user_chars = 40               # 用户消息少于此字符数时不�
 memory_reasoning     = "low"
 memory_model         = ""                # 留空 = 跟随会话模型
 memory_deadline_secs = 120
-skill_files_threshold = 2                # 修改文件 >= 2 时触发技能蒸馏
-skill_tool_threshold  = 5                # 工具调用 >= 5 时触发技能蒸馏
 
 # --- 调度器 -----------------------------------------------------
 [scheduler]

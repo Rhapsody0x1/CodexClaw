@@ -51,7 +51,7 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 
 - **会话管理** &mdash; 前台/后台多会话并行，支持保存、恢复、导入系统 Codex 会话
 - **定时任务** &mdash; 内置 cron 调度器，支持提醒、Codex 执行、Shell 脚本和交互式多轮对话
-- **记忆蒸馏** &mdash; (实验性) 后台自动从对话中提取记忆和 Skill，注入后续 prompt
+- **记忆蒸馏** &mdash; (实验性) 后台自动从对话中提取记忆，注入后续 prompt
 - **审批流程** &mdash; Codex 执行敏感操作前通过 QQ 请求用户审批，支持按会话自动放行
 - **自更新** &mdash; 通过 QQ 发送 `/self-update` 即可拉取最新代码、编译并热替换
 

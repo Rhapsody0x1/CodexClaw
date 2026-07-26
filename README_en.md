@@ -51,7 +51,7 @@ Some other ramblings can be found in this [Blog](https://rhapsody0x1.github.io/p
 
 - **Session Management** &mdash; Parallel foreground/background multi-session support, with save, restore, and import of system Codex sessions
 - **Scheduled Tasks** &mdash; Built-in cron scheduler supporting reminders, Codex execution, shell scripts, and interactive multi-turn conversations
-- **Memory Distillation** &mdash; (Experimental) Automatic background extraction of memories and skills from conversations, injected into subsequent prompts
+- **Memory Distillation** &mdash; (Experimental) Automatic background extraction of memories from conversations, injected into subsequent prompts
 - **Approval Workflow** &mdash; Requests user approval via QQ before Codex executes sensitive operations, with per-session auto-approval support
 - **Self-Update** &mdash; Send `/self-update` via QQ to pull the latest code, compile, and hot-replace
 

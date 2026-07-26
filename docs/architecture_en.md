@@ -26,7 +26,7 @@ CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's majo
 | Capability                      | Description                                                                                      |
 | ------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Session Management              | Maintains independent session state per user, supports foreground/background session switching    |
-| Background Memory & Skill Distillation | Automatically extracts facts, insights, and skill information from conversation turns       |
+| Background Memory Distillation | Automatically extracts facts and insights from conversation turns                           |
 | Scheduled Tasks                 | Cron-like scheduling system supporting reminders, Codex tasks, and shell commands                 |
 | Self-Update                     | Automatically detects source file modifications made by Codex and triggers recompilation          |
 
@@ -67,7 +67,7 @@ CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's majo
 - `App` serves as the central dispatcher, coordinating command parsing, Codex execution, approval flows, and message sending.
 - `CodexExecutor` communicates with the long-lived codex app-server child process via JSON-RPC (stdio pipes).
 - `Scheduler` runs scheduled tasks independently and can send synthetic messages through `App`.
-- `ShadowWorker` asynchronously extracts memories and skills in the background.
+- `ShadowWorker` asynchronously extracts memories in the background.
 
 ---
 
@@ -180,18 +180,8 @@ Background distillation module.
 | --------- | ---------------------------------------------------- |
 | mod.rs    | `ShadowWorker`, FIFO deduplication by openid         |
 | memory.rs | Extracts facts and insights from conversation turns  |
-| skill.rs  | Extracts skill information from modified files       |
-| prompt.rs | Prompts for memory/skill synthesis                   |
+| prompt.rs | Prompts for memory synthesis                         |
 | runner.rs | One-shot Codex invocations for shadow tasks          |
-
-### src/skills/ -- Skill Discovery
-
-Skill discovery module.
-
-| File      | Responsibility                               |
-| --------- | -------------------------------------------- |
-| index.rs  | Filesystem skill scanning with caching       |
-| writer.rs | Writes `SKILL.md` files                      |
 
 ### Other Files
 
@@ -224,7 +214,7 @@ QQ WebSocket event
   -> PassiveTurnEmitter streams updates to QQ
   -> Parse qqbot directives in output (images/files)
   -> Send directive attachments via QQ API
-  -> ShadowWorker asynchronously launches background memory/skill extraction
+  -> ShadowWorker asynchronously launches background memory extraction
   -> Release busy lock
 ```
 

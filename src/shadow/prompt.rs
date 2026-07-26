@@ -1,53 +1,5 @@
 const MEMORY_SUMMARY_PREFIX_CHARS: usize = 60;
 
-const SKILL_DISTILL_PROMPT: &str = "\
-你是 codex-claw 的 Skill 蒸馏助手。下面是最近一个 turn 的对话，目标是判断是否值得为以后类似任务固化一个 Skill。\n\
-\n\
-**只产出 JSON**，schema：\n\
-{\n\
-  \"action\": \"none\" | \"create\",\n\
-  \"name\": \"短横线命名\",\n\
-  \"description\": \"一句话描述，≤ 140 字符\",\n\
-  \"body\": \"Markdown 正文（操作手册风格）\"\n\
-}\n\
-\n\
-创建门槛：\n\
-- 任务是多步、可复用、在未来大概率重复出现的工作流。\n\
-- 一次性的调试、沟通、琐碎问答 → action=none。\n\
-- 正文要像操作手册：触发条件、步骤、易错点，不要复述对话。\n\
-- 如果与已有 claw-skill 高度重合，action=none。\n\
-\n\
-已有 claw-skill 列表（若类似，直接 action=none）：\n\
-<existing>\n\
-{existing_claw_skills}\n\
-</existing>\n\
-\n\
-<last_turn>\n\
-<user>{last_user}</user>\n\
-<assistant>{last_assistant}</assistant>\n\
-</last_turn>\n\
-";
-
-pub(crate) fn render_skill_prompt(
-    existing_claw_skills: &[(String, String)],
-    last_user: &str,
-    last_assistant: &str,
-) -> String {
-    let existing = if existing_claw_skills.is_empty() {
-        "(none)".to_string()
-    } else {
-        existing_claw_skills
-            .iter()
-            .map(|(n, d)| format!("- {n}: {d}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    SKILL_DISTILL_PROMPT
-        .replace("{existing_claw_skills}", &existing)
-        .replace("{last_user}", last_user.trim())
-        .replace("{last_assistant}", last_assistant.trim())
-}
-
 const MEMORY_DISTILL_PROMPT: &str = "\
 你是 codex-claw 的记忆蒸馏助手。刚刚结束了一个 turn，下面给你最近一段对话与当前已有记忆摘要。\n\
 \n\
@@ -144,23 +96,5 @@ mod tests {
         let s = summarize_entries(&["a".to_string(), "b".to_string()]);
         assert!(s.contains("1. a"));
         assert!(s.contains("2. b"));
-    }
-
-    #[test]
-    fn render_skill_prompt_substitutes_all_placeholders() {
-        let existing = vec![("foo".to_string(), "bar".to_string())];
-        let out = render_skill_prompt(&existing, "question", "answer");
-        assert!(!out.contains("{existing_claw_skills}"));
-        assert!(!out.contains("{last_user}"));
-        assert!(!out.contains("{last_assistant}"));
-        assert!(out.contains("foo: bar"));
-        assert!(out.contains("question"));
-        assert!(out.contains("answer"));
-    }
-
-    #[test]
-    fn render_skill_prompt_empty_existing_shows_none_marker() {
-        let out = render_skill_prompt(&[], "u", "a");
-        assert!(out.contains("(none)"));
     }
 }

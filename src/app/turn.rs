@@ -372,8 +372,7 @@ impl App {
                 tool_call_count: dispatch_report.tool_call_count,
                 modified_file_count: output.changed_files.len(),
             };
-            worker.spawn_memory(ctx.clone());
-            worker.spawn_skill(ctx);
+            worker.spawn_memory(ctx);
         }
         if self_update::changed_self_repo(
             workspace_dir,
