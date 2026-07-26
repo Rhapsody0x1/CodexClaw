@@ -1519,25 +1519,23 @@ async fn handle_resume(
     // Try project selector first (if we have a recent projects view), otherwise
     // fall back to session selector (legacy one-shot behavior).
     let projects_view = session.last_projects_view(openid).await?;
-    if !projects_view.is_empty() {
-        if let Ok(project_key) = resolve_project_selector(selector, &projects_view, lang.as_str()) {
-            let page = args
-                .get(1)
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            return interactive::enter_resume_sessions_prompt(
-                openid,
-                session,
-                project_key,
-                page,
-                lang.as_str(),
-            )
-            .await;
-        }
+    if !projects_view.is_empty()
+        && let Ok(project_key) = resolve_project_selector(selector, &projects_view, lang.as_str())
+    {
+        let page = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        return interactive::enter_resume_sessions_prompt(
+            openid,
+            session,
+            project_key,
+            page,
+            lang.as_str(),
+        )
+        .await;
     }
-    let sessions = session
-        .list_disk_sessions(openid, SessionListScope::All)
-        .await?;
+    let sessions = session.list_disk_sessions(SessionListScope::All).await?;
     let target = resolve_selector(
         selector,
         &sessions,
@@ -1566,26 +1564,24 @@ async fn handle_loadbg(
     }
     let selector = args[0];
     let projects_view = session.last_projects_view(openid).await?;
-    if !projects_view.is_empty() {
-        if let Ok(project_key) = resolve_project_selector(selector, &projects_view, lang.as_str()) {
-            let page = args
-                .get(1)
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            return interactive::enter_loadbg_sessions_prompt(
-                openid,
-                session,
-                project_key,
-                page,
-                None,
-                lang.as_str(),
-            )
-            .await;
-        }
+    if !projects_view.is_empty()
+        && let Ok(project_key) = resolve_project_selector(selector, &projects_view, lang.as_str())
+    {
+        let page = args
+            .get(1)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        return interactive::enter_loadbg_sessions_prompt(
+            openid,
+            session,
+            project_key,
+            page,
+            None,
+            lang.as_str(),
+        )
+        .await;
     }
-    let sessions = session
-        .list_disk_sessions(openid, SessionListScope::All)
-        .await?;
+    let sessions = session.list_disk_sessions(SessionListScope::All).await?;
     let target = resolve_selector(
         selector,
         &sessions,
@@ -1672,7 +1668,7 @@ async fn handle_sessions(
         } else {
             parse_scope(args[0], lang.as_str())?
         };
-        let sessions = session.list_disk_sessions(openid, scope).await?;
+        let sessions = session.list_disk_sessions(scope).await?;
         let projects = collect_projects(&sessions);
         let (text, project_keys) = format_projects_list(&projects, lang.as_str());
         let has_projects = !project_keys.is_empty();
@@ -1697,7 +1693,7 @@ async fn handle_sessions(
         lang.as_str(),
     )?;
     let (scope, project_path) = decode_project_key(&project_key)?;
-    let all_sessions = session.list_disk_sessions(openid, scope).await?;
+    let all_sessions = session.list_disk_sessions(scope).await?;
     let sessions = all_sessions
         .into_iter()
         .filter(|item| item.cwd.display().to_string() == project_path)
@@ -1842,7 +1838,7 @@ async fn handle_stop(
     let result = session.stop_foreground(openid).await?;
     let summary = if let Some(alias) = result.restored_alias.as_deref() {
         let snapshot = session.snapshot_for_user(openid).await?;
-        let preview = foreground_last_user_message(session, openid, &snapshot).await?;
+        let preview = foreground_last_user_message(session, &snapshot).await?;
         let prefix_key = if !result.had_session {
             None
         } else if result.saved {
@@ -2021,15 +2017,12 @@ fn format_tokens_compact(value: u64) -> String {
 
 async fn foreground_last_user_message(
     session: &SessionStore,
-    openid: &str,
     snapshot: &UserSessionState,
 ) -> Result<Option<String>> {
     let Some(session_id) = snapshot.foreground.session_id.as_deref() else {
         return Ok(None);
     };
-    let sessions = session
-        .list_disk_sessions(openid, SessionListScope::All)
-        .await?;
+    let sessions = session.list_disk_sessions(SessionListScope::All).await?;
     Ok(sessions
         .into_iter()
         .find(|item| item.id == session_id)
@@ -3254,9 +3247,7 @@ mod interactive {
         session: &SessionStore,
         locale: &str,
     ) -> Result<CommandOutcome> {
-        let sessions = session
-            .list_disk_sessions(openid, SessionListScope::All)
-            .await?;
+        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let projects = collect_projects(&sessions);
         let (text, project_keys) = format_projects_list(&projects, locale);
         let has_projects = !project_keys.is_empty();
@@ -3278,7 +3269,7 @@ mod interactive {
         locale: &str,
     ) -> Result<CommandOutcome> {
         let (scope, project_path) = decode_project_key(&project_key)?;
-        let all_sessions = session.list_disk_sessions(openid, scope).await?;
+        let all_sessions = session.list_disk_sessions(scope).await?;
         let project_sessions = all_sessions
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
@@ -3300,9 +3291,7 @@ mod interactive {
         session: &SessionStore,
         locale: &str,
     ) -> Result<CommandOutcome> {
-        let sessions = session
-            .list_disk_sessions(openid, SessionListScope::All)
-            .await?;
+        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let projects = collect_projects(&sessions);
         let (text, project_keys) = format_projects_list(&projects, locale);
         let has_projects = !project_keys.is_empty();
@@ -3325,7 +3314,7 @@ mod interactive {
         locale: &str,
     ) -> Result<CommandOutcome> {
         let (scope, project_path) = decode_project_key(&project_key)?;
-        let all_sessions = session.list_disk_sessions(openid, scope).await?;
+        let all_sessions = session.list_disk_sessions(scope).await?;
         let project_sessions = all_sessions
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
@@ -3358,7 +3347,7 @@ mod interactive {
     ) -> Result<CommandOutcome> {
         let switched = session.foreground_from_background(openid, alias).await?;
         let snapshot = session.snapshot_for_user(openid).await?;
-        let preview = foreground_last_user_message(session, openid, &snapshot).await?;
+        let preview = foreground_last_user_message(session, &snapshot).await?;
         let parked = switched
             .parked_alias
             .map(|value| {
@@ -3839,7 +3828,7 @@ mod interactive {
                 }
             };
         let (scope, project_path) = decode_project_key(&project_key)?;
-        let all_sessions = session.list_disk_sessions(openid, scope).await?;
+        let all_sessions = session.list_disk_sessions(scope).await?;
         let sessions = all_sessions
             .into_iter()
             .filter(|item| item.cwd.display().to_string() == project_path)
@@ -4019,9 +4008,7 @@ mod interactive {
             .settings
             .language
             .clone();
-        let sessions = session
-            .list_disk_sessions(openid, SessionListScope::All)
-            .await?;
+        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let last_view = session.last_sessions_view(openid).await?;
         let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
             Ok(value) => value,
@@ -4078,9 +4065,7 @@ mod interactive {
             .settings
             .language
             .clone();
-        let sessions = session
-            .list_disk_sessions(openid, SessionListScope::All)
-            .await?;
+        let sessions = session.list_disk_sessions(SessionListScope::All).await?;
         let last_view = session.last_sessions_view(openid).await?;
         let target = match resolve_selector(text.trim(), &sessions, &last_view, locale.as_str()) {
             Ok(value) => value,
@@ -4248,15 +4233,10 @@ mod tests {
     async fn resume_recovery_retry_enters_retry_outcome_and_clears_pending() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_pending_setting("u1", Some(PendingSetting::ResumeRecovery))
             .await
@@ -4282,15 +4262,10 @@ mod tests {
     async fn new_command_keeps_settings() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread".into()))
             .await
@@ -4323,15 +4298,10 @@ mod tests {
     async fn new_command_accepts_manual_workspace() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace_root = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace_root.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         let outcome = maybe_handle_command(
             "/new custom folder",
             "u1",
@@ -4358,15 +4328,10 @@ mod tests {
     async fn new_command_reports_effective_runtime_settings() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .update_settings_for_user("u1", |state| {
                 state.model_override = Some("ignored-legacy".into());
@@ -4397,7 +4362,6 @@ mod tests {
     async fn resume_command_reports_profile_and_last_user_message_preview() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_dir = global_home.path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         fs::write(
@@ -4410,14 +4374,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let outcome = maybe_handle_command(
             "/resume thread-1",
@@ -4441,15 +4401,10 @@ mod tests {
     async fn stop_command_restores_most_recent_background_dialog() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .bind_foreground_session_profile(
                 "u1",
@@ -4511,15 +4466,10 @@ mod tests {
     async fn stop_command_ends_session() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread".into()))
             .await
@@ -4543,15 +4493,10 @@ mod tests {
     async fn interrupt_command_does_not_end_session() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread".into()))
             .await
@@ -4575,15 +4520,10 @@ mod tests {
     async fn busy_profile_commands_do_not_mutate_saved_foreground_profile() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         let original = DialogProfile {
             model_override: Some("gpt-original".into()),
             reasoning_effort: Some(ReasoningEffort::Low),
@@ -4625,15 +4565,10 @@ mod tests {
     async fn compact_command_routes_to_manual_compaction() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let outcome = maybe_handle_command(
             "/compact",
@@ -4664,7 +4599,6 @@ mod tests {
     async fn sessions_command_supports_project_then_session_view() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_dir = global_home.path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         fs::write(
@@ -4673,14 +4607,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread-a".into()))
             .await
@@ -4723,15 +4653,10 @@ mod tests {
     async fn lang_switch_affects_help_output() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         // Default (en) help
         let outcome = maybe_handle_command(
@@ -4792,15 +4717,10 @@ mod tests {
     async fn alias_add_and_expand_executes_each_step() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let add_out = maybe_handle_command(
             "/alias add expert /model gpt-5.4 | /reasoning xhigh | /verbose on",
@@ -4891,15 +4811,10 @@ mod tests {
     async fn alias_names_are_normalized_to_lowercase() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let add_out = maybe_handle_command(
             "/alias add Expert /verbose on",
@@ -4941,15 +4856,10 @@ mod tests {
     async fn lang_switch_affects_foreground_switch_messages() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread".into()))
             .await
@@ -4995,15 +4905,10 @@ mod tests {
     async fn alias_recursion_capped_at_max_depth() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         // Three-step recursion chain: a -> b -> c -> a (cycle)
         for (name, step) in [("a", "/b"), ("b", "/c"), ("c", "/a")] {
@@ -5040,15 +4945,10 @@ mod tests {
     async fn model_empty_args_enters_interactive_prompt() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let outcome = maybe_handle_command(
             "/model",
@@ -5081,15 +4981,10 @@ mod tests {
     async fn model_prompt_keeps_hint_out_of_markdown_sublist() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .update_settings_for_user("u1", |state| {
                 state.language = "zh".into();
@@ -5122,15 +5017,10 @@ mod tests {
     async fn pending_model_fuzzy_match_applies_and_clears() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let _ = maybe_handle_command(
             "/model",
@@ -5193,15 +5083,10 @@ mod tests {
     async fn busy_pending_profile_input_does_not_apply_or_clear_picker() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         let original = DialogProfile {
             model_override: Some("gpt-original".into()),
             reasoning_effort: Some(ReasoningEffort::Low),
@@ -5256,15 +5141,10 @@ mod tests {
     async fn back_exits_pending_and_reports_idle_otherwise() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         // idle /back → "not in any interactive setting"
         let outcome = maybe_handle_command(
@@ -5331,15 +5211,10 @@ mod tests {
     async fn other_command_during_pending_clears_and_prefixes() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let _ = maybe_handle_command(
             "/model",
@@ -5383,15 +5258,10 @@ mod tests {
     async fn status_uses_context_window_remaining_format() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_usage(
                 "u1",
@@ -5432,15 +5302,10 @@ mod tests {
     async fn status_hides_implausible_legacy_cumulative_usage() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_usage(
                 "u1",
@@ -5480,15 +5345,10 @@ mod tests {
     async fn chinese_command_aliases_route_correctly() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         // /模型 should enter the same interactive Model pending as /model.
         let outcome = maybe_handle_command(
@@ -5563,15 +5423,10 @@ mod tests {
     async fn reasoning_prompt_uses_supported_values_and_aliases() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .update_settings_for_user("u1", |state| {
                 state.language = "zh".into();
@@ -5607,15 +5462,10 @@ mod tests {
     async fn reasoning_prompt_uses_compact_three_line_layout() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .update_settings_for_user("u1", |state| {
                 state.language = "zh".into();
@@ -5648,15 +5498,10 @@ mod tests {
     async fn pending_reasoning_alias_applies_supported_value() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let _ = maybe_handle_command(
             "/reasoning",
@@ -5691,15 +5536,10 @@ mod tests {
     async fn direct_fast_and_context_commands_accept_chinese_aliases() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         let fast = maybe_handle_command(
             "/fast 开",
@@ -5738,15 +5578,10 @@ mod tests {
     async fn fg_prompt_keeps_hint_out_of_markdown_sublist() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .set_foreground_session_id("u1", Some("thread".into()))
             .await
@@ -5792,15 +5627,10 @@ mod tests {
     async fn help_groups_commands_in_requested_order() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
         session
             .update_settings_for_user("u1", |state| {
                 state.language = "zh".into();
@@ -5907,15 +5737,10 @@ mod tests {
     async fn help_entry_rendered_in_active_language_only() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let session = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let session =
+            SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+                .await
+                .unwrap();
 
         // English: /help should show English command names, no Chinese.
         let outcome = maybe_handle_command(

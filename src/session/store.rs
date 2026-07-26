@@ -88,7 +88,6 @@ impl SessionStore {
         data_dir: &Path,
         global_codex_home: &Path,
         system_codex_home: &Path,
-        _default_workspace_dir: &Path,
     ) -> Result<Self> {
         let root = data_dir.join("session");
         let attachment_workspace_dir = root.join("workspace");
@@ -822,7 +821,6 @@ impl SessionStore {
 
     pub async fn list_disk_sessions(
         &self,
-        _openid: &str,
         scope: SessionListScope,
     ) -> Result<Vec<DiskSessionMeta>> {
         // scan_home_sessions recursively walks the sessions dir and reads every
@@ -848,13 +846,13 @@ impl SessionStore {
                 true
             }
         });
-        values.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        values.sort_by_key(|value| std::cmp::Reverse(value.updated_at));
         Ok(values)
     }
 
     pub fn list_importable_sessions(&self) -> Result<Vec<DiskSessionMeta>> {
         let mut values = scan_home_sessions(&self.system_codex_home)?;
-        values.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        values.sort_by_key(|value| std::cmp::Reverse(value.updated_at));
         Ok(values)
     }
 
@@ -1851,14 +1849,9 @@ mod tests {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let job = sample_cron_job("job-1", workspace.path().join("cron-workspace"));
 
         store.upsert_cron_job(job.clone()).await.unwrap();
@@ -1891,14 +1884,9 @@ mod tests {
             .await
             .unwrap();
 
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
 
         assert_eq!(store.get_cron_job("legacy-job").await.unwrap(), Some(job));
         let jobs_path = data.path().join("scheduler/jobs.json");
@@ -1913,14 +1901,9 @@ mod tests {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let job = sample_cron_job("job-keep", workspace.path().join("cron-workspace"));
         store.upsert_cron_job(job.clone()).await.unwrap();
 
@@ -1944,14 +1927,9 @@ mod tests {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let mut job = sample_cron_job("job-update", workspace.path().join("cron-workspace"));
         job.title = "original title".to_string();
         store.upsert_cron_job(job).await.unwrap();
@@ -1982,15 +1960,9 @@ mod tests {
     async fn moves_foreground_to_background_with_generated_alias() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
@@ -2015,15 +1987,9 @@ mod tests {
     async fn bind_if_matches_applies_only_while_foreground_unchanged() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
 
         // Foreground unchanged since the turn started: the binding lands,
         // profile included.
@@ -2107,15 +2073,9 @@ mod tests {
     async fn supports_multiple_background_dialogs() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
@@ -2146,15 +2106,9 @@ mod tests {
     async fn stop_foreground_restores_most_recent_background_dialog() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
 
         store
             .bind_foreground_session_profile(
@@ -2220,15 +2174,9 @@ mod tests {
     async fn new_foreground_reuses_shared_workspace() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let before = store.snapshot_for_user("u1").await.unwrap();
         let old_workspace = before.foreground.workspace_dir.clone();
         assert!(old_workspace.exists());
@@ -2246,15 +2194,9 @@ mod tests {
     async fn new_foreground_keeps_non_empty_temporary_workspace() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let before = store.snapshot_for_user("u1").await.unwrap();
         let old_workspace = before.foreground.workspace_dir.clone();
         std::fs::write(old_workspace.join("note.txt"), "keep").unwrap();
@@ -2269,14 +2211,9 @@ mod tests {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
         let workspace_root = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace_root.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let requested = workspace_root.path().join("manual workspace");
 
         let switched = store
@@ -2297,15 +2234,9 @@ mod tests {
     async fn temporary_dialog_settings_update_global_defaults() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
 
         store
             .set_model_override_for_active("u1", Some("gpt-global".into()))
@@ -2340,15 +2271,9 @@ mod tests {
     async fn non_temporary_dialog_settings_bind_to_session_profile() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .update_settings_for_user("u1", |settings| {
                 settings.model_override = Some("gpt-global".into());
@@ -2431,14 +2356,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .update_settings_for_user("u1", |settings| {
                 settings.model_override = Some("gpt-global".into());
@@ -2481,7 +2401,6 @@ mod tests {
     async fn resume_local_session_extracts_profile_and_last_user_message() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_dir = global_home.path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         let rollout = session_dir.join("rollout-2026-04-11T00-00-00-thread-local.jsonl");
@@ -2496,17 +2415,12 @@ mod tests {
         .await
         .unwrap();
 
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
 
         let sessions = store
-            .list_disk_sessions("u1", SessionListScope::All)
+            .list_disk_sessions(SessionListScope::All)
             .await
             .unwrap();
         assert_eq!(
@@ -2526,7 +2440,6 @@ mod tests {
     async fn stop_drops_unsaved_local_session() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_path = global_home.path().join("sessions/2026/04/11");
         tokio::fs::create_dir_all(&session_path).await.unwrap();
         tokio::fs::write(
@@ -2535,14 +2448,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
@@ -2563,19 +2471,13 @@ mod tests {
         // stored thread id can be resumed on the next run.
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_path = global_home.path().join("sessions/2026/04/11");
         tokio::fs::create_dir_all(&session_path).await.unwrap();
         let rollout = session_path.join("rollout-2026-04-11T00-00-00-thread-keep.jsonl");
         tokio::fs::write(&rollout, "{}").await.unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         store
             .set_foreground_session_id("u1", Some("thread-keep".into()))
             .await
@@ -2594,15 +2496,9 @@ mod tests {
     async fn stop_keeps_shared_workspace_for_unsaved_temporary_dialog() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let before = store.snapshot_for_user("u1").await.unwrap();
         let old_workspace = before.foreground.workspace_dir.clone();
         assert!(old_workspace.exists());
@@ -2620,7 +2516,6 @@ mod tests {
     async fn legacy_scope_aliases_map_to_all_sessions() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_path = global_home.path().join("sessions/2026/04/11");
         tokio::fs::create_dir_all(&session_path).await.unwrap();
         tokio::fs::write(
@@ -2629,16 +2524,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let sessions = store
-            .list_disk_sessions("u1", SessionListScope::Local)
+            .list_disk_sessions(SessionListScope::Local)
             .await
             .unwrap();
         assert_eq!(sessions.len(), 1);
@@ -2649,7 +2539,6 @@ mod tests {
     async fn local_and_global_scopes_are_legacy_aliases() {
         let data = tempdir().unwrap();
         let global_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_path = global_home.path().join("sessions/2026/04/11");
         tokio::fs::create_dir_all(&session_path).await.unwrap();
         tokio::fs::write(
@@ -2664,24 +2553,19 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = SessionStore::load_or_init(
-            data.path(),
-            global_home.path(),
-            global_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
+            .await
+            .unwrap();
         let all = store
-            .list_disk_sessions("u1", SessionListScope::All)
+            .list_disk_sessions(SessionListScope::All)
             .await
             .unwrap();
         let local = store
-            .list_disk_sessions("u1", SessionListScope::Local)
+            .list_disk_sessions(SessionListScope::Local)
             .await
             .unwrap();
         let global = store
-            .list_disk_sessions("u1", SessionListScope::Global)
+            .list_disk_sessions(SessionListScope::Global)
             .await
             .unwrap();
         assert_eq!(local.len(), all.len());
@@ -2693,7 +2577,6 @@ mod tests {
         let data = tempdir().unwrap();
         let system_home = tempdir().unwrap();
         let claw_home = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let session_dir = system_home.path().join("sessions/2026/04/11");
         fs::create_dir_all(&session_dir).await.unwrap();
         let rollout = session_dir.join("rollout-2026-04-11T00-00-00-thread-import.jsonl");
@@ -2707,14 +2590,9 @@ mod tests {
         .await
         .unwrap();
 
-        let store = SessionStore::load_or_init(
-            data.path(),
-            claw_home.path(),
-            system_home.path(),
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let store = SessionStore::load_or_init(data.path(), claw_home.path(), system_home.path())
+            .await
+            .unwrap();
 
         let importable = store.list_importable_sessions().unwrap();
         assert_eq!(importable.len(), 1);

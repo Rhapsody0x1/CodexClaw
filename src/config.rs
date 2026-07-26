@@ -205,7 +205,7 @@ impl AppConfig {
         let path = std::env::var("CODEX_CLAW_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("codexclaw.toml"));
-        if !path.exists() && path == PathBuf::from("codexclaw.toml") {
+        if !path.exists() && path == *"codexclaw.toml" {
             let fallback = default_codex_claw_root().join("codexclaw.toml");
             if fallback.exists() {
                 return Self::load_from_path(&fallback);

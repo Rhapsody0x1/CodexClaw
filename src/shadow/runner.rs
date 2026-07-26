@@ -19,12 +19,11 @@ pub fn extract_agent_messages_from_lines<I: IntoIterator<Item = String>>(lines: 
         let Ok(event) = serde_json::from_str::<CodexEvent>(trimmed) else {
             continue;
         };
-        if let CodexEvent::ItemCompleted { item } = event {
-            if item.item_type == "agent_message" {
-                if let Some(text) = item.text {
-                    parts.push(text);
-                }
-            }
+        if let CodexEvent::ItemCompleted { item } = event
+            && item.item_type == "agent_message"
+            && let Some(text) = item.text
+        {
+            parts.push(text);
         }
     }
     parts.join("\n")

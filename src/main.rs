@@ -73,7 +73,6 @@ async fn run_bot(config: AppConfig) -> Result<()> {
             &config.general.data_dir,
             &config.general.codex_home_global,
             &config.general.system_codex_home,
-            &config.general.default_workspace_dir,
         )
         .await?,
     );

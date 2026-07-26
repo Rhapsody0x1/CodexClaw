@@ -417,10 +417,10 @@ impl QqApiClient {
 
     pub async fn get_access_token(&self) -> Result<String> {
         let mut cache = self.token_cache.lock().await;
-        if let Some(current) = cache.as_ref() {
-            if current.expires_at > std::time::Instant::now() + Duration::from_secs(60) {
-                return Ok(current.value.clone());
-            }
+        if let Some(current) = cache.as_ref()
+            && current.expires_at > std::time::Instant::now() + Duration::from_secs(60)
+        {
+            return Ok(current.value.clone());
         }
         let response = self
             .client

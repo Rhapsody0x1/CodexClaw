@@ -85,11 +85,11 @@ pub fn translate_item_completed(
     trace!(item_type = %item.item_type, "item/completed");
     let item_type = item.item_type.as_str();
     if item_type == "agent_message" {
-        if let Some(text) = item.text.clone() {
-            if !text.is_empty() {
-                state.agent_text_parts.push(text.clone());
-                return vec![ExecutionUpdate::AgentMessage { text }];
-            }
+        if let Some(text) = item.text.clone()
+            && !text.is_empty()
+        {
+            state.agent_text_parts.push(text.clone());
+            return vec![ExecutionUpdate::AgentMessage { text }];
         }
         return Vec::new();
     }
@@ -361,10 +361,10 @@ fn step_to_entry(step: &TurnPlanStep) -> Option<TodoEntry> {
 }
 
 fn derive_item_text(p: &ItemPayload) -> Option<String> {
-    if let Some(t) = p.text.clone() {
-        if !t.is_empty() {
-            return Some(t);
-        }
+    if let Some(t) = p.text.clone()
+        && !t.is_empty()
+    {
+        return Some(t);
     }
     // For reasoning items, text may be in `content` / `summary`.
     if p.item_type == "reasoning" {
@@ -379,10 +379,9 @@ fn derive_item_text(p: &ItemPayload) -> Option<String> {
             } else {
                 v.as_str().map(str::to_owned)
             }
-        }) {
-            if !content.is_empty() {
-                return Some(content);
-            }
+        }) && !content.is_empty()
+        {
+            return Some(content);
         }
         if let Some(summary) = p.summary.as_ref().and_then(|v| {
             if let Some(arr) = v.as_array() {
@@ -395,10 +394,9 @@ fn derive_item_text(p: &ItemPayload) -> Option<String> {
             } else {
                 v.as_str().map(str::to_owned)
             }
-        }) {
-            if !summary.is_empty() {
-                return Some(summary);
-            }
+        }) && !summary.is_empty()
+        {
+            return Some(summary);
         }
     }
     None

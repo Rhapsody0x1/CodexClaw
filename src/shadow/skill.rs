@@ -103,10 +103,10 @@ fn extract_json_block(raw: &str) -> String {
     if let Some(fenced) = strip_fenced(trimmed) {
         return fenced.to_string();
     }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        if start < end {
-            return trimmed[start..=end].to_string();
-        }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+    {
+        return trimmed[start..=end].to_string();
     }
     trimmed.to_string()
 }

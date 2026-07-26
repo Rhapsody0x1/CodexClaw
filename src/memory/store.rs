@@ -128,10 +128,10 @@ impl MemoryStore {
         let current = self.current_version(openid);
         {
             let cache = self.cache.lock().expect("cache mutex poisoned");
-            if let Some(entry) = cache.get(openid) {
-                if entry.version == current {
-                    return Ok(entry.snapshot.clone());
-                }
+            if let Some(entry) = cache.get(openid)
+                && entry.version == current
+            {
+                return Ok(entry.snapshot.clone());
             }
         }
         let memory = load_entries(&self.path_for(openid, MemoryKind::Memory))?;

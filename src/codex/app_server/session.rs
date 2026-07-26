@@ -775,10 +775,10 @@ impl TurnRunner {
                 }
             }
             method::MODEL_REROUTED => {
-                if let Ok(p) = serde_json::from_value::<ModelReroutedNotification>(params.clone()) {
-                    if let Some(update) = translator::translate_model_rerouted(&p) {
-                        self.emit(update);
-                    }
+                if let Ok(p) = serde_json::from_value::<ModelReroutedNotification>(params.clone())
+                    && let Some(update) = translator::translate_model_rerouted(&p)
+                {
+                    self.emit(update);
                 }
             }
             method::ERROR => {

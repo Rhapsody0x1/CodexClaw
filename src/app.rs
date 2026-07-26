@@ -133,7 +133,7 @@ impl App {
         let reply_id = ctx.reply_message_id.clone();
         match request {
             ApprovalRequest::Command { event, reply } => {
-                let prompt = format_command_approval(&event, &openid);
+                let prompt = format_command_approval(&event);
                 self.enqueue_outcome(openid.clone(), reply_id, prompt, reply)
                     .await;
             }
@@ -525,14 +525,14 @@ impl App {
         *self.active_openid.lock().await = None;
         {
             let mut guard = self.pending_approvals.lock().await;
-            if let Some(queue) = guard.remove(&openid_for_cleanup) {
-                if !queue.is_empty() {
-                    debug!(
-                        openid = %openid_for_cleanup,
-                        dropped = queue.len(),
-                        "dropping pending approvals after turn completion"
-                    );
-                }
+            if let Some(queue) = guard.remove(&openid_for_cleanup)
+                && !queue.is_empty()
+            {
+                debug!(
+                    openid = %openid_for_cleanup,
+                    dropped = queue.len(),
+                    "dropping pending approvals after turn completion"
+                );
             }
         }
         self.busy.store(false, Ordering::SeqCst);
@@ -850,26 +850,26 @@ impl App {
                 // Plan-mode post-turn: if the planning turn produced a
                 // `<proposed_plan>` block, stash it + prompt the user to
                 // approve it via `/实施`.
-                if effective_settings.plan_mode {
-                    if let Some(plan) = extract_proposed_plan(&output.text) {
-                        let _ = self
-                            .session
-                            .update_settings_for_user(&message.sender_openid, |settings| {
-                                settings.pending_plan = Some(plan.clone());
-                            })
-                            .await;
-                        let lang = effective_settings.language.as_str();
-                        let prompt = build_plan_followup_prompt(lang);
-                        let _ = self
-                            .qq_client
-                            .send_text(
-                                &message.sender_openid,
-                                &message.message_id,
-                                &prompt,
-                                Some(&message.message_id),
-                            )
-                            .await;
-                    }
+                if effective_settings.plan_mode
+                    && let Some(plan) = extract_proposed_plan(&output.text)
+                {
+                    let _ = self
+                        .session
+                        .update_settings_for_user(&message.sender_openid, |settings| {
+                            settings.pending_plan = Some(plan.clone());
+                        })
+                        .await;
+                    let lang = effective_settings.language.as_str();
+                    let prompt = build_plan_followup_prompt(lang);
+                    let _ = self
+                        .qq_client
+                        .send_text(
+                            &message.sender_openid,
+                            &message.message_id,
+                            &prompt,
+                            Some(&message.message_id),
+                        )
+                        .await;
                 }
 
                 if let Some(worker) = self.shadow.as_ref() {
@@ -1411,8 +1411,7 @@ fn global_fast_label(service_tier: Option<ServiceTier>) -> &'static str {
 
 fn global_context_label(context_mode: Option<ContextMode>) -> &'static str {
     match context_mode {
-        Some(ContextMode::Standard) => "272K",
-        Some(ContextMode::OneM) => "1M",
+        Some(mode) => mode.label(),
         None => "inherit",
     }
 }
@@ -1438,7 +1437,7 @@ fn decline_approval_request(request: ApprovalRequest) {
     }
 }
 
-fn format_command_approval(event: &CommandApprovalEvent, _openid: &str) -> String {
+fn format_command_approval(event: &CommandApprovalEvent) -> String {
     let mut lines = vec!["[审批请求] Codex 想执行 shell 命令".to_string()];
     if let Some(cmd) = event.command.as_deref() {
         lines.push("命令：".to_string());
