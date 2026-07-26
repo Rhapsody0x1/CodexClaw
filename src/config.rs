@@ -135,6 +135,10 @@ pub struct GeneralConfig {
     pub codex_binary: String,
     #[serde(default = "default_model")]
     pub default_model: String,
+    /// IANA timezone every user-facing timestamp is rendered in (task
+    /// scheduling uses `scheduler.default_tz` instead).
+    #[serde(default = "default_display_timezone")]
+    pub timezone: String,
     #[serde(default)]
     pub default_reasoning_effort: ReasoningEffort,
     #[serde(default = "default_self_repo_dir")]
@@ -180,6 +184,7 @@ impl Default for GeneralConfig {
             default_workspace_dir: default_workspace_dir(),
             codex_binary: default_codex_binary(),
             default_model: default_model(),
+            timezone: default_display_timezone(),
             default_reasoning_effort: ReasoningEffort::default(),
             self_repo_dir: default_self_repo_dir(),
             self_build_command: default_self_build_command(),
@@ -219,6 +224,11 @@ impl AppConfig {
         anyhow::ensure!(
             !self.qq.app_secret.trim().is_empty(),
             "qq.app_secret must not be empty"
+        );
+        anyhow::ensure!(
+            self.general.timezone.parse::<chrono_tz::Tz>().is_ok(),
+            "general.timezone is not a valid IANA timezone: {}",
+            self.general.timezone
         );
         anyhow::ensure!(
             !self.general.self_build_command.trim().is_empty(),
@@ -300,6 +310,9 @@ fn default_codex_binary() -> String {
 
 fn default_model() -> String {
     "gpt-5.4".to_string()
+}
+fn default_display_timezone() -> String {
+    "Asia/Shanghai".to_string()
 }
 
 fn default_self_repo_dir() -> PathBuf {

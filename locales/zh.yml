@@ -1,3 +1,13 @@
+time:
+  just_now: "刚刚"
+  minutes_ago: "%{n} 分钟前"
+  hours_ago: "%{n} 小时前"
+  days_ago: "%{n} 天前"
+  date_same_year: "%{m}月%{d}日"
+  soon: "马上"
+  in_minutes: "%{n} 分钟后"
+  today_at: "今天 %{time}"
+  tomorrow_at: "明天 %{time}"
 commands:
   help:
     header: "# 命令指南"
@@ -147,6 +157,7 @@ commands:
     prompt_header: "可选值：low (低), medium (中), high (高), xhigh (超高), inherit (默认)"
 
   shared:
+    temp_workspace: "临时工作区"
     inherit_default: "继承默认"
     unknown: "unknown"
 

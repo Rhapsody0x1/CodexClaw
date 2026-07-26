@@ -50,6 +50,54 @@ pub(crate) fn search_path_dirs(
     dirs
 }
 
+/// Maximum rendered width of a path before middle-elision kicks in — about
+/// two QQ bubble lines of half-width columns.
+const FMT_PATH_MAX: usize = 38;
+
+/// User-facing rendering of a filesystem path: the shared temporary
+/// workspace shows as a localized label, `$HOME` collapses to `~`, and
+/// anything still longer than [`FMT_PATH_MAX`] keeps its head and tail
+/// components around a `…`.
+pub(crate) fn fmt_path(
+    path: &std::path::Path,
+    shared_workspace: &std::path::Path,
+    locale: &str,
+) -> String {
+    use rust_i18n::t;
+    if path.starts_with(shared_workspace) {
+        return t!("commands.shared.temp_workspace", locale = locale).into_owned();
+    }
+    let display = match home_dir() {
+        home if path.starts_with(&home) => {
+            let rest = path.strip_prefix(&home).unwrap_or(path);
+            if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            }
+        }
+        _ => path.display().to_string(),
+    };
+    if display.chars().count() <= FMT_PATH_MAX {
+        return display;
+    }
+    let parts: Vec<&str> = display
+        .split('/')
+        .filter(|p| !p.is_empty() || true)
+        .collect();
+    if parts.len() <= 3 {
+        return display;
+    }
+    let head = parts[..2.min(parts.len())].join("/");
+    let tail = parts[parts.len().saturating_sub(2)..].join("/");
+    let short = format!("{head}/…/{tail}");
+    if short.chars().count() < display.chars().count() {
+        short
+    } else {
+        display
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +136,23 @@ mod tests {
         let dirs = search_path_dirs(None, None, &[".cargo/bin"], &["/bin"]);
         assert_eq!(dirs, vec![PathBuf::from("/bin")]);
         assert!(search_path_dirs(None, None, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn fmt_path_labels_shared_workspace_and_collapses_home() {
+        let shared = std::path::PathBuf::from("/data/session/workspace");
+        assert_eq!(fmt_path(&shared.join("sub"), &shared, "zh"), "临时工作区");
+        let home = home_dir();
+        assert_eq!(
+            fmt_path(&home.join("dev/CodexClaw"), &shared, "zh"),
+            "~/dev/CodexClaw"
+        );
+        let deep = home.join("a/very/long/nested/path/that/keeps/going/forever/deep/dir");
+        let rendered = fmt_path(&deep, &shared, "zh");
+        assert!(
+            rendered.contains('…'),
+            "long paths middle-elide: {rendered}"
+        );
+        assert!(rendered.ends_with("deep/dir"));
     }
 }
