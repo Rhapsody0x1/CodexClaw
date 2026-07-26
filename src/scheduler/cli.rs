@@ -63,90 +63,8 @@ async fn add(
         .map(PathBuf::from)
         .unwrap_or_else(|| job_dir.join("workspace"));
     tokio::fs::create_dir_all(&workspace_dir).await?;
-    let kind = if one_shot {
-        let at = opts
-            .value("at")
-            .ok_or_else(|| anyhow!("once requires --at <RFC3339>"))?;
-        CronKind::OneShot {
-            at: parse_utc_strict(&at).with_context(|| format!("invalid --at `{at}`"))?,
-        }
-    } else {
-        let cron = opts
-            .value("cron")
-            .ok_or_else(|| anyhow!("add requires --cron"))?;
-        CronKind::Recurring {
-            cron: normalize_cron(&cron),
-            tz: opts
-                .value("tz")
-                .unwrap_or_else(|| config.scheduler.default_tz.clone()),
-        }
-    };
-    let action = match action_name.as_str() {
-        "reminder" => JobAction::Reminder {
-            message: opts
-                .value("message")
-                .or_else(|| {
-                    if prompt.trim().is_empty() {
-                        None
-                    } else {
-                        Some(prompt.clone())
-                    }
-                })
-                .ok_or_else(|| anyhow!("reminder action requires --message or --prompt"))?,
-        },
-        "shell" => JobAction::Shell {
-            program: opts
-                .value("program")
-                .ok_or_else(|| anyhow!("shell action requires --program"))?,
-            args: opts.values("arg"),
-            env: BTreeMap::new(),
-        },
-        "codex-exec" => JobAction::CodexExec {
-            prompt,
-            model: opts.value("model"),
-            extra_args: opts.values("extra-arg"),
-            env: BTreeMap::new(),
-        },
-        "codex-turn" => JobAction::CodexTurn {
-            prompt,
-            model: opts.value("model"),
-            session_state: None,
-            approval_policy: opts
-                .value("approval")
-                .as_deref()
-                .map(parse_approval_policy)
-                .transpose()?,
-            session_strategy: parse_session_strategy(
-                opts.value("session-strategy")
-                    .as_deref()
-                    .unwrap_or("per-invocation"),
-            )?,
-            interactive: if opts.flag("interactive") {
-                Some(store::InteractiveSpec {
-                    reply_ttl_secs: opts
-                        .value("reply-ttl")
-                        .as_deref()
-                        .map(str::parse)
-                        .transpose()
-                        .context("invalid --reply-ttl")?
-                        .unwrap_or(86_400),
-                    end_signal: opts
-                        .value("end-signal")
-                        .unwrap_or_else(|| "<<<CLAW_END>>>".to_string()),
-                    max_rounds_hard_cap: opts
-                        .value("max-rounds")
-                        .as_deref()
-                        .map(str::parse)
-                        .transpose()
-                        .context("invalid --max-rounds")?
-                        .unwrap_or(10),
-                })
-            } else {
-                None
-            },
-        },
-        other => return Err(anyhow!("unsupported --action `{other}`")),
-    };
+    let kind = parse_kind(&opts, one_shot, &config.scheduler.default_tz)?;
+    let action = parse_action(&opts, &action_name, prompt)?;
     let now = Utc::now();
     let mut job = CronJob {
         id,
@@ -308,6 +226,103 @@ async fn tail(session: &SessionStore, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `once` schedules a single run at `--at`; `add` a recurring one from
+/// `--cron` (5-field specs get a seconds column prepended) in `--tz`, falling
+/// back to the configured default timezone.
+fn parse_kind(opts: &Opts, one_shot: bool, default_tz: &str) -> Result<CronKind> {
+    if one_shot {
+        let at = opts
+            .value("at")
+            .ok_or_else(|| anyhow!("once requires --at <RFC3339>"))?;
+        Ok(CronKind::OneShot {
+            at: parse_utc_strict(&at).with_context(|| format!("invalid --at `{at}`"))?,
+        })
+    } else {
+        let cron = opts
+            .value("cron")
+            .ok_or_else(|| anyhow!("add requires --cron"))?;
+        Ok(CronKind::Recurring {
+            cron: normalize_cron(&cron),
+            tz: opts.value("tz").unwrap_or_else(|| default_tz.to_string()),
+        })
+    }
+}
+
+fn parse_action(opts: &Opts, action_name: &str, prompt: String) -> Result<JobAction> {
+    match action_name {
+        "reminder" => Ok(JobAction::Reminder {
+            message: opts
+                .value("message")
+                .or_else(|| {
+                    if prompt.trim().is_empty() {
+                        None
+                    } else {
+                        Some(prompt.clone())
+                    }
+                })
+                .ok_or_else(|| anyhow!("reminder action requires --message or --prompt"))?,
+        }),
+        "shell" => Ok(JobAction::Shell {
+            program: opts
+                .value("program")
+                .ok_or_else(|| anyhow!("shell action requires --program"))?,
+            args: opts.values("arg"),
+            env: BTreeMap::new(),
+        }),
+        "codex-exec" => Ok(JobAction::CodexExec {
+            prompt,
+            model: opts.value("model"),
+            extra_args: opts.values("extra-arg"),
+            env: BTreeMap::new(),
+        }),
+        "codex-turn" => Ok(JobAction::CodexTurn {
+            prompt,
+            model: opts.value("model"),
+            session_state: None,
+            approval_policy: opts
+                .value("approval")
+                .as_deref()
+                .map(parse_approval_policy)
+                .transpose()?,
+            session_strategy: parse_session_strategy(
+                opts.value("session-strategy")
+                    .as_deref()
+                    .unwrap_or("per-invocation"),
+            )?,
+            interactive: parse_interactive(opts)?,
+        }),
+        other => Err(anyhow!("unsupported --action `{other}`")),
+    }
+}
+
+/// `--interactive` opts a codex-turn job into the foreground-interaction
+/// protocol; the knobs default to the same values serde fills in when the
+/// fields are absent from a persisted `job.toml`.
+fn parse_interactive(opts: &Opts) -> Result<Option<store::InteractiveSpec>> {
+    if !opts.flag("interactive") {
+        return Ok(None);
+    }
+    Ok(Some(store::InteractiveSpec {
+        reply_ttl_secs: opts
+            .value("reply-ttl")
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .context("invalid --reply-ttl")?
+            .unwrap_or_else(store::default_reply_ttl_secs),
+        end_signal: opts
+            .value("end-signal")
+            .unwrap_or_else(store::default_end_signal),
+        max_rounds_hard_cap: opts
+            .value("max-rounds")
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .context("invalid --max-rounds")?
+            .unwrap_or_else(store::default_max_rounds_hard_cap),
+    }))
+}
+
 fn read_prompt_file(path: Option<String>) -> Result<String> {
     let Some(path) = path else {
         return Ok(String::new());
@@ -383,5 +398,226 @@ impl<'a> Opts<'a> {
     fn flag(&self, name: &str) -> bool {
         let needle = format!("--{name}");
         self.args.iter().any(|arg| arg == &needle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::time::parse_utc_strict;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn parse_kind_once_requires_and_parses_at() {
+        let missing = args(&[]);
+        let err = parse_kind(&Opts::parse(&missing), true, "UTC").unwrap_err();
+        assert!(err.to_string().contains("once requires --at"));
+
+        let bad = args(&["--at", "not-a-time"]);
+        let err = parse_kind(&Opts::parse(&bad), true, "UTC").unwrap_err();
+        assert!(err.to_string().contains("invalid --at `not-a-time`"));
+
+        let good = args(&["--at", "2026-05-20T08:00:00+08:00"]);
+        let kind = parse_kind(&Opts::parse(&good), true, "UTC").unwrap();
+        assert_eq!(
+            kind,
+            CronKind::OneShot {
+                at: parse_utc_strict("2026-05-20T08:00:00+08:00").unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_kind_recurring_normalizes_cron_and_defaults_tz() {
+        let missing = args(&[]);
+        let err = parse_kind(&Opts::parse(&missing), false, "UTC").unwrap_err();
+        assert!(err.to_string().contains("add requires --cron"));
+
+        // A 5-field spec gets a seconds column prepended; tz falls back to the
+        // configured default.
+        let five = args(&["--cron", "0 16 * * *"]);
+        assert_eq!(
+            parse_kind(&Opts::parse(&five), false, "Asia/Shanghai").unwrap(),
+            CronKind::Recurring {
+                cron: "0 0 16 * * *".to_string(),
+                tz: "Asia/Shanghai".to_string(),
+            }
+        );
+
+        // A 6-field spec passes through untouched; --tz wins over the default.
+        let six = args(&["--cron", "30 0 16 * * *", "--tz", "UTC"]);
+        assert_eq!(
+            parse_kind(&Opts::parse(&six), false, "Asia/Shanghai").unwrap(),
+            CronKind::Recurring {
+                cron: "30 0 16 * * *".to_string(),
+                tz: "UTC".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_reminder_prefers_message_then_prompt() {
+        let with_message = args(&["--message", "drink water"]);
+        assert_eq!(
+            parse_action(
+                &Opts::parse(&with_message),
+                "reminder",
+                "ignored".to_string()
+            )
+            .unwrap(),
+            JobAction::Reminder {
+                message: "drink water".to_string(),
+            }
+        );
+
+        let empty = args(&[]);
+        assert_eq!(
+            parse_action(&Opts::parse(&empty), "reminder", "from prompt".to_string()).unwrap(),
+            JobAction::Reminder {
+                message: "from prompt".to_string(),
+            }
+        );
+
+        let err = parse_action(&Opts::parse(&empty), "reminder", "  ".to_string()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("reminder action requires --message or --prompt")
+        );
+    }
+
+    #[test]
+    fn parse_action_shell_requires_program_and_collects_args() {
+        let empty = args(&[]);
+        let err = parse_action(&Opts::parse(&empty), "shell", String::new()).unwrap_err();
+        assert!(err.to_string().contains("shell action requires --program"));
+
+        let full = args(&["--program", "/bin/echo", "--arg", "a", "--arg", "b"]);
+        assert_eq!(
+            parse_action(&Opts::parse(&full), "shell", String::new()).unwrap(),
+            JobAction::Shell {
+                program: "/bin/echo".to_string(),
+                args: vec!["a".to_string(), "b".to_string()],
+                env: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_codex_exec_collects_extra_args() {
+        let full = args(&["--model", "gpt-5.5", "--extra-arg", "--json"]);
+        assert_eq!(
+            parse_action(&Opts::parse(&full), "codex-exec", "do it".to_string()).unwrap(),
+            JobAction::CodexExec {
+                prompt: "do it".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                extra_args: vec!["--json".to_string()],
+                env: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_codex_turn_defaults() {
+        let empty = args(&[]);
+        assert_eq!(
+            parse_action(&Opts::parse(&empty), "codex-turn", "p".to_string()).unwrap(),
+            JobAction::CodexTurn {
+                prompt: "p".to_string(),
+                model: None,
+                session_state: None,
+                approval_policy: None,
+                session_strategy: SessionStrategy::PerInvocation,
+                interactive: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_action_codex_turn_honours_strategy_and_approval() {
+        let full = args(&[
+            "--session-strategy",
+            "persistent",
+            "--approval",
+            "never",
+            "--model",
+            "gpt-5.5",
+        ]);
+        let action = parse_action(&Opts::parse(&full), "codex-turn", "p".to_string()).unwrap();
+        let JobAction::CodexTurn {
+            model,
+            approval_policy,
+            session_strategy,
+            interactive,
+            ..
+        } = action
+        else {
+            panic!("expected codex-turn");
+        };
+        assert_eq!(model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(approval_policy, Some(ApprovalPolicySetting::Never));
+        assert_eq!(session_strategy, SessionStrategy::Persistent);
+        assert_eq!(interactive, None);
+
+        let bad = args(&["--session-strategy", "sticky"]);
+        let err = parse_action(&Opts::parse(&bad), "codex-turn", "p".to_string()).unwrap_err();
+        assert!(err.to_string().contains("invalid --session-strategy"));
+
+        let bad = args(&["--approval", "sometimes"]);
+        let err = parse_action(&Opts::parse(&bad), "codex-turn", "p".to_string()).unwrap_err();
+        assert!(err.to_string().contains("invalid --approval"));
+    }
+
+    #[test]
+    fn parse_action_rejects_unknown_action() {
+        let empty = args(&[]);
+        let err = parse_action(&Opts::parse(&empty), "warp", String::new()).unwrap_err();
+        assert!(err.to_string().contains("unsupported --action `warp`"));
+    }
+
+    #[test]
+    fn parse_interactive_absent_flag_is_none() {
+        let empty = args(&[]);
+        assert_eq!(parse_interactive(&Opts::parse(&empty)).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_interactive_flag_alone_uses_wire_defaults() {
+        let flag = args(&["--interactive"]);
+        assert_eq!(
+            parse_interactive(&Opts::parse(&flag)).unwrap(),
+            Some(store::InteractiveSpec::default())
+        );
+    }
+
+    #[test]
+    fn parse_interactive_honours_explicit_values_and_rejects_bad_numbers() {
+        let full = args(&[
+            "--interactive",
+            "--reply-ttl",
+            "600",
+            "--end-signal",
+            "<<<DONE>>>",
+            "--max-rounds",
+            "3",
+        ]);
+        assert_eq!(
+            parse_interactive(&Opts::parse(&full)).unwrap(),
+            Some(store::InteractiveSpec {
+                reply_ttl_secs: 600,
+                end_signal: "<<<DONE>>>".to_string(),
+                max_rounds_hard_cap: 3,
+            })
+        );
+
+        let bad_ttl = args(&["--interactive", "--reply-ttl", "soon"]);
+        let err = parse_interactive(&Opts::parse(&bad_ttl)).unwrap_err();
+        assert!(err.to_string().contains("invalid --reply-ttl"));
+
+        let bad_rounds = args(&["--interactive", "--max-rounds", "many"]);
+        let err = parse_interactive(&Opts::parse(&bad_rounds)).unwrap_err();
+        assert!(err.to_string().contains("invalid --max-rounds"));
     }
 }

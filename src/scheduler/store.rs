@@ -10,7 +10,7 @@ use crate::util::{fs::read_to_string_opt_async, layout::DataLayout, time::ts_slu
 /// `crate::scheduler::store::*` keeps resolving for every existing call site.
 pub(crate) use crate::model::cron::{
     CronJob, CronKind, DeliverPolicy, InteractiveSpec, JobAction, PendingDelivery, RunStatus,
-    SessionStrategy,
+    SessionStrategy, default_end_signal, default_max_rounds_hard_cap, default_reply_ttl_secs,
 };
 
 pub(crate) fn new_job_dir(data_dir: &Path, id: &str) -> PathBuf {

@@ -103,15 +103,15 @@ impl Default for InteractiveSpec {
     }
 }
 
-fn default_reply_ttl_secs() -> u64 {
+pub(crate) fn default_reply_ttl_secs() -> u64 {
     86_400
 }
 
-fn default_end_signal() -> String {
+pub(crate) fn default_end_signal() -> String {
     "<<<CLAW_END>>>".to_string()
 }
 
-fn default_max_rounds_hard_cap() -> u32 {
+pub(crate) fn default_max_rounds_hard_cap() -> u32 {
     10
 }
 
