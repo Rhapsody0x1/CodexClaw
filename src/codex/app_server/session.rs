@@ -1014,6 +1014,48 @@ fn is_for_turn(notification: &Notification, thread_id: &str, turn_id: &str) -> b
 mod tests {
     use super::*;
 
+    /// Overrides that a `~/.codex/config.toml` might carry, deliberately
+    /// disagreeing with the per-session runtime settings.
+    fn file_config_overrides() -> Vec<String> {
+        vec![
+            "model=\"gpt-config\"".to_string(),
+            "model_reasoning_effort=\"low\"".to_string(),
+            "model_context_window=128000".to_string(),
+            "tool_output_token_limit=2048".to_string(),
+        ]
+    }
+
+    /// Baseline turn request; each test overrides only the fields it asserts on.
+    fn exec_request() -> ExecutionRequest {
+        ExecutionRequest {
+            prompt: "hi".to_string(),
+            workspace_dir: std::path::PathBuf::from("/tmp"),
+            codex_home: std::path::PathBuf::from("/tmp/codex-home"),
+            config_overrides: Vec::new(),
+            add_dirs: Vec::new(),
+            session_state: crate::session::state::SessionState::default(),
+            model: Some("gpt-5.5".to_string()),
+            service_tier: None,
+            context_mode: None,
+            reasoning_effort: crate::session::state::ReasoningEffort::High,
+            image_paths: Vec::new(),
+        }
+    }
+
+    /// Baseline compaction request; same convention as `exec_request`.
+    fn compact_request() -> CompactRequest {
+        CompactRequest {
+            session_id: "thread-1".to_string(),
+            workspace_dir: std::path::PathBuf::from("/tmp/work-a"),
+            config_overrides: Vec::new(),
+            add_dirs: Vec::new(),
+            model: Some("gpt-5.5".to_string()),
+            service_tier: None,
+            context_mode: Some(ContextMode::Standard),
+            reasoning_effort: crate::session::state::ReasoningEffort::High,
+        }
+    }
+
     #[test]
     fn is_for_turn_matches_thread_and_turn() {
         let n = Notification {
@@ -1120,17 +1162,8 @@ mod tests {
     #[test]
     fn flex_service_tier_does_not_write_empty_config_override() {
         let req = ExecutionRequest {
-            prompt: "hi".to_string(),
-            workspace_dir: std::path::PathBuf::from("/tmp"),
-            codex_home: std::path::PathBuf::from("/tmp/codex-home"),
-            config_overrides: Vec::new(),
-            add_dirs: Vec::new(),
-            session_state: crate::session::state::SessionState::default(),
-            model: Some("gpt-5.5".to_string()),
             service_tier: Some(ServiceTier::Flex),
-            context_mode: None,
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
-            image_paths: Vec::new(),
+            ..exec_request()
         };
 
         let overrides = build_config_overrides(&req);
@@ -1140,22 +1173,10 @@ mod tests {
     #[test]
     fn config_overrides_are_lower_priority_than_session_runtime_settings() {
         let req = ExecutionRequest {
-            prompt: "hi".to_string(),
-            workspace_dir: std::path::PathBuf::from("/tmp"),
-            codex_home: std::path::PathBuf::from("/tmp/codex-home"),
-            config_overrides: vec![
-                "model=\"gpt-config\"".to_string(),
-                "model_reasoning_effort=\"low\"".to_string(),
-                "model_context_window=128000".to_string(),
-                "tool_output_token_limit=2048".to_string(),
-            ],
-            add_dirs: Vec::new(),
-            session_state: crate::session::state::SessionState::default(),
+            config_overrides: file_config_overrides(),
             model: Some("gpt-session".to_string()),
-            service_tier: None,
             context_mode: Some(ContextMode::OneM),
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
-            image_paths: Vec::new(),
+            ..exec_request()
         };
 
         let overrides = build_config_overrides(&req);
@@ -1174,19 +1195,11 @@ mod tests {
     #[test]
     fn compact_config_overrides_match_session_runtime_settings() {
         let req = CompactRequest {
-            session_id: "thread-1".to_string(),
-            workspace_dir: std::path::PathBuf::from("/tmp/work-a"),
-            config_overrides: vec![
-                "model=\"gpt-config\"".to_string(),
-                "model_reasoning_effort=\"low\"".to_string(),
-                "model_context_window=128000".to_string(),
-                "tool_output_token_limit=2048".to_string(),
-            ],
-            add_dirs: Vec::new(),
+            config_overrides: file_config_overrides(),
             model: Some("gpt-session".to_string()),
             service_tier: Some(ServiceTier::Fast),
             context_mode: Some(ContextMode::OneM),
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
+            ..compact_request()
         };
 
         let overrides = build_compact_config_overrides(&req);
@@ -1206,17 +1219,9 @@ mod tests {
     #[test]
     fn runtime_config_signature_tracks_session_runtime_settings() {
         let mut req = ExecutionRequest {
-            prompt: "hi".to_string(),
             workspace_dir: std::path::PathBuf::from("/tmp/work-a"),
-            codex_home: std::path::PathBuf::from("/tmp/codex-home"),
-            config_overrides: Vec::new(),
-            add_dirs: Vec::new(),
-            session_state: crate::session::state::SessionState::default(),
-            model: Some("gpt-5.5".to_string()),
-            service_tier: None,
             context_mode: Some(ContextMode::Standard),
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
-            image_paths: Vec::new(),
+            ..exec_request()
         };
 
         let original = RuntimeConfigSignature::from_request(&req);
@@ -1234,16 +1239,7 @@ mod tests {
 
     #[test]
     fn compact_runtime_config_signature_tracks_session_runtime_settings() {
-        let mut req = CompactRequest {
-            session_id: "thread-1".to_string(),
-            workspace_dir: std::path::PathBuf::from("/tmp/work-a"),
-            config_overrides: Vec::new(),
-            add_dirs: Vec::new(),
-            model: Some("gpt-5.5".to_string()),
-            service_tier: None,
-            context_mode: Some(ContextMode::Standard),
-            reasoning_effort: crate::session::state::ReasoningEffort::High,
-        };
+        let mut req = compact_request();
 
         let original = RuntimeConfigSignature::from_compact_request(&req);
         req.context_mode = Some(ContextMode::OneM);

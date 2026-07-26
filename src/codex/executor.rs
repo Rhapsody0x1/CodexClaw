@@ -457,11 +457,12 @@ mod tests {
         },
     };
 
-    #[test]
-    fn formats_bash_tool_display() {
-        let item = CodexItem {
+    /// A `CodexItem` with every optional field cleared; tests fill in only the
+    /// ones the formatter under test reads.
+    fn empty_item(item_type: &str) -> CodexItem {
+        CodexItem {
             id: None,
-            item_type: "command_execution".to_string(),
+            item_type: item_type.to_string(),
             text: None,
             message: None,
             command: None,
@@ -480,7 +481,12 @@ mod tests {
             aggregated_output: None,
             exit_code: None,
             status: None,
-        };
+        }
+    }
+
+    #[test]
+    fn formats_bash_tool_display() {
+        let item = empty_item("command_execution");
         assert!(tool_display_for_item(&item, ToolEventPhase::Started).is_none());
         let item = CodexItem {
             command: Some("/bin/zsh -lc pwd".to_string()),
@@ -544,29 +550,11 @@ mod tests {
     #[test]
     fn formats_patch_changes() {
         let item = CodexItem {
-            id: None,
-            item_type: "file_change".to_string(),
-            text: None,
-            message: None,
-            command: None,
-            query: None,
-            action: None,
             changes: vec![crate::codex::events::FileUpdateChange {
                 path: "src/main.rs".to_string(),
                 kind: PatchChangeKind::Update,
             }],
-            server: None,
-            tool: None,
-            arguments: None,
-            result: None,
-            error: None,
-            prompt: None,
-            sender_thread_id: None,
-            receiver_thread_ids: Vec::new(),
-            items: Vec::new(),
-            aggregated_output: None,
-            exit_code: None,
-            status: None,
+            ..empty_item("file_change")
         };
         assert_eq!(
             tool_display_for_item(&item, ToolEventPhase::Completed).as_deref(),
@@ -592,26 +580,8 @@ mod tests {
     #[test]
     fn formats_reasoning_block() {
         let item = CodexItem {
-            id: None,
-            item_type: "reasoning".to_string(),
             text: Some("先检查当前目录，再决定下一步。".to_string()),
-            message: None,
-            command: None,
-            query: None,
-            action: None,
-            changes: Vec::new(),
-            server: None,
-            tool: None,
-            arguments: None,
-            result: None,
-            error: None,
-            prompt: None,
-            sender_thread_id: None,
-            receiver_thread_ids: Vec::new(),
-            items: Vec::new(),
-            aggregated_output: None,
-            exit_code: None,
-            status: None,
+            ..empty_item("reasoning")
         };
         assert_eq!(
             tool_display_for_item(&item, ToolEventPhase::Completed).as_deref(),

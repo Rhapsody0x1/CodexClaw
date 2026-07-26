@@ -998,6 +998,17 @@ mod tests {
         split_text,
     };
 
+    /// Client pointed at the mock server, with placeholder credentials.
+    fn test_client(server: &MockServer) -> QqApiClient {
+        QqApiClient::new(QqConfig {
+            app_id: "app".into(),
+            app_secret: "secret".into(),
+            api_base_url: server.uri(),
+            token_url: format!("{}/token", server.uri()),
+        })
+        .unwrap()
+    }
+
     #[test]
     fn chunked_upload_threshold_matches_large_files() {
         assert!(!should_use_chunked_upload(
@@ -1075,13 +1086,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = QqApiClient::new(QqConfig {
-            app_id: "app".into(),
-            app_secret: "secret".into(),
-            api_base_url: server.uri(),
-            token_url: format!("{}/token", server.uri()),
-        })
-        .unwrap();
+        let client = test_client(&server);
 
         client
             .send_markdown_proactive("u1", "# AI 新闻早餐\n- item")
@@ -1152,13 +1157,7 @@ mod tests {
         )
         .unwrap();
 
-        let client = QqApiClient::new(QqConfig {
-            app_id: "app".into(),
-            app_secret: "secret".into(),
-            api_base_url: server.uri(),
-            token_url: format!("{}/token", server.uri()),
-        })
-        .unwrap();
+        let client = test_client(&server);
 
         let file_info = client
             .upload_file("u1", &path, 4, Some("report.bin"))

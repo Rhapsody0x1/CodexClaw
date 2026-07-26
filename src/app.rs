@@ -1688,7 +1688,7 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
 mod tests {
     use crate::codex::events::{TokenUsage, TokenUsageInfo};
     use crate::qq::types::{EventAuthor, MSG_TYPE_QUOTE, MessageAttachment, MsgElement};
-    use crate::session::state::TokenUsageSnapshot;
+    use crate::session::state::fixtures::{legacy_cumulative_usage, usage};
 
     use super::{
         build_context_warning, build_usage_snapshot, extract_quote, sanitize_attachment_filename,
@@ -1739,18 +1739,7 @@ mod tests {
 
     #[test]
     fn context_warning_uses_context_window_percentage() {
-        let warning = build_context_warning(
-            &TokenUsageSnapshot {
-                total_tokens: 220_000,
-                window: 272_000,
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                output_tokens: 0,
-                updated_at: chrono::Utc::now(),
-            },
-            "en",
-        )
-        .expect("warning");
+        let warning = build_context_warning(&usage(220_000, 272_000), "en").expect("warning");
         assert!(
             warning.contains("80% used"),
             "unexpected warning: {warning}"
@@ -1789,35 +1778,14 @@ mod tests {
 
     #[test]
     fn context_warning_localizes_compact_command_name() {
-        let warning = build_context_warning(
-            &TokenUsageSnapshot {
-                total_tokens: 220_000,
-                window: 272_000,
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                output_tokens: 0,
-                updated_at: chrono::Utc::now(),
-            },
-            "zh",
-        )
-        .expect("warning");
+        let warning = build_context_warning(&usage(220_000, 272_000), "zh").expect("warning");
         assert!(warning.contains("`/压缩`"), "unexpected warning: {warning}");
         assert!(!warning.contains("`/compact`"));
     }
 
     #[test]
     fn context_warning_skips_implausible_legacy_cumulative_usage() {
-        let warning = build_context_warning(
-            &TokenUsageSnapshot {
-                total_tokens: 19_668_612,
-                window: 1_000_000,
-                input_tokens: 19_568_077,
-                cached_input_tokens: 18_968_448,
-                output_tokens: 100_535,
-                updated_at: chrono::Utc::now(),
-            },
-            "zh",
-        );
+        let warning = build_context_warning(&legacy_cumulative_usage(), "zh");
         assert!(warning.is_none());
     }
 }

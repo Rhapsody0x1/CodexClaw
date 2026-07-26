@@ -241,6 +241,20 @@ mod tests {
     use super::{ToolSummary, compact_tool_display, format_tool_block};
     use crate::{config::QqConfig, qq::api::QqApiClient};
 
+    /// Client with empty credentials pointed at an unreachable host: these
+    /// tests never let the emitter reach the network.
+    fn offline_client() -> Arc<QqApiClient> {
+        Arc::new(
+            QqApiClient::new(QqConfig {
+                app_id: String::new(),
+                app_secret: String::new(),
+                api_base_url: "https://example.com".to_string(),
+                token_url: "https://example.com/token".to_string(),
+            })
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn formats_repeated_tool_runs() {
         let block = format_tool_block(&[
@@ -280,15 +294,7 @@ mod tests {
         use crate::codex::executor::ExecutionUpdate;
         use tokio::sync::mpsc;
 
-        let client = Arc::new(
-            QqApiClient::new(QqConfig {
-                app_id: String::new(),
-                app_secret: String::new(),
-                api_base_url: "https://example.com".to_string(),
-                token_url: "https://example.com/token".to_string(),
-            })
-            .unwrap(),
-        );
+        let client = offline_client();
         let emitter = super::PassiveTurnEmitter::new(
             client,
             "u".to_string(),
@@ -311,15 +317,7 @@ mod tests {
 
     #[test]
     fn record_tool_tracks_total_tool_call_count() {
-        let client = Arc::new(
-            QqApiClient::new(QqConfig {
-                app_id: String::new(),
-                app_secret: String::new(),
-                api_base_url: "https://example.com".to_string(),
-                token_url: "https://example.com/token".to_string(),
-            })
-            .unwrap(),
-        );
+        let client = offline_client();
         let mut emitter = super::PassiveTurnEmitter::new(
             client,
             "u".to_string(),
