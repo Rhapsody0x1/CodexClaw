@@ -1,3 +1,4 @@
+mod dialogs;
 pub(crate) mod jobs_file;
 mod rollout;
 pub mod state;

@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use rand::{Rng, seq::SliceRandom};
 use tokio::sync::{Mutex, RwLock};
 
+use super::dialogs::Dialogs;
 use super::jobs_file;
 use crate::model::cron::CronJob;
 use crate::session::rollout::{
@@ -22,12 +22,6 @@ use crate::session::state::{
     TokenUsageSnapshot, UserSessionState,
 };
 use crate::util::{fs::atomic_write, layout::DataLayout};
-
-const ALIAS_WORDS: &[&str] = &[
-    "sage", "oak", "mint", "lark", "wave", "nova", "reef", "kite", "fern", "dawn", "ember",
-    "cedar", "sprout", "peak", "ridge", "orbit", "pixel", "frost", "drift", "meadow", "echo",
-    "river", "flint", "atlas", "bloom", "cloud", "maple", "cobalt", "quill", "harbor",
-];
 
 /// `Local`/`Global` are matched by the list formatters but nothing constructs
 /// them yet — every caller asks for `All`. Kept because the scope is still the
@@ -285,9 +279,7 @@ impl SessionStore {
         self.mutate_state(|state| {
             let (snapshot, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                user.foreground.session_id = session_id;
-                user.foreground.profile =
-                    user.foreground.session_id.as_ref().map(|_| profile.clone());
+                Dialogs::of(user).bind(session_id, profile.clone());
                 let snapshot = user.clone();
                 let cached_profile = cached_profile_from_dialog(&snapshot.foreground);
                 (snapshot, cached_profile)
@@ -318,20 +310,13 @@ impl SessionStore {
         session_id: String,
         profile: DialogProfile,
     ) -> Result<bool> {
-        let expected_generation = expected.generation;
-        let expected_session_id = expected.session_id.clone();
-        let expected_workspace_dir = expected.workspace_dir.clone();
+        let expected = expected.clone();
         self.mutate_state(|state| {
             let (applied, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.generation != expected_generation
-                    || user.foreground.session_id != expected_session_id
-                    || user.foreground.workspace_dir != expected_workspace_dir
-                {
+                if !Dialogs::of(user).bind_if_current(&expected, session_id, profile) {
                     return Ok(false);
                 }
-                user.foreground.session_id = Some(session_id);
-                user.foreground.profile = Some(profile);
                 let cached_profile = cached_profile_from_dialog(&user.foreground);
                 (true, cached_profile)
             };
@@ -466,10 +451,14 @@ impl SessionStore {
 
     pub(crate) async fn new_foreground(&self, openid: &str) -> Result<SwitchResult> {
         self.mutate_user(openid, |user| {
-            let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
-                self.new_temporary_dialog()
-            })?;
-            Ok(SwitchResult { parked_alias })
+            let incoming = self.new_temporary_dialog()?;
+            let outcome = Dialogs::of(user).park(None, &self.attachment_workspace_dir, incoming)?;
+            if let Some(workspace) = outcome.cleanup_workspace {
+                cleanup_workspace_if_empty(&workspace);
+            }
+            Ok(SwitchResult {
+                parked_alias: outcome.parked_alias,
+            })
         })
         .await
     }
@@ -481,10 +470,14 @@ impl SessionStore {
     ) -> Result<SwitchResult> {
         let workspace_dir = workspace_dir.to_path_buf();
         self.mutate_user(openid, |user| {
-            let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
-                self.temporary_dialog_for_workspace(&workspace_dir)
-            })?;
-            Ok(SwitchResult { parked_alias })
+            let incoming = self.temporary_dialog_for_workspace(&workspace_dir)?;
+            let outcome = Dialogs::of(user).park(None, &self.attachment_workspace_dir, incoming)?;
+            if let Some(workspace) = outcome.cleanup_workspace {
+                cleanup_workspace_if_empty(&workspace);
+            }
+            Ok(SwitchResult {
+                parked_alias: outcome.parked_alias,
+            })
         })
         .await
     }
@@ -495,13 +488,18 @@ impl SessionStore {
         requested_alias: Option<&str>,
     ) -> Result<SwitchResult> {
         self.mutate_user(openid, |user| {
-            let parked_alias = park_foreground(
-                user,
+            let incoming = self.new_temporary_dialog()?;
+            let outcome = Dialogs::of(user).park(
                 requested_alias,
                 &self.attachment_workspace_dir,
-                || self.new_temporary_dialog(),
+                incoming,
             )?;
-            Ok(SwitchResult { parked_alias })
+            if let Some(workspace) = outcome.cleanup_workspace {
+                cleanup_workspace_if_empty(&workspace);
+            }
+            Ok(SwitchResult {
+                parked_alias: outcome.parked_alias,
+            })
         })
         .await
     }
@@ -532,15 +530,17 @@ impl SessionStore {
                 state.imported_profiles.insert(session_id, profile);
             }
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            user.background
-                .remove(alias)
-                .ok_or_else(|| anyhow!("后台会话 `{alias}` 不存在"))?;
-            remove_background_alias(user, alias);
-            let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
-                self.new_temporary_dialog()
-            })?;
-            install_foreground(user, target.clone());
-            Ok(SwitchResult { parked_alias })
+            let incoming = self.new_temporary_dialog()?;
+            let mut dialogs = Dialogs::of(user);
+            dialogs.take_background(alias)?;
+            let outcome = dialogs.park(None, &self.attachment_workspace_dir, incoming)?;
+            dialogs.install(target.clone());
+            if let Some(workspace) = outcome.cleanup_workspace {
+                cleanup_workspace_if_empty(&workspace);
+            }
+            Ok(SwitchResult {
+                parked_alias: outcome.parked_alias,
+            })
         })
         .await
     }
@@ -574,14 +574,16 @@ impl SessionStore {
         self.mutate_state(|state| {
             cache_imported_profile(state, &target.id, resolved_profile.as_ref());
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
-                self.new_temporary_dialog()
-            })?;
-            install_foreground(
-                user,
-                dialog_from_disk_session(target, resolved_profile.as_ref()),
-            );
-            Ok(SwitchResult { parked_alias })
+            let incoming = self.new_temporary_dialog()?;
+            let mut dialogs = Dialogs::of(user);
+            let outcome = dialogs.park(None, &self.attachment_workspace_dir, incoming)?;
+            dialogs.install(dialog_from_disk_session(target, resolved_profile.as_ref()));
+            if let Some(workspace) = outcome.cleanup_workspace {
+                cleanup_workspace_if_empty(&workspace);
+            }
+            Ok(SwitchResult {
+                parked_alias: outcome.parked_alias,
+            })
         })
         .await
     }
@@ -596,13 +598,10 @@ impl SessionStore {
         self.mutate_state(|state| {
             cache_imported_profile(state, &target.id, resolved_profile.as_ref());
             let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-            let alias = pick_alias(user, requested_alias)?;
-            user.background.insert(
-                alias.clone(),
+            Dialogs::of(user).add_background(
+                requested_alias,
                 dialog_from_disk_session(target, resolved_profile.as_ref()),
-            );
-            record_background_alias(user, &alias);
-            Ok(alias)
+            )
         })
         .await
     }
@@ -614,34 +613,14 @@ impl SessionStore {
         new_alias: &str,
     ) -> Result<()> {
         self.mutate_user(openid, |user| {
-            let new_alias = normalize_alias(new_alias)?;
-            if user.background.contains_key(&new_alias) {
-                return Err(anyhow!("标签 `{new_alias}` 已存在"));
-            }
-            let Some(dialog) = user.background.remove(old_alias) else {
-                return Err(anyhow!("后台会话 `{old_alias}` 不存在"));
-            };
-            rename_background_alias_in_order(user, old_alias, &new_alias);
-            user.background.insert(new_alias, dialog);
-            Ok(())
+            Dialogs::of(user).rename_background(old_alias, new_alias)
         })
         .await
     }
 
     pub(crate) async fn save_foreground(&self, openid: &str) -> Result<bool> {
-        self.mutate_user(openid, |user| {
-            if user.foreground.saved {
-                return Ok(false);
-            }
-            user.foreground.saved = true;
-            if user.foreground.origin == DialogOrigin::Local
-                && let Some(session_id) = user.foreground.session_id.clone()
-            {
-                register_local_saved_session(user, &session_id);
-            }
-            Ok(true)
-        })
-        .await
+        self.mutate_user(openid, |user| Ok(Dialogs::of(user).save()))
+            .await
     }
 
     pub(crate) async fn stop_foreground(&self, openid: &str) -> Result<StopResult> {
@@ -652,14 +631,10 @@ impl SessionStore {
             current.origin == DialogOrigin::Local && current.session_id.is_some() && !saved;
         let restored = {
             let guard = self.state.read().await;
-            let dialog = guard.users.get(openid).and_then(|user| {
-                user.background_order.iter().rev().find_map(|alias| {
-                    user.background
-                        .get(alias)
-                        .cloned()
-                        .map(|dialog| (alias.clone(), dialog))
-                })
-            });
+            let dialog = guard
+                .users
+                .get(openid)
+                .and_then(super::dialogs::most_recent_background);
             drop(guard);
             match dialog {
                 Some((alias, dialog)) => {
@@ -680,29 +655,30 @@ impl SessionStore {
                     state.imported_profiles.insert(session_id, profile);
                 }
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                let fresh = restored
+                    .is_none()
+                    .then(|| self.new_temporary_dialog())
+                    .transpose()?;
+                let mut dialogs = Dialogs::of(user);
                 if dropped_unsaved && let Some(session_id) = current.session_id.as_deref() {
-                    user.saved_local_session_ids
-                        .retain(|value| value != session_id);
+                    dialogs.drop_saved_session(session_id);
                 } else if saved
                     && current.origin == DialogOrigin::Local
                     && let Some(session_id) = current.session_id.as_deref()
                 {
-                    register_local_saved_session(user, session_id);
+                    dialogs.register_saved_session(session_id);
                 }
                 if let Some((alias, _, profile)) = restored.clone() {
-                    let mut dialog = user
-                        .background
-                        .remove(&alias)
-                        .ok_or_else(|| anyhow!("后台会话 `{alias}` 不存在"))?;
-                    remove_background_alias(user, &alias);
+                    let mut dialog = dialogs.take_background(&alias)?;
                     if let Some(profile) = profile {
                         dialog.workspace_dir = profile.workspace_dir.clone();
                         dialog.profile = Some(profile.dialog_profile());
                     }
-                    install_foreground(user, dialog);
+                    dialogs.install(dialog);
                     Ok(Some(alias))
                 } else {
-                    install_foreground(user, self.new_temporary_dialog()?);
+                    let fresh = fresh.expect("fresh temporary built when nothing to restore");
+                    dialogs.install(fresh);
                     Ok(None)
                 }
             })
@@ -1012,18 +988,9 @@ fn ensure_user_mut<'a>(
     }
     let temporary = build_temporary()?;
     let mut user = UserSessionState::new(temporary.workspace_dir.clone());
-    install_foreground(&mut user, temporary);
+    Dialogs::of(&mut user).install(temporary);
     state.users.insert(openid.to_string(), user);
     Ok(state.users.get_mut(openid).expect("user entry must exist"))
-}
-
-/// The single way to replace the foreground dialog: bumps the generation
-/// counter so that every swap is observable to the interrupted-turn CAS
-/// binding, even when the outgoing and incoming dialogs are value-identical
-/// (two fresh temporaries — the /stop-during-first-turn case).
-fn install_foreground(user: &mut UserSessionState, mut dialog: DialogState) {
-    dialog.generation = user.foreground.generation.wrapping_add(1);
-    user.foreground = dialog;
 }
 
 fn persist_cached_profile(
@@ -1034,30 +1001,6 @@ fn persist_cached_profile(
         return;
     };
     state.imported_profiles.insert(session_id, profile);
-}
-
-fn record_background_alias(user: &mut UserSessionState, alias: &str) {
-    user.background_order.retain(|value| value != alias);
-    user.background_order.push(alias.to_string());
-}
-
-fn remove_background_alias(user: &mut UserSessionState, alias: &str) {
-    user.background_order.retain(|value| value != alias);
-}
-
-fn rename_background_alias_in_order(user: &mut UserSessionState, old_alias: &str, new_alias: &str) {
-    for value in &mut user.background_order {
-        if value == old_alias {
-            *value = new_alias.to_string();
-        }
-    }
-    let mut deduped = Vec::with_capacity(user.background_order.len());
-    for value in &user.background_order {
-        if !deduped.contains(value) {
-            deduped.push(value.clone());
-        }
-    }
-    user.background_order = deduped;
 }
 
 fn cached_profile_from_dialog(dialog: &DialogState) -> Option<(String, ImportedSessionProfile)> {
@@ -1095,102 +1038,6 @@ fn resolve_profile_for_dialog(
         return Ok(None);
     };
     extract_session_profile(&target.rollout_path, target.cwd)
-}
-
-fn park_foreground(
-    user: &mut UserSessionState,
-    requested_alias: Option<&str>,
-    shared_workspace_dir: &Path,
-    new_temporary: impl FnOnce() -> Result<DialogState>,
-) -> Result<Option<String>> {
-    if user.foreground.session_id.is_none() && !user.foreground.saved {
-        let discarded_workspace = user.foreground.workspace_dir.clone();
-        install_foreground(user, new_temporary()?);
-        if discarded_workspace != user.foreground.workspace_dir
-            && discarded_workspace != shared_workspace_dir
-        {
-            cleanup_workspace_if_empty(&discarded_workspace);
-        }
-        return Ok(None);
-    }
-    let alias = pick_alias(user, requested_alias)?;
-    let mut parked = user.foreground.clone();
-    parked.saved = true;
-    if parked.origin == DialogOrigin::Local
-        && let Some(session_id) = parked.session_id.clone()
-    {
-        register_local_saved_session(user, &session_id);
-    }
-    user.background.insert(alias.clone(), parked);
-    record_background_alias(user, &alias);
-    install_foreground(user, new_temporary()?);
-    Ok(Some(alias))
-}
-
-fn pick_alias(user: &mut UserSessionState, requested: Option<&str>) -> Result<String> {
-    if let Some(alias) = requested {
-        let normalized = normalize_alias(alias)?;
-        if user.background.contains_key(&normalized) {
-            return Err(anyhow!("标签 `{normalized}` 已存在"));
-        }
-        return Ok(normalized);
-    }
-    let mut rng = rand::thread_rng();
-    for _ in 0..(ALIAS_WORDS.len() * 8) {
-        let Some(base) = ALIAS_WORDS.choose(&mut rng).copied() else {
-            break;
-        };
-        if !user.background.contains_key(base) {
-            return Ok(base.to_string());
-        }
-        // Keep alias shape simple: `<word><digits>` and within the existing 16-char limit.
-        let suffix = rng.gen_range(2..=9999);
-        let candidate = format!("{base}{suffix}");
-        if candidate.len() <= 16 && !user.background.contains_key(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    for base in ALIAS_WORDS {
-        if !user.background.contains_key(*base) {
-            return Ok((*base).to_string());
-        }
-    }
-    for _ in 0..10_000 {
-        user.alias_seq = user.alias_seq.saturating_add(1);
-        let index = (user.alias_seq % (ALIAS_WORDS.len() as u64)) as usize;
-        let base = ALIAS_WORDS[index];
-        let candidate = format!("{base}{}", user.alias_seq % 10_000);
-        if candidate.len() <= 16 && !user.background.contains_key(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!("无法分配新的会话标签，请手动指定标签"))
-}
-
-fn normalize_alias(input: &str) -> Result<String> {
-    let alias = input.trim().to_ascii_lowercase();
-    let is_valid = !alias.is_empty()
-        && alias.len() <= 16
-        && alias
-            .chars()
-            .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit());
-    if !is_valid {
-        return Err(anyhow!(
-            "标签仅允许 1-16 位小写英文或数字，例如 `sage`、`mint2`"
-        ));
-    }
-    Ok(alias)
-}
-
-fn register_local_saved_session(user: &mut UserSessionState, session_id: &str) {
-    if !user
-        .saved_local_session_ids
-        .iter()
-        .any(|value| value == session_id)
-    {
-        user.saved_local_session_ids.push(session_id.to_string());
-        user.saved_local_session_ids.sort();
-    }
 }
 
 fn cleanup_workspace_if_empty(path: &Path) {
@@ -1234,7 +1081,8 @@ mod tests {
         ReasoningEffort, ServiceTier, UserSessionState,
     };
 
-    use super::{ALIAS_WORDS, SessionListScope, SessionStore};
+    use super::{SessionListScope, SessionStore};
+    use crate::session::dialogs::ALIAS_WORDS;
 
     /// Shared harness for the store tests.
     ///
