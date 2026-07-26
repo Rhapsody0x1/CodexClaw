@@ -285,6 +285,12 @@ commands:
     idle: "当前没有进行交互式设置。"
 
 errors:
+  session:
+    bg_not_found: "后台会话 `%{alias}` 不存在。现有：%{aliases}。"
+    bg_not_found_empty: "后台会话 `%{alias}` 不存在，后台目前是空的。可用 `/后台` 把当前对话收进去。"
+    alias_exists: "标签 `%{alias}` 已存在。"
+    alias_invalid: "标签仅允许 1-16 位小写英文或数字，例如 `sage`、`mint2`。"
+    alias_alloc_failed: "无法分配新的会话标签，请手动指定标签。"
   busy: "当前有任务在运行，请先等待当前任务完成后再执行，或使用 /中断 中断。"
   permission: "Codex 执行失败：系统返回 Operation not permitted。请检查文件系统权限。"
   generic: "命令失败：%{message}"

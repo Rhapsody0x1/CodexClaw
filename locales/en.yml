@@ -285,6 +285,12 @@ commands:
     idle: "Not currently in an interactive setting."
 
 errors:
+  session:
+    bg_not_found: "No background session `%{alias}`. You have: %{aliases}."
+    bg_not_found_empty: "No background session `%{alias}` — the background is empty. Use `/bg` to park the current conversation."
+    alias_exists: "The label `%{alias}` already exists."
+    alias_invalid: "Labels are 1-16 lowercase letters or digits, like `sage` or `mint2`."
+    alias_alloc_failed: "Could not allocate a new alias; specify one manually."
   busy: "A task is already running. Please wait or use /interrupt first."
   permission: "Codex execution failed: Operation not permitted. Please check filesystem permissions."
   generic: "Command failed: %{message}"

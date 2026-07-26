@@ -14,7 +14,7 @@
 //! cleanup). Transitions that *imply* filesystem work return a decision —
 //! e.g. [`ParkOutcome::cleanup_workspace`] — instead of doing it.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use rand::{Rng, seq::SliceRandom};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,37 @@ pub(super) const ALIAS_WORDS: &[&str] = &[
     "cedar", "sprout", "peak", "ridge", "orbit", "pixel", "frost", "drift", "meadow", "echo",
     "river", "flint", "atlas", "bloom", "cloud", "maple", "cobalt", "quill", "harbor",
 ];
+
+/// Structured user-input failures from the dialog state machine. The shell
+/// (`app::inbound`) downcasts these to render localized replies; the
+/// `Display` text is an English fallback for logs.
+#[derive(Debug)]
+pub(crate) enum DialogError {
+    BackgroundNotFound {
+        alias: String,
+        available: Vec<String>,
+    },
+    AliasExists {
+        alias: String,
+    },
+    AliasInvalid,
+    AliasAllocFailed,
+}
+
+impl std::fmt::Display for DialogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BackgroundNotFound { alias, .. } => {
+                write!(f, "background session `{alias}` not found")
+            }
+            Self::AliasExists { alias } => write!(f, "alias `{alias}` already exists"),
+            Self::AliasInvalid => write!(f, "aliases are 1-16 lowercase letters or digits"),
+            Self::AliasAllocFailed => write!(f, "could not allocate a new alias"),
+        }
+    }
+}
+
+impl std::error::Error for DialogError {}
 
 /// What [`Dialogs::park`] did with the previous foreground.
 #[derive(Debug)]
@@ -103,11 +134,12 @@ impl<'a> Dialogs<'a> {
     /// Remove and return the background dialog stored under `alias`,
     /// unregistering the alias.
     pub(super) fn take_background(&mut self, alias: &str) -> Result<DialogState> {
-        let dialog = self
-            .user
-            .background
-            .remove(alias)
-            .ok_or_else(|| anyhow!("后台会话 `{alias}` 不存在"))?;
+        let dialog = self.user.background.remove(alias).ok_or_else(|| {
+            anyhow::Error::new(DialogError::BackgroundNotFound {
+                alias: alias.to_string(),
+                available: self.user.background_order.iter().rev().cloned().collect(),
+            })
+        })?;
         self.user.background_order.retain(|value| value != alias);
         self.assert_invariants();
         Ok(dialog)
@@ -131,10 +163,15 @@ impl<'a> Dialogs<'a> {
     pub(super) fn rename_background(&mut self, old_alias: &str, new_alias: &str) -> Result<()> {
         let new_alias = normalize_alias(new_alias)?;
         if self.user.background.contains_key(&new_alias) {
-            return Err(anyhow!("标签 `{new_alias}` 已存在"));
+            return Err(anyhow::Error::new(DialogError::AliasExists {
+                alias: new_alias,
+            }));
         }
         let Some(dialog) = self.user.background.remove(old_alias) else {
-            return Err(anyhow!("后台会话 `{old_alias}` 不存在"));
+            return Err(anyhow::Error::new(DialogError::BackgroundNotFound {
+                alias: old_alias.to_string(),
+                available: self.user.background_order.iter().rev().cloned().collect(),
+            }));
         };
         for value in &mut self.user.background_order {
             if value == old_alias {
@@ -228,7 +265,9 @@ impl<'a> Dialogs<'a> {
         if let Some(alias) = requested {
             let normalized = normalize_alias(alias)?;
             if self.user.background.contains_key(&normalized) {
-                return Err(anyhow!("标签 `{normalized}` 已存在"));
+                return Err(anyhow::Error::new(DialogError::AliasExists {
+                    alias: normalized,
+                }));
             }
             return Ok(normalized);
         }
@@ -261,7 +300,7 @@ impl<'a> Dialogs<'a> {
                 return Ok(candidate);
             }
         }
-        Err(anyhow!("无法分配新的会话标签，请手动指定标签"))
+        Err(anyhow::Error::new(DialogError::AliasAllocFailed))
     }
 
     /// The slot invariants: `background_order` is duplicate-free and lists
@@ -318,9 +357,7 @@ fn normalize_alias(input: &str) -> Result<String> {
             .chars()
             .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit());
     if !is_valid {
-        return Err(anyhow!(
-            "标签仅允许 1-16 位小写英文或数字，例如 `sage`、`mint2`"
-        ));
+        return Err(anyhow::Error::new(DialogError::AliasInvalid));
     }
     Ok(alias)
 }
@@ -424,7 +461,7 @@ mod tests {
                 DialogState::new_temporary(PathBuf::from("/shared")),
             )
             .unwrap_err();
-        assert!(err.to_string().contains("已存在"));
+        assert!(err.to_string().contains("already exists"));
     }
 
     #[test]

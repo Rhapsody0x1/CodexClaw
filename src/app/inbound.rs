@@ -93,12 +93,10 @@ impl App {
             // 存在"). Propagating them only reaches the dispatch loop's warn!,
             // so the user watches their slash command vanish; reply instead.
             Err(err) => {
-                self.reply_text(
-                    &normalized.sender_openid,
-                    &normalized.message_id,
-                    &format!("{err:#}"),
-                )
-                .await?;
+                let lang = self.command_locale(&normalized.sender_openid).await;
+                let text = render_command_error(&err, lang.as_str());
+                self.reply_text(&normalized.sender_openid, &normalized.message_id, &text)
+                    .await?;
                 return Ok(());
             }
         };
@@ -503,6 +501,56 @@ fn extract_quote(message_type: Option<u32>, msg_elements: &[MsgElement]) -> Opti
             lines.join("\n")
         },
     })
+}
+
+/// Localized rendering for command failures. Structured dialog errors get
+/// proper translations (with recovery hints such as the available aliases);
+/// anything else falls back to the error's own user-facing text.
+fn render_command_error(err: &anyhow::Error, locale: &str) -> String {
+    use crate::session::DialogError;
+    match err.downcast_ref::<DialogError>() {
+        Some(DialogError::BackgroundNotFound { alias, available }) => {
+            if available.is_empty() {
+                t!(
+                    "errors.session.bg_not_found_empty",
+                    alias = alias,
+                    locale = locale
+                )
+                .into_owned()
+            } else {
+                let sep = if locale.starts_with("zh") {
+                    "、"
+                } else {
+                    ", "
+                };
+                let list = available
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect::<Vec<_>>()
+                    .join(sep);
+                t!(
+                    "errors.session.bg_not_found",
+                    alias = alias,
+                    aliases = list,
+                    locale = locale
+                )
+                .into_owned()
+            }
+        }
+        Some(DialogError::AliasExists { alias }) => t!(
+            "errors.session.alias_exists",
+            alias = alias,
+            locale = locale
+        )
+        .into_owned(),
+        Some(DialogError::AliasInvalid) => {
+            t!("errors.session.alias_invalid", locale = locale).into_owned()
+        }
+        Some(DialogError::AliasAllocFailed) => {
+            t!("errors.session.alias_alloc_failed", locale = locale).into_owned()
+        }
+        None => format!("{err:#}"),
+    }
 }
 
 #[cfg(test)]

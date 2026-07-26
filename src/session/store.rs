@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock};
 
@@ -571,15 +571,21 @@ impl SessionStore {
         openid: &str,
         alias: &str,
     ) -> Result<SwitchResult> {
-        let mut target = {
+        let (target, available) = {
             let guard = self.state.read().await;
-            guard
-                .users
-                .get(openid)
-                .and_then(|user| user.background.get(alias))
-                .cloned()
-        }
-        .ok_or_else(|| anyhow!("后台会话 `{alias}` 不存在"))?;
+            let user = guard.users.get(openid);
+            (
+                user.and_then(|user| user.background.get(alias)).cloned(),
+                user.map(|user| user.background_order.iter().rev().cloned().collect())
+                    .unwrap_or_default(),
+            )
+        };
+        let mut target = target.ok_or_else(|| {
+            anyhow::Error::new(super::dialogs::DialogError::BackgroundNotFound {
+                alias: alias.to_string(),
+                available,
+            })
+        })?;
         let target_profile = resolve_profile_for_dialog(&self.global_codex_home, Some(&target))?;
         if let Some(profile) = target_profile.clone() {
             target.workspace_dir = profile.workspace_dir.clone();

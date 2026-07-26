@@ -12,5 +12,6 @@ pub(crate) mod store;
 // Only `SessionStore` is `pub`: it is what the binary wires up. Everything else
 // is `pub(crate)`, so an unused item is reported instead of being excused by a
 // hypothetical external consumer.
+pub(crate) use dialogs::DialogError;
 pub use store::SessionStore;
 pub(crate) use store::{DiskSessionMeta, SessionListScope};
