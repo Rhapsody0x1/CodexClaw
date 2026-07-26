@@ -175,6 +175,7 @@ commands:
     skipped_non_command: "• %{step} (skipped: not a command)"
 
   bg:
+    nav_hint: "Send `/fg` to switch back."
     auto_parked: "The turn that just finished was parked in the background as `%{alias}`."
     moved: "Foreground moved to background: `%{alias}`."
     reset_empty: "The foreground was an empty temporary session, so it was reset to a new temporary session."

@@ -278,7 +278,7 @@ fn join_prompt_blocks(blocks: Vec<Vec<String>>) -> String {
         .join("\n")
 }
 
-fn ambiguous_reply(locale: &str, input: &str, matches: &[String]) -> String {
+pub(super) fn ambiguous_reply(locale: &str, input: &str, matches: &[String]) -> String {
     t!(
         "commands.interactive.ambiguous",
         input = input,
@@ -374,36 +374,6 @@ pub(super) async fn enter_simple_prompt(
         .set_pending_setting(ctx.openid, Some(pending))
         .await?;
     Ok(CommandOutcome::reply(text))
-}
-
-pub(super) async fn enter_fg_prompt(
-    snapshot: &UserSessionState,
-    ctx: CmdCtx<'_>,
-) -> Result<CommandOutcome> {
-    let CmdCtx {
-        openid, session, ..
-    } = ctx;
-    let locale = snapshot.settings.language.as_str();
-    if snapshot.background.is_empty() {
-        return Ok(CommandOutcome::reply_t("commands.fg.prompt_empty", locale));
-    }
-    let mut lines = vec![t!("commands.fg.prompt_header", locale = locale).into_owned()];
-    for alias in snapshot.background.keys() {
-        lines.push(
-            t!(
-                "commands.fg.prompt_item",
-                alias = alias.as_str(),
-                locale = locale
-            )
-            .into_owned(),
-        );
-    }
-    lines.push(String::new());
-    lines.push(hint(locale));
-    session
-        .set_pending_setting(openid, Some(PendingSetting::Fg))
-        .await?;
-    Ok(CommandOutcome::reply(lines.join("\n")))
 }
 
 pub(super) async fn enter_restore_projects_prompt(
@@ -609,7 +579,14 @@ pub(super) async fn consume_pending_input(
         PendingSetting::ImportSessions { project_key, page } => {
             consume_import_sessions(text, ctx, project_key, page).await
         }
-        PendingSetting::Fg => consume_fg(text, ctx).await,
+        // `PendingSetting::Fg` is a retired picker (bare `/fg` now switches
+        // straight to the most recent background dialog). The variant stays
+        // for serde compatibility with persisted state; any stale pending
+        // value falls through to a normal turn.
+        PendingSetting::Fg => {
+            ctx.session.set_pending_setting(ctx.openid, None).await?;
+            Ok(CommandOutcome::Continue)
+        }
         PendingSetting::ResumeProjects => {
             consume_restore_projects(RestoreMode::Resume, text, ctx).await
         }
@@ -832,21 +809,6 @@ async fn consume_lang(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
             )))
         }
         other => Ok(fuzzy_fallback(other, current_locale.as_str(), input)),
-    }
-}
-
-async fn consume_fg(text: &str, ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
-    let CmdCtx {
-        openid, session, ..
-    } = ctx;
-    let snapshot = session.snapshot_for_user(openid).await?;
-    let locale = snapshot.settings.language.clone();
-    let locale = locale.as_str();
-    let candidates: Vec<String> = snapshot.background.keys().cloned().collect();
-    let input = text.trim();
-    match fuzzy_match_unique(input, &candidates) {
-        FuzzyOutcome::Exact(alias) => switch_foreground(&alias, ctx, locale).await,
-        other => Ok(fuzzy_fallback(other, locale, input)),
     }
 }
 

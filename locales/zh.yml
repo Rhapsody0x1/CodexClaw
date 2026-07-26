@@ -175,6 +175,7 @@ commands:
     skipped_non_command: "• %{step}（已跳过：不是命令）"
 
   bg:
+    nav_hint: "发送 `/前台` 可切回。"
     auto_parked: "刚完成的那轮对话已存入后台：`%{alias}`。"
     moved: "前台会话已转为后台：`%{alias}`。"
     reset_empty: "当前前台是空白临时会话，已重置为新的临时会话。"

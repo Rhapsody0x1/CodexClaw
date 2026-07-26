@@ -217,9 +217,9 @@ fn format_tool_block(tools: &[ToolSummary]) -> String {
             if tool.count == 1 {
                 tool.display.clone()
             } else if let Some((first_line, rest)) = tool.display.split_once('\n') {
-                format!("{first_line} * {}\n{rest}", tool.count)
+                format!("{first_line} ×{}\n{rest}", tool.count)
             } else {
-                format!("{} * {}", tool.display, tool.count)
+                format!("{} ×{}", tool.display, tool.count)
             }
         })
         .collect::<Vec<_>>()
@@ -264,29 +264,29 @@ mod tests {
     fn formats_repeated_tool_runs() {
         let block = format_tool_block(&[
             ToolSummary {
-                display: "[Tool: Bash]\n```shell\npwd\n```".to_string(),
+                display: "[🖥️ Bash]\n```shell\npwd\n```".to_string(),
                 count: 2,
             },
             ToolSummary {
-                display: "[Tool: Web Search] rust async await".to_string(),
+                display: "[🔍 Web Search] rust async await".to_string(),
                 count: 1,
             },
         ]);
         assert_eq!(
             block,
-            "[Tool: Bash] * 2\n```shell\npwd\n```\n[Tool: Web Search] rust async await"
+            "[🖥️ Bash] ×2\n```shell\npwd\n```\n[🔍 Web Search] rust async await"
         );
     }
 
     #[test]
     fn compacts_tool_display_to_label() {
         assert_eq!(
-            compact_tool_display("[Tool: Bash]\n```shell\npwd\n```"),
-            "[Tool: Bash]"
+            compact_tool_display("[🖥️ Bash]\n```shell\npwd\n```"),
+            "[🖥️ Bash]"
         );
         assert_eq!(
-            compact_tool_display("[Tool: Web Search] rust async await"),
-            "[Tool: Web Search]"
+            compact_tool_display("[🔍 Web Search] rust async await"),
+            "[🔍 Web Search]"
         );
         assert_eq!(
             compact_tool_display("[Thinking]\n检查日志中断点"),
@@ -330,8 +330,8 @@ mod tests {
             PathBuf::from("/tmp"),
             false,
         );
-        emitter.record_tool("[Tool: Bash]\n```shell\npwd\n```".to_string());
-        emitter.record_tool("[Tool: Bash]\n```shell\nls\n```".to_string());
+        emitter.record_tool("[🖥️ Bash]\n```shell\npwd\n```".to_string());
+        emitter.record_tool("[🖥️ Bash]\n```shell\nls\n```".to_string());
 
         assert_eq!(emitter.tool_call_count, 2);
     }

@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(updates.len(), 1);
         match &updates[0] {
             ExecutionUpdate::ToolCall { display } => {
-                assert_eq!(display, "[Tool: Bash]\n```shell\n/bin/zsh -lc pwd\n```");
+                assert_eq!(display, "[🖥️ Bash]\n```shell\n/bin/zsh -lc pwd\n```");
             }
             _ => panic!("expected ToolCall"),
         }
@@ -446,7 +446,7 @@ mod tests {
         let updates = translate_item_completed(&mut state, &item);
         match &updates[0] {
             ExecutionUpdate::ToolCall { display } => {
-                assert_eq!(display, "[Tool: Web Open] https://example.com");
+                assert_eq!(display, "[🔍 Web Open] https://example.com");
             }
             _ => panic!("expected ToolCall"),
         }
@@ -467,7 +467,7 @@ mod tests {
         let updates = translate_item_completed(&mut state, &item);
         match &updates[0] {
             ExecutionUpdate::ToolCall { display } => {
-                assert_eq!(display, "[Tool: Patch] src/main.rs (update)");
+                assert_eq!(display, "[🩹 Patch] src/main.rs (update)");
             }
             _ => panic!("expected ToolCall"),
         }
@@ -484,7 +484,7 @@ mod tests {
         let updates = translate_item_completed(&mut state, &item);
         match &updates[0] {
             ExecutionUpdate::ToolCall { display } => {
-                assert_eq!(display, "[Tool: Patch] src/lib.rs (update)");
+                assert_eq!(display, "[🩹 Patch] src/lib.rs (update)");
             }
             _ => panic!("expected ToolCall"),
         }

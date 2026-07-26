@@ -63,12 +63,15 @@ pub(super) async fn handle_bg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandO
         .move_foreground_to_background(openid, args.first().copied())
         .await?;
     let text = if let Some(alias) = moved.parked_alias {
-        t!(
-            "commands.bg.moved",
-            alias = alias.as_str(),
-            locale = lang.as_str()
+        format!(
+            "{}\n{}",
+            t!(
+                "commands.bg.moved",
+                alias = alias.as_str(),
+                locale = lang.as_str()
+            ),
+            t!("commands.bg.nav_hint", locale = lang.as_str())
         )
-        .into_owned()
     } else {
         t!("commands.bg.reset_empty", locale = lang.as_str()).into_owned()
     };
@@ -78,10 +81,44 @@ pub(super) async fn handle_bg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandO
 pub(super) async fn handle_fg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     let snapshot = ctx.session.snapshot_for_user(ctx.openid).await?;
     let lang = snapshot.settings.language.clone();
-    if args.is_empty() {
-        return interactive::enter_fg_prompt(&snapshot, ctx).await;
+    let Some(input) = args.first() else {
+        // Bare `/fg` is the return half of the `/bg` ↔ `/fg` pair: jump
+        // straight back to the most recently parked dialog (cd - semantics)
+        // instead of asking the user to recall an alias.
+        let Some(alias) = most_recent_background_alias(&snapshot) else {
+            return Ok(CommandOutcome::reply(t!(
+                "commands.fg.prompt_empty",
+                locale = lang.as_str()
+            )));
+        };
+        return interactive::switch_foreground(&alias, ctx, lang.as_str()).await;
+    };
+    // Direct arguments get the same fuzzy resolution as the pickers, so a
+    // near-miss lands on the dialog instead of an error.
+    let aliases: Vec<String> = snapshot.background.keys().cloned().collect();
+    match interactive::fuzzy_match_unique(input, &aliases) {
+        interactive::FuzzyOutcome::Exact(alias) => {
+            interactive::switch_foreground(&alias, ctx, lang.as_str()).await
+        }
+        interactive::FuzzyOutcome::Ambiguous(matches) => Ok(CommandOutcome::reply(
+            interactive::ambiguous_reply(lang.as_str(), input, &matches),
+        )),
+        interactive::FuzzyOutcome::None => {
+            interactive::switch_foreground(input, ctx, lang.as_str()).await
+        }
     }
-    interactive::switch_foreground(args[0], ctx, lang.as_str()).await
+}
+
+/// Most recently parked alias that still exists, mirroring what `/stop`
+/// restores (`background_order` is recency-ordered; `background` keys are
+/// alphabetical and must not be used for this).
+fn most_recent_background_alias(snapshot: &UserSessionState) -> Option<String> {
+    snapshot
+        .background_order
+        .iter()
+        .rev()
+        .find(|alias| snapshot.background.contains_key(*alias))
+        .cloned()
 }
 
 /// `/resume` and `/loadbg` walk the same project/session picker flow and only

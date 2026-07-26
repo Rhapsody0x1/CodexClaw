@@ -91,7 +91,7 @@ pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -
         "command_execution" if phase == ToolEventPhase::Started => item
             .command
             .as_deref()
-            .map(|command| format!("[Tool: Bash]\n```shell\n{}\n```", truncate(command, 180))),
+            .map(|command| format!("[🖥️ Bash]\n```shell\n{}\n```", truncate(command, 180))),
         "web_search" if phase == ToolEventPhase::Completed => {
             Some(web_search_display_from_item(item))
         }
@@ -110,9 +110,9 @@ pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -
         "file_change" if phase == ToolEventPhase::Completed => {
             let detail = format_patch_changes(&item.changes);
             Some(if detail.is_empty() {
-                "[Tool: Patch]".to_string()
+                "[🩹 Patch]".to_string()
             } else {
-                format!("[Tool: Patch] {}", truncate(&detail, 220))
+                format!("[🩹 Patch] {}", truncate(&detail, 220))
             })
         }
         "mcp_tool_call" if phase == ToolEventPhase::Started => {
@@ -125,7 +125,7 @@ pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -
                 .filter(|value| !value.is_empty())
                 .map(|value| format!(" {}", truncate(&value, 160)))
                 .unwrap_or_default();
-            Some(format!("[Tool: MCP {server}:{tool}]{args}"))
+            Some(format!("[🔌 {server}:{tool}]{args}"))
         }
         "mcp_tool_call" if phase == ToolEventPhase::Completed => {
             let server = item.server.as_deref().unwrap_or("unknown");
@@ -149,7 +149,7 @@ pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -
             } else {
                 " completed".to_string()
             };
-            Some(format!("[Tool: MCP {server}:{tool}]{summary}"))
+            Some(format!("[🔌 {server}:{tool}]{summary}"))
         }
         "collab_tool_call" if phase == ToolEventPhase::Started => {
             let label = humanize_tool_label(&item.tool.clone().unwrap_or_else(|| "collab".into()));
@@ -164,7 +164,7 @@ pub(crate) fn tool_display_for_item(item: &DisplayItem, phase: ToolEventPhase) -
                         .map(|prompt| format!(" {}", truncate(prompt.trim(), 120)))
                 })
                 .unwrap_or_default();
-            Some(format!("[Tool: {label}]{detail}"))
+            Some(format!("[⚙️ {label}]{detail}"))
         }
         "error" if phase == ToolEventPhase::Completed => item
             .message
@@ -212,10 +212,10 @@ fn web_search_display_from_item(item: &DisplayItem) -> String {
 
 fn web_search_display_from_action(action: &WebSearchAction) -> String {
     let prefix = match action {
-        WebSearchAction::Search { .. } => "[Tool: Web Search]",
-        WebSearchAction::OpenPage { .. } => "[Tool: Web Open]",
-        WebSearchAction::FindInPage { .. } => "[Tool: Web Find]",
-        WebSearchAction::Other => "[Tool: Web Search]",
+        WebSearchAction::Search { .. } => "[🔍 Web Search]",
+        WebSearchAction::OpenPage { .. } => "[🔍 Web Open]",
+        WebSearchAction::FindInPage { .. } => "[🔍 Web Find]",
+        WebSearchAction::Other => "[🔍 Web Search]",
     };
     let detail = web_search_action_detail(action);
     if detail.is_empty() {
@@ -228,9 +228,9 @@ fn web_search_display_from_action(action: &WebSearchAction) -> String {
 fn web_search_display_from_detail(detail: &str) -> String {
     let trimmed = detail.trim();
     let prefix = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        "[Tool: Web Open]"
+        "[🔍 Web Open]"
     } else {
-        "[Tool: Web Search]"
+        "[🔍 Web Search]"
     };
     if trimmed.is_empty() {
         prefix.to_string()
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(web_search_action_detail(&action), "openai codex github");
         assert_eq!(
             web_search_display_from_action(&action),
-            "[Tool: Web Search] openai codex github"
+            "[🔍 Web Search] openai codex github"
         );
     }
 
@@ -330,7 +330,7 @@ mod tests {
         };
         assert_eq!(
             web_search_display_from_action(&action),
-            "[Tool: Web Find] 'Codex' in https://example.com"
+            "[🔍 Web Find] 'Codex' in https://example.com"
         );
     }
 
@@ -338,7 +338,7 @@ mod tests {
     fn infers_web_open_from_url_query() {
         assert_eq!(
             web_search_display_from_detail("https://rhapsody0x1.github.io/"),
-            "[Tool: Web Open] https://rhapsody0x1.github.io/"
+            "[🔍 Web Open] https://rhapsody0x1.github.io/"
         );
     }
 

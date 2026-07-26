@@ -827,20 +827,53 @@ async fn direct_fast_and_context_commands_accept_chinese_aliases() {
 }
 
 #[tokio::test]
-async fn fg_prompt_keeps_hint_out_of_markdown_sublist() {
+async fn bare_fg_switches_to_most_recent_background() {
     let env = TestEnv::with_default_model("gpt-5.4").await;
     env.session
         .set_foreground_session_id(USER, Some("thread".into()))
         .await
         .unwrap();
     let _ = env.run("/bg focus").await;
+
+    let reply = env.reply("/fg").await;
+
+    assert!(
+        reply.text.contains("`focus`"),
+        "bare /fg should return to the most recently parked dialog: {}",
+        reply.text
+    );
+    let snapshot = env.snapshot().await;
+    assert_eq!(snapshot.foreground.session_id.as_deref(), Some("thread"));
+}
+
+#[tokio::test]
+async fn bare_fg_without_background_reports_empty() {
+    let env = TestEnv::with_default_model("gpt-5.4").await;
     env.set_lang("zh").await;
 
     let reply = env.reply("/fg").await;
 
     assert!(
-        reply.text.contains("\n\n请输入一个值，或 `/返回` 取消。"),
-        "hint should be separated from the markdown list: {}",
+        reply.text.contains("暂无后台会话"),
+        "empty background should be reported, not a picker: {}",
+        reply.text
+    );
+}
+
+#[tokio::test]
+async fn fg_argument_fuzzy_matches_an_alias() {
+    let env = TestEnv::with_default_model("gpt-5.4").await;
+    env.session
+        .set_foreground_session_id(USER, Some("thread".into()))
+        .await
+        .unwrap();
+    let _ = env.run("/bg harbor").await;
+
+    let reply = env.reply("/fg harb").await;
+
+    assert!(
+        reply.text.contains("`harbor`"),
+        "a unique substring should resolve to the alias: {}",
         reply.text
     );
 }
