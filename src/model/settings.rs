@@ -522,6 +522,10 @@ pub(crate) struct UserSessionState {
     pub(crate) last_sessions_view: Vec<String>,
     #[serde(default)]
     pub(crate) last_import_projects_view: Vec<String>,
+    /// Job ids as rendered by the latest `/cron list`, so numeric arguments
+    /// keep meaning the row the user actually saw.
+    #[serde(default)]
+    pub(crate) last_cron_view: Vec<String>,
     #[serde(default)]
     pub(crate) last_import_sessions_view: Vec<String>,
     #[serde(default)]
@@ -547,6 +551,7 @@ impl UserSessionState {
             last_projects_view: Vec::new(),
             last_sessions_view: Vec::new(),
             last_import_projects_view: Vec::new(),
+            last_cron_view: Vec::new(),
             last_import_sessions_view: Vec::new(),
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),

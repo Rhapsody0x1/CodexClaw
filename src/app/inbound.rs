@@ -84,6 +84,7 @@ impl App {
             &self.config.general.default_model,
             &runtime_profile,
             self.busy.load(Ordering::SeqCst),
+            self.display_tz,
         )
         .await
         {

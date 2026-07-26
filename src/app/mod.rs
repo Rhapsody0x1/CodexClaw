@@ -60,6 +60,8 @@ pub struct App {
     /// reference (the tick loop keeps a `Weak`), so dropping the `App` still
     /// parks the scheduler exactly as when it held `Weak<App>` directly.
     pub(crate) scheduler_ctx: Arc<SchedulerCtx>,
+    /// Parsed once from `general.timezone` (validated at config load).
+    pub(crate) display_tz: chrono_tz::Tz,
     busy: AtomicBool,
     active_turn: Mutex<Option<oneshot::Sender<()>>>,
     /// The QQ openid whose turn currently holds `busy`. Used to route
@@ -103,6 +105,11 @@ impl App {
         shadow: Option<Arc<ShadowWorker>>,
         scheduler_ctx: Arc<SchedulerCtx>,
     ) -> Arc<Self> {
+        let display_tz = config
+            .general
+            .timezone
+            .parse::<chrono_tz::Tz>()
+            .unwrap_or(chrono_tz::Asia::Shanghai);
         let app = Arc::new(Self {
             config,
             session,
@@ -111,6 +118,7 @@ impl App {
             memory,
             shadow,
             scheduler_ctx,
+            display_tz,
             busy: AtomicBool::new(false),
             active_turn: Mutex::new(None),
             active_openid: Mutex::new(None),

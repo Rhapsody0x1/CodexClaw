@@ -215,6 +215,7 @@ fn persisted() -> PersistedSessionState {
         last_projects_view: vec!["p1".to_string()],
         last_sessions_view: vec!["s1".to_string()],
         last_import_projects_view: vec!["ip1".to_string()],
+        last_cron_view: vec!["01CRONVIEW".to_string()],
         last_import_sessions_view: vec!["is1".to_string()],
         saved_local_session_ids: vec!["sl1".to_string()],
         command_aliases: BTreeMap::from([(
@@ -308,6 +309,9 @@ const PERSISTED_STATE_JSON: &str = r#"{
       ],
       "last_import_projects_view": [
         "ip1"
+      ],
+      "last_cron_view": [
+        "01CRONVIEW"
       ],
       "last_import_sessions_view": [
         "is1"

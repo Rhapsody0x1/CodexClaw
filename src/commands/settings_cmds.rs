@@ -45,6 +45,7 @@ pub(super) async fn handle_model(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comma
         default_model,
         runtime_profile,
         is_busy,
+        ..
     } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();

@@ -802,6 +802,15 @@ impl SessionStore {
         self.view(openid, |user| user.last_sessions_view).await
     }
 
+    pub(crate) async fn set_last_cron_view(&self, openid: &str, ids: Vec<String>) -> Result<()> {
+        self.set_view(openid, ids, |user| &mut user.last_cron_view)
+            .await
+    }
+
+    pub(crate) async fn last_cron_view(&self, openid: &str) -> Result<Vec<String>> {
+        self.view(openid, |user| user.last_cron_view.clone()).await
+    }
+
     pub(crate) async fn last_projects_view(&self, openid: &str) -> Result<Vec<String>> {
         self.view(openid, |user| user.last_projects_view).await
     }

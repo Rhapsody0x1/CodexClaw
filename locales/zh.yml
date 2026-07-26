@@ -59,7 +59,13 @@ commands:
     warning: "提示：对话线程过长、反复 compact 后，模型准确性可能下降。若条件允许，建议及时 `/新建` 一个更聚焦的新会话。"
 
   cron:
-    usage: "用法：/定时 list | pause <job_id> | resume <job_id> | rm <job_id> | run-now <job_id> | tail <job_id>"
+    state_paused: "（已暂停）"
+    row_next: "下次 %{next}"
+    row_runs: "已运行 %{count} 次"
+    row_failures: "连续失败 %{count} 次"
+    list_footer: "用编号操作，例如 `/定时 rm 1`。"
+    stale_index: "编号已过期，请先发送 `/定时 list` 查看最新列表。"
+    usage: "用法：/定时 list | pause | resume | rm | run-now | tail，操作对象用 list 中的编号（如 `/定时 rm 1`）。"
     empty: "当前没有你的定时任务。"
     list_header: "你的定时任务："
     not_owned: "只能管理你自己的定时任务。"
@@ -69,13 +75,13 @@ commands:
     removed: "已删除 `%{title}`。"
     run_now: "已安排 `%{title}` 立即运行一次。"
     no_logs: "还没有运行日志。"
-    tail_header: "最近运行日志 `%{path}`：\n%{preview}"
+    tail_header: "`%{title}` 最近一次运行日志：\n%{preview}"
     unknown: "未知 /定时 子命令。"
-    requires_job_id: "%{subcommand} 需要 <job_id>"
+    requires_job_id: "`%{subcommand}` 后面要带编号或任务 ID，例如 `/定时 %{subcommand} 1`。"
 
   runtime:
-    last_user_message: "最近用户消息: %{preview}"
-    model: "模型: %{summary}"
+    last_user_message: "最近用户消息：%{preview}"
+    model: "模型：%{summary}"
 
   new:
     created_temp: "已创建新的临时前台会话。"
@@ -96,13 +102,13 @@ commands:
 
   sessions:
     empty: "没有可用会话。可先发起对话并使用 `/保存` 或 `/后台` 保存。"
-    project_header: "项目列表 total=%{count}："
-    project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
+    project_header: "项目列表（共 %{count} 个）："
+    project_row: "%{index}. %{path} · %{sessions} 个会话 · %{latest}"
     projects_footer: "输入项目编号（例如 `1`）进入下一级，或 `/返回` 退出。"
     project_empty: "项目 `%{path}` 下暂无会话。"
-    page_out_of_range: "页码超出范围：项目 `%{path}` 共 %{total} 条，会话页大小 %{size}，当前页 %{page}。"
-    page_header: "项目会话 project=%{path} page=%{page}/%{total_pages} (total=%{total})"
-    row: "%{index}. %{updated} | %{summary}"
+    page_out_of_range: "页码超出范围：`%{path}` 共 %{total} 条、%{total_pages} 页，当前第 %{page} 页。"
+    page_header: "%{path} 的会话（第 %{page}/%{total_pages} 页 · 共 %{total} 条）："
+    row: "%{index}. %{summary}（%{updated}）"
     page_footer: "用 `/恢复` 或 `/载入后台` 操作会话，`/返回` 退出。"
     no_summary: "无摘要"
     scope_invalid: "范围仅支持 all"
@@ -114,7 +120,7 @@ commands:
 
   status:
     workspace: "工作目录: %{dir}"
-    model: "模型: %{summary}"
+    model: "模型：%{summary}"
     verbose_on: "详细输出: 开启"
     verbose_off: "详细输出: 关闭"
     bg_header: "后台会话（%{count}）："
@@ -225,13 +231,13 @@ commands:
     refreshed: "会话已存在，已刷新导入配置"
     result: "%{action}：%{summary}\n工作目录: `%{workspace}`\n模型: %{model}"
     empty: "系统 `~/.codex/sessions` 中没有可导入会话。"
-    project_header: "可导入项目 total=%{count}"
-    project_row: "%{index}. %{path} | sessions=%{sessions} | latest=%{latest}"
+    project_header: "可导入项目（共 %{count} 个）："
+    project_row: "%{index}. %{path} · %{sessions} 个会话 · %{latest}"
     projects_footer: "输入项目编号进入下一级，或 `/返回` 退出。"
     project_empty: "项目 `%{path}` 下暂无可导入会话。"
-    page_out_of_range: "页码超出范围：项目 `%{path}` 共 %{total} 条，会话页大小 %{size}，当前页 %{page}。"
-    page_header: "可导入会话 project=%{path} page=%{page}/%{total_pages} (total=%{total})"
-    row: "%{index}. [%{updated}] %{summary}"
+    page_out_of_range: "页码超出范围：`%{path}` 共 %{total} 条、%{total_pages} 页，当前第 %{page} 页。"
+    page_header: "%{path} 的可导入会话（第 %{page}/%{total_pages} 页 · 共 %{total} 条）："
+    row: "%{index}. %{summary}（%{updated}）"
     page_footer: "输入会话编号导入，或 `/返回` 退出。"
 
   lang:

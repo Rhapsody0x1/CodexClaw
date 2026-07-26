@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::util::{path::fmt_path, time::fmt_relative_or};
+
 pub(super) use crate::util::text::format_tokens_compact;
 
 pub(super) const PROJECT_KEY_SEP: char = '\u{1f}';
@@ -202,7 +204,7 @@ pub(super) fn compact_model_summary(
     if let Some(tier) = tier {
         parts.push(tier);
     }
-    parts.join(" ")
+    parts.join(" · ")
 }
 
 pub(super) fn effective_model(
@@ -344,7 +346,10 @@ pub(super) fn format_projects_list(
     keys: &ListKeys,
     projects: &[ProjectBucket],
     lang: &str,
+    display_tz: chrono_tz::Tz,
+    shared_workspace: &std::path::Path,
 ) -> (String, Vec<String>) {
+    let now = chrono::Utc::now();
     if projects.is_empty() {
         return (t!(keys.empty, locale = lang).into_owned(), Vec::new());
     }
@@ -352,15 +357,12 @@ pub(super) fn format_projects_list(
         vec![t!(keys.project_header, count = projects.len(), locale = lang).into_owned()];
     let mut project_keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
-        let latest = project
-            .latest
-            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        let latest = fmt_relative_or(project.latest, now, display_tz, lang);
         lines.push(
             t!(
                 keys.project_row,
                 index = index + 1,
-                path = project.path.as_str(),
+                path = fmt_path(std::path::Path::new(&project.path), shared_workspace, lang),
                 sessions = project.count,
                 latest = latest,
                 locale = lang
@@ -380,7 +382,12 @@ pub(super) fn format_project_sessions_page(
     sessions: &[DiskSessionMeta],
     page: usize,
     lang: &str,
+    display_tz: chrono_tz::Tz,
+    shared_workspace: &std::path::Path,
 ) -> (String, Vec<String>) {
+    let now = chrono::Utc::now();
+    let display_path = fmt_path(std::path::Path::new(project_path), shared_workspace, lang);
+    let project_path = display_path.as_str();
     if sessions.is_empty() {
         return (
             t!(keys.project_empty, path = project_path, locale = lang).into_owned(),
@@ -396,7 +403,7 @@ pub(super) fn format_project_sessions_page(
                 keys.page_out_of_range,
                 path = project_path,
                 total = sessions.len(),
-                size = page_size,
+                total_pages = sessions.len().div_ceil(page_size),
                 page = safe_page,
                 locale = lang
             )
@@ -421,10 +428,7 @@ pub(super) fn format_project_sessions_page(
     for (offset, session) in sessions[start..end].iter().enumerate() {
         let index = offset + 1;
         let summary = session_summary(session, lang);
-        let updated = session
-            .updated_at
-            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| t!("commands.shared.unknown", locale = lang).into_owned());
+        let updated = fmt_relative_or(session.updated_at, now, display_tz, lang);
         lines.push(
             t!(
                 keys.row,
@@ -450,7 +454,7 @@ pub(super) fn session_summary(session: &DiskSessionMeta, lang: &str) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback.as_ref());
-    single_line(raw, 72)
+    single_line(raw, 32)
 }
 
 pub(super) fn single_line(input: &str, max_chars: usize) -> String {

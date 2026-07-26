@@ -386,7 +386,13 @@ pub(super) async fn enter_restore_projects_prompt(
     } = ctx;
     let sessions = session.list_disk_sessions(SessionListScope::All).await?;
     let projects = collect_projects(&sessions);
-    let (text, project_keys) = format_projects_list(&SESSIONS_LIST_KEYS, &projects, locale);
+    let (text, project_keys) = format_projects_list(
+        &SESSIONS_LIST_KEYS,
+        &projects,
+        locale,
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
+    );
     let has_projects = !project_keys.is_empty();
     session.set_last_projects_view(openid, project_keys).await?;
     session.set_last_sessions_view(openid, Vec::new()).await?;
@@ -421,6 +427,8 @@ pub(super) async fn enter_restore_sessions_prompt(
         &project_sessions,
         page,
         locale,
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
     );
     session.set_last_sessions_view(openid, ids).await?;
     session
@@ -836,6 +844,8 @@ async fn consume_sessions_projects(text: &str, ctx: CmdCtx<'_>) -> Result<Comman
         &sessions,
         1,
         locale.as_str(),
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
     );
     session.set_last_sessions_view(openid, ids).await?;
     session
@@ -895,6 +905,8 @@ async fn consume_import_projects(text: &str, ctx: CmdCtx<'_>) -> Result<CommandO
         &project_sessions,
         1,
         locale.as_str(),
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
     );
     session.set_last_import_sessions_view(openid, ids).await?;
     session

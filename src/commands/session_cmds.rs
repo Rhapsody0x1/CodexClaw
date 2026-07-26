@@ -252,8 +252,13 @@ pub(super) async fn handle_sessions(args: &[&str], ctx: CmdCtx<'_>) -> Result<Co
         };
         let sessions = session.list_disk_sessions(scope).await?;
         let projects = collect_projects(&sessions);
-        let (text, project_keys) =
-            format_projects_list(&SESSIONS_LIST_KEYS, &projects, lang.as_str());
+        let (text, project_keys) = format_projects_list(
+            &SESSIONS_LIST_KEYS,
+            &projects,
+            lang.as_str(),
+            ctx.display_tz,
+            ctx.session.attachment_workspace_dir(),
+        );
         let has_projects = !project_keys.is_empty();
         session.set_last_projects_view(openid, project_keys).await?;
         session.set_last_sessions_view(openid, Vec::new()).await?;
@@ -287,6 +292,8 @@ pub(super) async fn handle_sessions(args: &[&str], ctx: CmdCtx<'_>) -> Result<Co
         &sessions,
         page,
         lang.as_str(),
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
     );
     session.set_last_sessions_view(openid, ids).await?;
     session
@@ -317,8 +324,13 @@ pub(super) async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comm
 
     if args.is_empty() {
         let projects = collect_projects(&all);
-        let (text, project_keys) =
-            format_projects_list(&IMPORT_LIST_KEYS, &projects, lang.as_str());
+        let (text, project_keys) = format_projects_list(
+            &IMPORT_LIST_KEYS,
+            &projects,
+            lang.as_str(),
+            ctx.display_tz,
+            ctx.session.attachment_workspace_dir(),
+        );
         let has_projects = !project_keys.is_empty();
         session
             .set_last_import_projects_view(openid, project_keys)
@@ -358,6 +370,8 @@ pub(super) async fn handle_import(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comm
         &project_sessions,
         page,
         lang.as_str(),
+        ctx.display_tz,
+        ctx.session.attachment_workspace_dir(),
     );
     session.set_last_import_sessions_view(openid, ids).await?;
     session

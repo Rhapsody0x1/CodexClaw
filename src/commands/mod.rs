@@ -101,6 +101,8 @@ struct CmdCtx<'a> {
     default_model: &'a str,
     runtime_profile: &'a CodexRuntimeProfile,
     is_busy: bool,
+    /// Timezone every user-facing timestamp is rendered in.
+    display_tz: chrono_tz::Tz,
 }
 
 /// Cheap locale lookup for handlers that only need the language string.
@@ -122,6 +124,7 @@ pub(crate) async fn maybe_handle_command(
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
     is_busy: bool,
+    display_tz: chrono_tz::Tz,
 ) -> Result<CommandOutcome> {
     let ctx = CmdCtx {
         openid,
@@ -129,6 +132,7 @@ pub(crate) async fn maybe_handle_command(
         default_model,
         runtime_profile,
         is_busy,
+        display_tz,
     };
     maybe_handle_command_inner(text, ctx, 0).await
 }
@@ -145,6 +149,7 @@ fn maybe_handle_command_inner<'a>(
             default_model,
             runtime_profile,
             is_busy,
+            ..
         } = ctx;
         let snapshot = session.snapshot_for_user(openid).await?;
         let lang_string = snapshot.settings.language.clone();

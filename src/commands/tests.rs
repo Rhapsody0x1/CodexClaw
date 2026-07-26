@@ -86,6 +86,7 @@ impl TestEnv {
             self.default_model,
             runtime,
             is_busy,
+            chrono_tz::Asia::Shanghai,
         )
         .await
         .unwrap()
@@ -216,7 +217,7 @@ async fn new_command_reports_effective_runtime_settings() {
     };
     let reply = expect_reply(env.run_with_runtime("/new", &runtime).await);
 
-    assert!(reply.text.contains("gpt-global high 1M fast"));
+    assert!(reply.text.contains("gpt-global · high · 1M · fast"));
 }
 
 #[tokio::test]
@@ -238,7 +239,7 @@ async fn resume_command_reports_profile_and_last_user_message_preview() {
     let reply = env.reply("/resume thread-1").await;
 
     assert!(reply.text.contains("请帮我处理发布失败"));
-    assert!(reply.text.contains("gpt-5.4 high 1M"));
+    assert!(reply.text.contains("gpt-5.4 · high · 1M"));
 }
 
 #[tokio::test]
@@ -289,7 +290,7 @@ async fn stop_command_restores_most_recent_background_dialog() {
         panic!("expected stop current");
     };
     assert!(reply.contains("`newer`"));
-    assert!(reply.contains("gpt-newer high 1M"));
+    assert!(reply.contains("gpt-newer · high · 1M"));
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
     let CmdCtx {
         openid, session, ..
     } = ctx;
+    let display_tz = ctx.display_tz;
     let lang = user_locale(session, openid).await;
     let locale = lang.as_str();
     let Some(subcommand) = args.first().copied() else {
@@ -15,22 +16,69 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
         "list" | "ls" => {
             let mut jobs = session.list_cron_jobs().await?;
             jobs.retain(|job| job.owner_openid == openid);
-            jobs.sort_by_key(|job| job.next_run_at);
+            // Upcoming runs first (soonest on top); paused / exhausted jobs
+            // sink to the bottom instead of leading the list.
+            jobs.sort_by_key(|job| match (job.disabled, job.next_run_at) {
+                (false, Some(next)) => (0, Some(next)),
+                (false, None) => (1, None),
+                (true, next) => (2, next),
+            });
             if jobs.is_empty() {
                 return Ok(CommandOutcome::reply_t("commands.cron.empty", locale));
             }
+            let now = chrono::Utc::now();
             let mut text = t!("commands.cron.list_header", locale = locale).into_owned();
-            for job in jobs {
-                text.push_str(&format!(
-                    "\n{}  {}  next={}  runs={}  failures={}  {}",
-                    job.id,
-                    if job.disabled { "disabled" } else { "enabled" },
-                    fmt_rfc3339_or(job.next_run_at, "-"),
-                    job.run_count,
-                    job.failure_streak,
-                    job.title
-                ));
+            let mut view_ids = Vec::new();
+            for (index, job) in jobs.iter().enumerate() {
+                let state = if job.disabled {
+                    t!("commands.cron.state_paused", locale = locale).into_owned()
+                } else {
+                    String::new()
+                };
+                text.push_str(&format!("\n{}. {}{}", index + 1, job.title, state));
+                let mut meta = Vec::new();
+                if !job.disabled
+                    && let Some(next) = job.next_run_at
+                {
+                    meta.push(
+                        t!(
+                            "commands.cron.row_next",
+                            next = crate::util::time::fmt_next(next, now, display_tz, locale),
+                            locale = locale
+                        )
+                        .into_owned(),
+                    );
+                }
+                if job.run_count > 0 {
+                    meta.push(
+                        t!(
+                            "commands.cron.row_runs",
+                            count = job.run_count,
+                            locale = locale
+                        )
+                        .into_owned(),
+                    );
+                }
+                if job.failure_streak > 0 {
+                    meta.push(
+                        t!(
+                            "commands.cron.row_failures",
+                            count = job.failure_streak,
+                            locale = locale
+                        )
+                        .into_owned(),
+                    );
+                }
+                if !meta.is_empty() {
+                    text.push_str("\n   ");
+                    text.push_str(&meta.join(" · "));
+                }
+                view_ids.push(job.id.clone());
             }
+            text.push('\n');
+            text.push('\n');
+            text.push_str(&t!("commands.cron.list_footer", locale = locale));
+            session.set_last_cron_view(openid, view_ids).await?;
             Ok(CommandOutcome::reply(text))
         }
         "pause" => {
@@ -40,7 +88,7 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
                     Err(reply) => return Ok(reply),
                 };
             session
-                .update_cron_job(id, |job| {
+                .update_cron_job(&id, |job| {
                     job.disabled = true;
                     Ok(())
                 })
@@ -58,7 +106,7 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
                     Err(reply) => return Ok(reply),
                 };
             session
-                .update_cron_job(id, |job| {
+                .update_cron_job(&id, |job| {
                     job.disabled = false;
                     job.next_run_at = crate::scheduler::next_after(&job.kind, Utc::now())?;
                     if job.next_run_at.is_none()
@@ -81,9 +129,14 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
                     Ok(found) => found,
                     Err(reply) => return Ok(reply),
                 };
-            session.remove_cron_job(id).await?;
-            crate::scheduler::remove_job_files(session.data_dir(), session.codex_home(), id, false)
-                .await?;
+            session.remove_cron_job(&id).await?;
+            crate::scheduler::remove_job_files(
+                session.data_dir(),
+                session.codex_home(),
+                &id,
+                false,
+            )
+            .await?;
             Ok(CommandOutcome::reply(t!(
                 "commands.cron.removed",
                 title = job.title.as_str(),
@@ -97,7 +150,7 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
                     Err(reply) => return Ok(reply),
                 };
             session
-                .update_cron_job(id, |job| {
+                .update_cron_job(&id, |job| {
                     job.run_now_at = Some(Utc::now());
                     Ok(())
                 })
@@ -131,7 +184,7 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
             let preview = tail_chars(&raw, 3500);
             Ok(CommandOutcome::reply(t!(
                 "commands.cron.tail_header",
-                path = last.path().display(),
+                title = job.title.as_str(),
                 preview = preview,
                 locale = locale
             )))
@@ -146,24 +199,57 @@ pub(super) async fn handle_cron(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
 /// mistakes, not internal failures: an outer `Err` would propagate to the
 /// gateway task where it is only warn!-logged, so the user would get no
 /// response at all.
-async fn resolve_owned_job<'a>(
+async fn resolve_owned_job(
     subcommand: &str,
-    args: &[&'a str],
+    args: &[&str],
     session: &SessionStore,
     openid: &str,
     locale: &str,
-) -> Result<std::result::Result<(&'a str, CronJob), CommandOutcome>> {
-    let Some(id) = args.get(1).copied() else {
+) -> Result<std::result::Result<(String, CronJob), CommandOutcome>> {
+    let Some(selector) = args.get(1).copied() else {
         return Ok(Err(CommandOutcome::reply(t!(
             "commands.cron.requires_job_id",
             subcommand = subcommand,
             locale = locale
         ))));
     };
-    let Some(job) = session.get_cron_job(id).await? else {
+    // Row numbers refer to the snapshot the user last saw via `/cron list`,
+    // so later list changes cannot shift what a number means.
+    let id = if selector.chars().all(|c| c.is_ascii_digit()) {
+        let view = session.last_cron_view(openid).await?;
+        let index: usize = selector.parse().unwrap_or(0);
+        match index.checked_sub(1).and_then(|i| view.get(i)) {
+            Some(id) => id.clone(),
+            None => {
+                return Ok(Err(CommandOutcome::reply_t(
+                    "commands.cron.stale_index",
+                    locale,
+                )));
+            }
+        }
+    } else {
+        selector.to_string()
+    };
+    let job = match session.get_cron_job(&id).await? {
+        Some(job) => Some(job),
+        // Fall back to a unique prefix match over the user's own jobs, so a
+        // short ID fragment works without pasting the full ULID.
+        None if id.len() >= 4 => {
+            let jobs = session.list_cron_jobs().await?;
+            let mut matches = jobs
+                .into_iter()
+                .filter(|job| job.owner_openid == openid && job.id.starts_with(&id));
+            match (matches.next(), matches.next()) {
+                (Some(job), None) => Some(job),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    let Some(job) = job else {
         return Ok(Err(CommandOutcome::reply(t!(
             "commands.cron.not_found",
-            id = id,
+            id = selector,
             locale = locale
         ))));
     };
@@ -173,6 +259,7 @@ async fn resolve_owned_job<'a>(
             locale,
         )));
     }
+    let id = job.id.clone();
     Ok(Ok((id, job)))
 }
 
