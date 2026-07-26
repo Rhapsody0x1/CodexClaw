@@ -32,6 +32,17 @@ use super::{
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<JsonValue, JsonRpcError>>>>>;
 
+/// Build a JSON-RPC 2.0 message: the `jsonrpc` version field followed by the
+/// given `(key, value)` parts.
+fn jsonrpc_envelope<const N: usize>(parts: [(&'static str, JsonValue); N]) -> JsonValue {
+    let mut map = serde_json::Map::new();
+    map.insert("jsonrpc".to_string(), JsonValue::from("2.0"));
+    for (key, value) in parts {
+        map.insert(key.to_string(), value);
+    }
+    JsonValue::Object(map)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Notification {
     pub(crate) method: String,
@@ -135,12 +146,11 @@ impl JsonRpcClient {
     {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let params_value = serde_json::to_value(params).context("serialize params")?;
-        let message = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params_value,
-        });
+        let message = jsonrpc_envelope([
+            ("id", JsonValue::from(id)),
+            ("method", JsonValue::from(method)),
+            ("params", params_value),
+        ]);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         if let Err(err) = self.transport.write_message(message).await {
@@ -164,29 +174,19 @@ impl JsonRpcClient {
 
     /// Fire-and-forget: parameter-less notification (e.g. `initialized`).
     pub(crate) async fn notify_empty(&self, method: &str) -> Result<()> {
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
+        let msg = jsonrpc_envelope([("method", JsonValue::from(method))]);
         self.transport.write_message(msg).await
     }
 
     pub(crate) async fn respond_ok<R: Serialize>(&self, id: JsonValue, result: &R) -> Result<()> {
         let result = serde_json::to_value(result).context("serialize response result")?;
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        });
+        let msg = jsonrpc_envelope([("id", id), ("result", result)]);
         self.transport.write_message(msg).await
     }
 
     pub(crate) async fn respond_err(&self, id: JsonValue, err: JsonRpcError) -> Result<()> {
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": err,
-        });
+        let err = serde_json::to_value(err).context("serialize error response")?;
+        let msg = jsonrpc_envelope([("id", id), ("error", err)]);
         self.transport.write_message(msg).await
     }
 

@@ -88,7 +88,7 @@ struct AccessTokenResponse {
     access_token: String,
     #[serde(
         default = "default_expires_in",
-        deserialize_with = "deserialize_expires_in"
+        deserialize_with = "deserialize_u64_value"
     )]
     expires_in: u64,
 }
@@ -301,7 +301,7 @@ impl QqApiClient {
                 markdown: MarkdownPayload { content: &chunk },
                 message_reference,
             };
-            let url = format!("{}/v2/users/{openid}/messages", self.config.api_base_url);
+            let url = self.user_endpoint(openid, "messages");
             match self
                 .post_json::<serde_json::Value, _>(url.clone(), &markdown_body)
                 .await
@@ -374,10 +374,7 @@ impl QqApiClient {
             media: MediaFileInfo { file_info },
         };
         let _: serde_json::Value = self
-            .post_json(
-                format!("{}/v2/users/{openid}/messages", self.config.api_base_url),
-                &body,
-            )
+            .post_json(self.user_endpoint(openid, "messages"), &body)
             .await?;
         Ok(())
     }
@@ -480,10 +477,7 @@ impl QqApiClient {
             srv_send_msg: false,
         };
         let response: UploadFileResponse = self
-            .post_json(
-                format!("{}/v2/users/{openid}/files", self.config.api_base_url),
-                &body,
-            )
+            .post_json(self.user_endpoint(openid, "files"), &body)
             .await?;
         Ok(response.file_info)
     }
@@ -556,14 +550,8 @@ impl QqApiClient {
             sha1: &hashes.sha1,
             md5_10m: &hashes.md5_10m,
         };
-        self.post_json(
-            format!(
-                "{}/v2/users/{openid}/upload_prepare",
-                self.config.api_base_url
-            ),
-            &body,
-        )
-        .await
+        self.post_json(self.user_endpoint(openid, "upload_prepare"), &body)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -608,33 +596,29 @@ impl QqApiClient {
             block_size,
             md5,
         };
-        let url = format!(
-            "{}/v2/users/{openid}/upload_part_finish",
-            self.config.api_base_url
-        );
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..=PART_FINISH_MAX_RETRIES {
-            match self
-                .post_json::<serde_json::Value, _>(url.clone(), &body)
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(err) => {
-                    if qq_api_error_code(&err) == Some(PART_FINISH_RETRYABLE_CODE) {
-                        return self
-                            .persistent_retry_part_finish(url, &body, retry_timeout)
-                            .await;
+        let url = self.user_endpoint(openid, "upload_part_finish");
+        let (url, body) = (&url, &body);
+        retry_with_backoff(
+            PART_FINISH_MAX_RETRIES,
+            1,
+            "failed to finish chunk upload part",
+            move || async move {
+                match self
+                    .post_json::<serde_json::Value, _>(url.clone(), body)
+                    .await
+                {
+                    Ok(_) => RetryStep::Done(Ok(())),
+                    Err(err) if qq_api_error_code(&err) == Some(PART_FINISH_RETRYABLE_CODE) => {
+                        RetryStep::Done(
+                            self.persistent_retry_part_finish(url.clone(), body, retry_timeout)
+                                .await,
+                        )
                     }
-                    last_error = Some(err);
-                    if attempt < PART_FINISH_MAX_RETRIES {
-                        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-                    }
+                    Err(err) => RetryStep::Retry(err),
                 }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("failed to finish chunk upload part")))
+            },
+        )
+        .await
     }
 
     async fn persistent_retry_part_finish(
@@ -678,25 +662,23 @@ impl QqApiClient {
         upload_id: &str,
     ) -> Result<UploadFileResponse> {
         let body = UploadCompleteBody { upload_id };
-        let url = format!("{}/v2/users/{openid}/files", self.config.api_base_url);
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..=COMPLETE_UPLOAD_MAX_RETRIES {
-            match self
-                .post_json::<UploadFileResponse, _>(url.clone(), &body)
-                .await
-            {
-                Ok(response) => return Ok(response),
-                Err(err) => {
-                    last_error = Some(err);
-                    if attempt < COMPLETE_UPLOAD_MAX_RETRIES {
-                        tokio::time::sleep(Duration::from_secs(2 * (1 << attempt))).await;
-                    }
+        let url = self.user_endpoint(openid, "files");
+        let (url, body) = (&url, &body);
+        retry_with_backoff(
+            COMPLETE_UPLOAD_MAX_RETRIES,
+            2,
+            "failed to complete chunked upload",
+            move || async move {
+                match self
+                    .post_json::<UploadFileResponse, _>(url.clone(), body)
+                    .await
+                {
+                    Ok(response) => RetryStep::Done(Ok(response)),
+                    Err(err) => RetryStep::Retry(err),
                 }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("failed to complete chunked upload")))
+            },
+        )
+        .await
     }
 
     async fn compute_file_hashes(&self, path: &Path, file_size: u64) -> Result<FileHashes> {
@@ -739,36 +721,39 @@ impl QqApiClient {
     }
 
     async fn put_presigned_part(&self, presigned_url: &str, bytes: Vec<u8>) -> Result<()> {
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for attempt in 0..=PART_UPLOAD_MAX_RETRIES {
-            let response = self
-                .client
-                .put(presigned_url)
-                .timeout(PART_UPLOAD_TIMEOUT)
-                .header("Content-Length", bytes.len())
-                .body(bytes.clone())
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status().is_success() => return Ok(()),
-                Ok(response) => {
-                    let status = response.status();
-                    let raw = response.text().await.unwrap_or_default();
-                    last_error = Some(anyhow!(
-                        "QQ presigned upload failed with status {status}: {raw}"
-                    ));
+        let bytes = &bytes;
+        retry_with_backoff(
+            PART_UPLOAD_MAX_RETRIES,
+            1,
+            "failed to upload chunk to presigned url",
+            move || async move {
+                let response = self
+                    .client
+                    .put(presigned_url)
+                    .timeout(PART_UPLOAD_TIMEOUT)
+                    .header("Content-Length", bytes.len())
+                    .body(bytes.clone())
+                    .send()
+                    .await;
+                match response {
+                    Ok(response) if response.status().is_success() => RetryStep::Done(Ok(())),
+                    Ok(response) => {
+                        let status = response.status();
+                        let raw = response.text().await.unwrap_or_default();
+                        RetryStep::Retry(anyhow!(
+                            "QQ presigned upload failed with status {status}: {raw}"
+                        ))
+                    }
+                    Err(err) => RetryStep::Retry(err.into()),
                 }
-                Err(err) => {
-                    last_error = Some(err.into());
-                }
-            }
-            if attempt < PART_UPLOAD_MAX_RETRIES {
-                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-            }
-        }
+            },
+        )
+        .await
+    }
 
-        Err(last_error.unwrap_or_else(|| anyhow!("failed to upload chunk to presigned url")))
+    /// Build a `/v2/users/{openid}/{path}` endpoint URL on the configured API base.
+    fn user_endpoint(&self, openid: &str, path: &str) -> String {
+        format!("{}/v2/users/{openid}/{path}", self.config.api_base_url)
     }
 
     async fn post_json<T, B>(&self, url: String, body: &B) -> Result<T>
@@ -809,6 +794,43 @@ impl QqApiClient {
     async fn next_msg_seq(&self, msg_id: &str) -> u32 {
         self.msg_seq.lock().await.next(msg_id)
     }
+}
+
+/// Outcome of one attempt inside [`retry_with_backoff`].
+enum RetryStep<T> {
+    /// Terminal: return this result immediately (success, or an error path
+    /// that must not be retried by the backoff loop).
+    Done(Result<T>),
+    /// Record the error and retry after the backoff sleep (if attempts remain).
+    Retry(anyhow::Error),
+}
+
+/// Run `op` up to `max_retries + 1` times, sleeping
+/// `backoff_base_secs * (1 << attempt)` seconds between attempts.
+async fn retry_with_backoff<T, F, Fut>(
+    max_retries: u32,
+    backoff_base_secs: u64,
+    exhausted_message: &str,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = RetryStep<T>>,
+{
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 0..=max_retries {
+        match op().await {
+            RetryStep::Done(result) => return result,
+            RetryStep::Retry(err) => {
+                last_error = Some(err);
+                if attempt < max_retries {
+                    tokio::time::sleep(Duration::from_secs(backoff_base_secs * (1 << attempt)))
+                        .await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("{exhausted_message}")))
 }
 
 fn should_use_chunked_upload(file_size: u64) -> bool {
@@ -889,14 +911,6 @@ fn qq_api_error_code(err: &anyhow::Error) -> Option<i64> {
 
 fn default_expires_in() -> u64 {
     7200
-}
-
-fn deserialize_expires_in<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    parse_u64_value::<D::Error>(value)
 }
 
 fn deserialize_u64_value<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>

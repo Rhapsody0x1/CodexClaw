@@ -16,9 +16,9 @@ use tracing::{debug, info, warn};
 use super::{
     client::{JsonRpcClient, ServerRequest},
     protocol::{
-        ApprovalDecision, CommandApprovalParams, CommandApprovalResponse, ElicitationResponse,
-        FileChangeApprovalParams, FileChangeApprovalResponse, JsonRpcError, McpElicitationParams,
-        PermissionsApprovalParams, PermissionsApprovalResponse, SimpleDecision, method,
+        ApprovalDecision, ApprovalDecisionResponse, CommandApprovalParams, ElicitationResponse,
+        FileChangeApprovalParams, JsonRpcError, McpElicitationParams, PermissionsApprovalParams,
+        SimpleDecision, method,
     },
     supervisor::AppServerSupervisor,
 };
@@ -179,12 +179,10 @@ impl ApprovalBroker {
     }
 
     async fn dispatch_command(&self, client: &Arc<JsonRpcClient>, req: ServerRequest) {
-        let params: CommandApprovalParams = match serde_json::from_value(req.params.clone()) {
-            Ok(p) => p,
-            Err(err) => {
-                warn!(error = %err, "failed to parse command approval params");
-                return respond_parse_err(client, req.id).await;
-            }
+        let Some(params) =
+            parse_approval_params::<CommandApprovalParams>(client, &req, "command approval").await
+        else {
+            return;
         };
         let has_handler = self.handler_tx.lock().await.is_some();
         info!(
@@ -200,82 +198,67 @@ impl ApprovalBroker {
             cwd: params.cwd,
             reason: params.reason,
         };
-        let outcome = self
-            .ask_outcome(|tx| ApprovalRequest::Command { event, reply: tx })
-            .await;
-        let resp = CommandApprovalResponse {
-            decision: outcome.to_decision(),
-        };
-        let _ = client.respond_ok(req.id, &resp).await;
+        self.respond_with_outcome(client, req.id, |tx| ApprovalRequest::Command {
+            event,
+            reply: tx,
+        })
+        .await;
     }
 
     async fn dispatch_file_change(&self, client: &Arc<JsonRpcClient>, req: ServerRequest) {
-        let params: FileChangeApprovalParams = match serde_json::from_value(req.params.clone()) {
-            Ok(p) => p,
-            Err(err) => {
-                warn!(error = %err, "failed to parse file-change approval params");
-                return respond_parse_err(client, req.id).await;
-            }
+        let Some(params) =
+            parse_approval_params::<FileChangeApprovalParams>(client, &req, "file-change approval")
+                .await
+        else {
+            return;
         };
         let event = FileChangeApprovalEvent {
             reason: params.reason,
             grant_root: params.grant_root,
             file_changes: params.file_changes,
         };
-        let outcome = self
-            .ask_outcome(|tx| ApprovalRequest::FileChange { event, reply: tx })
-            .await;
-        let resp = FileChangeApprovalResponse {
-            decision: outcome.to_decision(),
-        };
-        let _ = client.respond_ok(req.id, &resp).await;
+        self.respond_with_outcome(client, req.id, |tx| ApprovalRequest::FileChange {
+            event,
+            reply: tx,
+        })
+        .await;
     }
 
     async fn dispatch_permissions(&self, client: &Arc<JsonRpcClient>, req: ServerRequest) {
-        let params: PermissionsApprovalParams = match serde_json::from_value(req.params.clone()) {
-            Ok(p) => p,
-            Err(err) => {
-                warn!(error = %err, "failed to parse permissions approval params");
-                return respond_parse_err(client, req.id).await;
-            }
+        let Some(params) = parse_approval_params::<PermissionsApprovalParams>(
+            client,
+            &req,
+            "permissions approval",
+        )
+        .await
+        else {
+            return;
         };
         let event = PermissionsApprovalEvent {
             reason: params.reason,
             permissions: params.permissions,
         };
-        let outcome = self
-            .ask_outcome(|tx| ApprovalRequest::Permissions { event, reply: tx })
-            .await;
-        let resp = PermissionsApprovalResponse {
-            decision: outcome.to_decision(),
-        };
-        let _ = client.respond_ok(req.id, &resp).await;
+        self.respond_with_outcome(client, req.id, |tx| ApprovalRequest::Permissions {
+            event,
+            reply: tx,
+        })
+        .await;
     }
 
     async fn dispatch_elicitation(&self, client: &Arc<JsonRpcClient>, req: ServerRequest) {
-        let params: McpElicitationParams = match serde_json::from_value(req.params.clone()) {
-            Ok(p) => p,
-            Err(err) => {
-                warn!(error = %err, "failed to parse elicitation params");
-                return respond_parse_err(client, req.id).await;
-            }
+        let Some(params) =
+            parse_approval_params::<McpElicitationParams>(client, &req, "elicitation").await
+        else {
+            return;
         };
         let event = ElicitationEvent {
             thread_id: params.thread_id,
             server: params.server,
         };
         let (tx, rx) = oneshot::channel();
-        let sent = {
-            let guard = self.handler_tx.lock().await;
-            if let Some(sender) = guard.as_ref() {
-                sender
-                    .send(ApprovalRequest::Elicitation { event, reply: tx })
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let sent = self
+            .send_to_handler(ApprovalRequest::Elicitation { event, reply: tx })
+            .await;
         let resp = if sent {
             match rx.await {
                 Ok(Some(content)) => ElicitationResponse::Accept { content },
@@ -287,24 +270,56 @@ impl ApprovalBroker {
         let _ = client.respond_ok(req.id, &resp).await;
     }
 
+    /// Ask the handler for a decision and reply with the shared
+    /// `{decision}` response body.
+    async fn respond_with_outcome<F>(&self, client: &Arc<JsonRpcClient>, id: JsonValue, build: F)
+    where
+        F: FnOnce(oneshot::Sender<ApprovalOutcome>) -> ApprovalRequest,
+    {
+        let outcome = self.ask_outcome(build).await;
+        let resp = ApprovalDecisionResponse {
+            decision: outcome.to_decision(),
+        };
+        let _ = client.respond_ok(id, &resp).await;
+    }
+
     async fn ask_outcome<F>(&self, build: F) -> ApprovalOutcome
     where
         F: FnOnce(oneshot::Sender<ApprovalOutcome>) -> ApprovalRequest,
     {
         let (tx, rx) = oneshot::channel();
-        let request = build(tx);
-        let sent = {
-            let guard = self.handler_tx.lock().await;
-            if let Some(sender) = guard.as_ref() {
-                sender.send(request).await.is_ok()
-            } else {
-                false
-            }
-        };
-        if !sent {
+        if !self.send_to_handler(build(tx)).await {
             return ApprovalOutcome::Decline;
         }
         rx.await.unwrap_or(ApprovalOutcome::Decline)
+    }
+
+    /// Send a request to the installed handler; `false` when no handler is
+    /// installed or its channel is closed.
+    async fn send_to_handler(&self, request: ApprovalRequest) -> bool {
+        let guard = self.handler_tx.lock().await;
+        if let Some(sender) = guard.as_ref() {
+            sender.send(request).await.is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+/// Parse `req.params` as `P`; on failure log it, reply invalid-params, and
+/// return `None`.
+async fn parse_approval_params<P: serde::de::DeserializeOwned>(
+    client: &Arc<JsonRpcClient>,
+    req: &ServerRequest,
+    label: &str,
+) -> Option<P> {
+    match serde_json::from_value(req.params.clone()) {
+        Ok(params) => Some(params),
+        Err(err) => {
+            warn!(error = %err, "failed to parse {} params", label);
+            respond_parse_err(client, req.id.clone()).await;
+            None
+        }
     }
 }
 

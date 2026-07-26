@@ -369,38 +369,30 @@ fn derive_item_text(p: &ItemPayload) -> Option<String> {
     }
     // For reasoning items, text may be in `content` / `summary`.
     if p.item_type == "reasoning" {
-        if let Some(content) = p.content.as_ref().and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            } else {
-                v.as_str().map(str::to_owned)
+        for source in [p.content.as_ref(), p.summary.as_ref()] {
+            if let Some(text) = source.and_then(json_text_or_join)
+                && !text.is_empty()
+            {
+                return Some(text);
             }
-        }) && !content.is_empty()
-        {
-            return Some(content);
-        }
-        if let Some(summary) = p.summary.as_ref().and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            } else {
-                v.as_str().map(str::to_owned)
-            }
-        }) && !summary.is_empty()
-        {
-            return Some(summary);
         }
     }
     None
+}
+
+/// A string value as-is; an array joined line-per-string-element; `None`
+/// otherwise.
+fn json_text_or_join(v: &JsonValue) -> Option<String> {
+    if let Some(arr) = v.as_array() {
+        Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    } else {
+        v.as_str().map(str::to_owned)
+    }
 }
 
 #[cfg(test)]

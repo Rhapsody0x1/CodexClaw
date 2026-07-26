@@ -6,7 +6,12 @@
 //! `PassiveTurnEmitter` so the QQ output is byte-identical to the previous
 //! `codex exec --json` pipeline.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value as JsonValue;
@@ -21,7 +26,7 @@ use crate::{
         events::{TokenUsage, TokenUsageInfo},
         types::{CompactRequest, ExecutionRequest, ExecutionResult, ExecutionUpdate},
     },
-    model::settings::{ContextMode, ServiceTier},
+    model::settings::{ContextMode, ReasoningEffort, ServiceTier},
 };
 
 use super::{
@@ -34,7 +39,7 @@ use super::{
         ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ThreadUnsubscribeParams,
         ThreadUnsubscribeResponse, ThreadUnsubscribeStatus, TokenUsageUpdatedNotification,
         TurnCompletedNotification, TurnInputItem, TurnInterruptParams, TurnInterruptResponse,
-        TurnPlanUpdatedNotification, TurnStartParams, TurnStartResponse, method,
+        TurnStartParams, TurnStartResponse, method,
     },
     supervisor::AppServerSupervisor,
 };
@@ -62,22 +67,38 @@ pub(crate) struct RuntimeConfigSignature {
 
 impl RuntimeConfigSignature {
     fn from_request(req: &ExecutionRequest) -> Self {
-        Self {
-            model: req.model.clone(),
-            reasoning_effort: req.reasoning_effort.as_str().to_string(),
-            context_mode: req.context_mode,
-            service_tier: req.service_tier,
-            cwd: req.workspace_dir.clone(),
-        }
+        Self::from_parts(
+            req.model.clone(),
+            req.reasoning_effort,
+            req.context_mode,
+            req.service_tier,
+            req.workspace_dir.clone(),
+        )
     }
 
     fn from_compact_request(req: &CompactRequest) -> Self {
+        Self::from_parts(
+            req.model.clone(),
+            req.reasoning_effort,
+            req.context_mode,
+            req.service_tier,
+            req.workspace_dir.clone(),
+        )
+    }
+
+    fn from_parts(
+        model: Option<String>,
+        reasoning_effort: ReasoningEffort,
+        context_mode: Option<ContextMode>,
+        service_tier: Option<ServiceTier>,
+        cwd: PathBuf,
+    ) -> Self {
         Self {
-            model: req.model.clone(),
-            reasoning_effort: req.reasoning_effort.as_str().to_string(),
-            context_mode: req.context_mode,
-            service_tier: req.service_tier,
-            cwd: req.workspace_dir.clone(),
+            model,
+            reasoning_effort: reasoning_effort.as_str().to_string(),
+            context_mode,
+            service_tier,
+            cwd,
         }
     }
 }
@@ -326,18 +347,15 @@ impl AppServerSession {
         let resp: ThreadResumeResponse = client
             .request::<ThreadResumeParams, ThreadResumeResponse>(
                 "thread/resume",
-                &ThreadResumeParams {
-                    thread_id: request.session_id.clone(),
-                    model: request.model.clone(),
-                    cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
-                    approval_policy: None,
-                    approvals_reviewer: None,
-                    sandbox: None,
-                    permissions: None,
-                    runtime_workspace_roots: build_runtime_workspace_roots(&request.add_dirs),
-                    service_tier: request.service_tier.map(service_tier_to_wire),
-                    config: build_compact_config_overrides(request),
-                },
+                &resume_params(
+                    request.session_id.clone(),
+                    request.model.clone(),
+                    &request.workspace_dir,
+                    &request.add_dirs,
+                    request.service_tier,
+                    None,
+                    build_compact_config_overrides(request),
+                ),
             )
             .await
             .context("thread/resume before compact")?;
@@ -376,18 +394,15 @@ impl AppServerSession {
             match client
                 .request::<ThreadResumeParams, ThreadResumeResponse>(
                     "thread/resume",
-                    &ThreadResumeParams {
-                        thread_id: existing.clone(),
-                        model: request.model.clone(),
-                        cwd: Some(request.workspace_dir.to_string_lossy().into_owned()),
-                        approval_policy: policy.approval_policy,
-                        approvals_reviewer: policy.approvals_reviewer.clone(),
-                        sandbox: thread_sandbox(policy, &request.add_dirs),
-                        permissions: None,
-                        runtime_workspace_roots: build_runtime_workspace_roots(&request.add_dirs),
-                        service_tier: request.service_tier.map(service_tier_to_wire),
-                        config: build_config_overrides(request),
-                    },
+                    &resume_params(
+                        existing.clone(),
+                        request.model.clone(),
+                        &request.workspace_dir,
+                        &request.add_dirs,
+                        request.service_tier,
+                        Some(policy),
+                        build_config_overrides(request),
+                    ),
                 )
                 .await
             {
@@ -508,6 +523,31 @@ fn is_thread_closed(thread_id: &str, notification: &Notification) -> bool {
             .get("threadId")
             .and_then(|value| value.as_str())
             == Some(thread_id)
+}
+
+/// Build `thread/resume` params. `policy: None` (the compact path) defers
+/// approval/sandbox handling entirely to the server's config defaults.
+fn resume_params(
+    thread_id: String,
+    model: Option<String>,
+    workspace_dir: &Path,
+    add_dirs: &[PathBuf],
+    service_tier: Option<ServiceTier>,
+    policy: Option<&TurnPolicy>,
+    config: HashMap<String, JsonValue>,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id,
+        model,
+        cwd: Some(workspace_dir.to_string_lossy().into_owned()),
+        approval_policy: policy.and_then(|p| p.approval_policy),
+        approvals_reviewer: policy.and_then(|p| p.approvals_reviewer.clone()),
+        sandbox: policy.and_then(|p| thread_sandbox(p, add_dirs)),
+        permissions: None,
+        runtime_workspace_roots: build_runtime_workspace_roots(add_dirs),
+        service_tier: service_tier.map(service_tier_to_wire),
+        config,
+    }
 }
 
 fn build_turn_input(req: &ExecutionRequest) -> Vec<TurnInputItem> {
@@ -737,49 +777,34 @@ impl TurnRunner {
         let params = &n.params;
         match method {
             method::ITEM_STARTED => {
-                if let Ok(item) = serde_json::from_value::<ItemNotification>(params.clone()) {
-                    let updates = translator::translate_item_started(&mut self.state, &item);
-                    self.emit_many(updates);
-                }
+                self.on_translated(params, translator::translate_item_started);
             }
             method::ITEM_UPDATED => {
-                if let Ok(item) = serde_json::from_value::<ItemNotification>(params.clone()) {
-                    let updates = translator::translate_item_updated(&mut self.state, &item);
-                    self.emit_many(updates);
-                }
+                self.on_translated(params, translator::translate_item_updated);
             }
             method::ITEM_COMPLETED => {
-                if let Ok(item) = serde_json::from_value::<ItemNotification>(params.clone()) {
-                    let updates = translator::translate_item_completed(&mut self.state, &item);
-                    self.emit_many(updates);
-                }
+                self.on_translated(params, translator::translate_item_completed);
             }
             method::TURN_PLAN_UPDATED => {
-                if let Ok(p) = serde_json::from_value::<TurnPlanUpdatedNotification>(params.clone())
-                {
-                    let updates = translator::translate_turn_plan_updated(&mut self.state, &p);
-                    self.emit_many(updates);
-                }
+                self.on_translated(params, translator::translate_turn_plan_updated);
             }
             method::THREAD_TOKEN_USAGE_UPDATED => {
-                if let Ok(p) =
-                    serde_json::from_value::<TokenUsageUpdatedNotification>(params.clone())
-                {
-                    translator::translate_token_usage(&mut self.state, &p);
-                }
+                self.on_translated(params, |state, p: &TokenUsageUpdatedNotification| {
+                    translator::translate_token_usage(state, p);
+                    Vec::new()
+                });
             }
             method::THREAD_COMPACTED => {
-                if let Ok(p) = serde_json::from_value::<CompactedNotification>(params.clone()) {
-                    let update = translator::translate_compacted(&mut self.state, &p);
-                    self.emit(update);
-                }
+                self.on_translated(params, |state, p: &CompactedNotification| {
+                    vec![translator::translate_compacted(state, p)]
+                });
             }
             method::MODEL_REROUTED => {
-                if let Ok(p) = serde_json::from_value::<ModelReroutedNotification>(params.clone())
-                    && let Some(update) = translator::translate_model_rerouted(&p)
-                {
-                    self.emit(update);
-                }
+                self.on_translated(params, |_state, p: &ModelReroutedNotification| {
+                    translator::translate_model_rerouted(p)
+                        .into_iter()
+                        .collect()
+                });
             }
             method::ERROR => {
                 let error = params.get("error").cloned().unwrap_or(JsonValue::Null);
@@ -853,9 +878,17 @@ impl TurnRunner {
         }
     }
 
-    fn emit(&self, update: ExecutionUpdate) {
-        if let Some(tx) = self.update_tx.as_ref() {
-            let _ = tx.send(update);
+    /// Parse `params` as `T` (silently skipping malformed payloads, matching
+    /// the per-arm behavior this replaces) and emit whatever the translator
+    /// produces.
+    fn on_translated<T, F>(&mut self, params: &JsonValue, translate: F)
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnOnce(&mut TurnState, &T) -> Vec<ExecutionUpdate>,
+    {
+        if let Ok(parsed) = serde_json::from_value::<T>(params.clone()) {
+            let updates = translate(&mut self.state, &parsed);
+            self.emit_many(updates);
         }
     }
 
@@ -895,15 +928,8 @@ async fn wait_for_compaction(
     cancel_rx: &mut Option<oneshot::Receiver<()>>,
 ) -> Result<()> {
     loop {
-        let notification = match cancel_rx.as_mut() {
-            Some(cancel) => {
-                tokio::select! {
-                    _ = cancel => return Err(anyhow!("codex turn aborted by user")),
-                    result = timeout(OUTPUT_IDLE_TIMEOUT, next_compaction_notification(&mut notifications)) => result
-                        .context(format!("codex compact timed out ({} seconds without completion)", OUTPUT_IDLE_TIMEOUT.as_secs()))??,
-                }
-            }
-            None => timeout(
+        let next = async {
+            timeout(
                 OUTPUT_IDLE_TIMEOUT,
                 next_compaction_notification(&mut notifications),
             )
@@ -911,7 +937,16 @@ async fn wait_for_compaction(
             .context(format!(
                 "codex compact timed out ({} seconds without completion)",
                 OUTPUT_IDLE_TIMEOUT.as_secs()
-            ))??,
+            ))?
+        };
+        let notification = match cancel_rx.as_mut() {
+            Some(cancel) => {
+                tokio::select! {
+                    _ = cancel => return Err(anyhow!("codex turn aborted by user")),
+                    result = next => result?,
+                }
+            }
+            None => next.await?,
         };
 
         if notification.method.is_empty() {

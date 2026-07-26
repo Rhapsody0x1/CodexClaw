@@ -685,18 +685,10 @@ pub(crate) enum AmendedDecision {
     },
 }
 
+/// Response body shared by command / file-change / permissions approvals —
+/// each replies with the same single `decision` field.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CommandApprovalResponse {
-    pub(crate) decision: ApprovalDecision,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct FileChangeApprovalResponse {
-    pub(crate) decision: ApprovalDecision,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PermissionsApprovalResponse {
+pub(crate) struct ApprovalDecisionResponse {
     pub(crate) decision: ApprovalDecision,
 }
 
