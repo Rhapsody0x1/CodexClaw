@@ -30,10 +30,7 @@ pub(crate) async fn write_job_metadata(
     data_dir: &Path,
     codex_home_global: &Path,
 ) -> Result<()> {
-    let job_dir = new_job_dir(data_dir, &job.id);
-    tokio::fs::create_dir_all(job_dir.join("workspace")).await?;
-    tokio::fs::create_dir_all(job_skill_dir(data_dir, &job.id)).await?;
-    tokio::fs::create_dir_all(job_dir.join("runs")).await?;
+    let job_dir = prepare_job_dirs(data_dir, &job.id).await?;
     let job_toml = toml::to_string_pretty(job)?;
     tokio::fs::write(job_dir.join("job.toml"), job_toml).await?;
     let claw_job = serde_json::json!({
@@ -105,9 +102,7 @@ pub(crate) async fn recycle_job_files(
 
 async fn ensure_job_skill_link(data_dir: &Path, codex_home_global: &Path, id: &str) -> Result<()> {
     let skills_dir = job_skill_dir(data_dir, id);
-    let link = codex_home_global
-        .join("skills")
-        .join(format!("claw-cron-{id}"));
+    let link = job_skill_link(codex_home_global, id);
     tokio::fs::create_dir_all(link.parent().unwrap_or(codex_home_global)).await?;
     if link.exists() {
         return Ok(());
@@ -130,9 +125,7 @@ async fn ensure_job_skill_link(data_dir: &Path, codex_home_global: &Path, id: &s
 }
 
 async fn remove_job_skill_link(codex_home_global: &Path, id: &str) -> Result<()> {
-    let link = codex_home_global
-        .join("skills")
-        .join(format!("claw-cron-{id}"));
+    let link = job_skill_link(codex_home_global, id);
     match tokio::fs::symlink_metadata(&link).await {
         Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
             tokio::fs::remove_file(&link).await?;
@@ -152,6 +145,23 @@ fn job_skill_dir(data_dir: &Path, id: &str) -> PathBuf {
         .join("workspace")
         .join(".agents")
         .join("skills")
+}
+
+/// Where the job's skills dir is linked from under the global codex home.
+fn job_skill_link(codex_home_global: &Path, id: &str) -> PathBuf {
+    codex_home_global
+        .join("skills")
+        .join(format!("claw-cron-{id}"))
+}
+
+/// The job's `runs/` log directory, a sibling of its workspace. Derived from
+/// `workspace_dir` (not `DataLayout`) because `--workspace` may relocate the
+/// workspace outside the data dir.
+pub(crate) fn job_runs_dir(job: &CronJob) -> PathBuf {
+    job.workspace_dir
+        .parent()
+        .unwrap_or(job.workspace_dir.as_path())
+        .join("runs")
 }
 
 pub(crate) async fn queue_pending_delivery(
@@ -231,11 +241,7 @@ pub(crate) async fn write_run_log(
     body: &str,
     runs_retention: usize,
 ) -> Result<()> {
-    let runs_dir = job
-        .workspace_dir
-        .parent()
-        .unwrap_or(job.workspace_dir.as_path())
-        .join("runs");
+    let runs_dir = job_runs_dir(job);
     tokio::fs::create_dir_all(&runs_dir).await?;
     let name = format!("{}.log", ts_slug(run_at));
     tokio::fs::write(runs_dir.join(name), body).await?;

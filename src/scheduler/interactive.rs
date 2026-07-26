@@ -180,25 +180,16 @@ pub(crate) async fn finish_job_for_owner(app: &App, openid: &str, reason: &str) 
 }
 
 pub(crate) async fn sweep_expired(app: &App) -> Result<()> {
-    let root = DataLayout::new(&app.config.general.data_dir).cron_jobs_dir();
-    let mut entries = match tokio::fs::read_dir(&root).await {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", root.display())),
-    };
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path().join("pending.json");
-        let raw = match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
+    // Tolerant scan: one unreadable pending.json must not stop the sweep from
+    // reaping the others, so failures are logged and skipped.
+    for (path, read) in list_pending(&app.config.general.data_dir).await? {
+        let pending = match read {
+            PendingRead::Parsed(pending) => *pending,
+            PendingRead::Unreadable(err) => {
                 warn!(path = %path.display(), error = %err, "failed to read pending interaction");
                 continue;
             }
-        };
-        let pending = match serde_json::from_str::<PendingInteraction>(&raw) {
-            Ok(pending) => pending,
-            Err(err) => {
+            PendingRead::Unparsable(err) => {
                 warn!(path = %path.display(), error = %err, "failed to parse pending interaction");
                 continue;
             }
@@ -305,22 +296,58 @@ pub(crate) async fn pending_for_owner(
     data_dir: &Path,
     openid: &str,
 ) -> Result<Option<PendingInteraction>> {
-    let root = DataLayout::new(data_dir).cron_jobs_dir();
-    let mut entries = match tokio::fs::read_dir(&root).await {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("failed to read {}", root.display())),
-    };
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path().join("pending.json");
-        let Some(pending) = read_json_opt_async::<PendingInteraction>(&path).await? else {
-            continue;
+    // Strict scan: routing a user's reply to the wrong (or no) interaction on
+    // a silently skipped file would be worse than surfacing the error.
+    for (path, read) in list_pending(data_dir).await? {
+        let pending = match read {
+            PendingRead::Parsed(pending) => *pending,
+            PendingRead::Unreadable(err) => {
+                return Err(err).with_context(|| format!("failed to read {}", path.display()));
+            }
+            PendingRead::Unparsable(err) => {
+                return Err(err).with_context(|| format!("failed to parse {}", path.display()));
+            }
         };
         if pending.owner_openid == openid {
             return Ok(Some(pending));
         }
     }
     Ok(None)
+}
+
+/// The per-file outcome of scanning a cron job dir for `pending.json`.
+enum PendingRead {
+    Parsed(Box<PendingInteraction>),
+    Unreadable(std::io::Error),
+    Unparsable(serde_json::Error),
+}
+
+/// One entry per cron-job directory that holds (or fails to yield) a
+/// `pending.json`; directories without one are omitted, and a missing
+/// cron-jobs root yields an empty list. Read/parse failures are returned as
+/// data rather than handled here because the two callers disagree on policy:
+/// [`sweep_expired`] warns and skips, [`pending_for_owner`] propagates.
+async fn list_pending(data_dir: &Path) -> Result<Vec<(PathBuf, PendingRead)>> {
+    let root = DataLayout::new(data_dir).cron_jobs_dir();
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("failed to read {}", root.display())),
+    };
+    let mut found = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path().join("pending.json");
+        let read = match tokio::fs::read_to_string(&path).await {
+            Ok(raw) => match serde_json::from_str::<PendingInteraction>(&raw) {
+                Ok(pending) => PendingRead::Parsed(Box::new(pending)),
+                Err(err) => PendingRead::Unparsable(err),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => PendingRead::Unreadable(err),
+        };
+        found.push((path, read));
+    }
+    Ok(found)
 }
 
 async fn read_pending(data_dir: &Path, job_id: &str) -> Result<Option<PendingInteraction>> {
@@ -414,5 +441,61 @@ mod tests {
         assert!(prompt.contains("<<<CLAW_END>>>"));
         assert!(prompt.contains("ask a question"));
         assert!(prompt.contains("openid=owner"));
+    }
+
+    fn sample_pending(job_id: &str, owner: &str) -> PendingInteraction {
+        PendingInteraction {
+            job_id: job_id.to_string(),
+            title: "quiz".to_string(),
+            owner_openid: owner.to_string(),
+            codex_session_id: None,
+            workspace_dir: PathBuf::from("/tmp"),
+            end_signal: "<<<CLAW_END>>>".to_string(),
+            rounds_done: 0,
+            max_rounds_hard_cap: 10,
+            expires_at: Utc::now(),
+            parked_fg_alias: None,
+            cron_fg_alias: "cron-quiz-1".to_string(),
+            session_strategy: SessionStrategy::PerInvocation,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_for_owner_scans_job_dirs_for_the_owner() {
+        let data = tempfile::tempdir().unwrap();
+        for (job_id, owner) in [("job-a", "other"), ("job-b", "me")] {
+            let pending = sample_pending(job_id, owner);
+            write_pending(data.path(), &pending).await.unwrap();
+        }
+
+        let found = pending_for_owner(data.path(), "me").await.unwrap();
+        assert_eq!(found.unwrap().job_id, "job-b");
+        assert!(
+            pending_for_owner(data.path(), "nobody")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_for_owner_missing_root_is_none_but_corrupt_file_propagates() {
+        let data = tempfile::tempdir().unwrap();
+        // No cron-jobs dir at all: cleanly nothing pending.
+        assert!(
+            pending_for_owner(data.path(), "me")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Strict mode: a corrupt pending.json is an error, not a skip.
+        let job_dir = new_job_dir(data.path(), "job-x");
+        tokio::fs::create_dir_all(&job_dir).await.unwrap();
+        tokio::fs::write(job_dir.join("pending.json"), "not json")
+            .await
+            .unwrap();
+        let err = pending_for_owner(data.path(), "me").await.unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
     }
 }

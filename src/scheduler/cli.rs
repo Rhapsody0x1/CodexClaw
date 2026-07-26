@@ -191,11 +191,7 @@ async fn tail(session: &SessionStore, args: &[String]) -> Result<()> {
         .get_cron_job(id)
         .await?
         .ok_or_else(|| anyhow!("job not found `{id}`"))?;
-    let runs_dir = job
-        .workspace_dir
-        .parent()
-        .unwrap_or(job.workspace_dir.as_path())
-        .join("runs");
+    let runs_dir = store::job_runs_dir(&job);
     let mut entries = std::fs::read_dir(&runs_dir)
         .with_context(|| format!("failed to read {}", runs_dir.display()))?
         .filter_map(Result::ok)
