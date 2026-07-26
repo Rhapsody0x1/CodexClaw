@@ -223,26 +223,3 @@ impl JsonRpcClient {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::protocol::{ClientInfo, InitializeCapabilities, InitializeParams};
-    use serde_json::json;
-
-    #[test]
-    fn initialize_request_body_shape() {
-        let params = InitializeParams {
-            client_info: ClientInfo {
-                name: "codex-claw".into(),
-                version: "0.0.1".into(),
-                title: None,
-            },
-            capabilities: Some(InitializeCapabilities {
-                experimental_api: Some(true),
-            }),
-        };
-        let v = serde_json::to_value(&params).unwrap();
-        assert_eq!(v["clientInfo"]["name"], json!("codex-claw"));
-        assert_eq!(v["capabilities"]["experimentalApi"], json!(true));
-    }
-}

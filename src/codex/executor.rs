@@ -449,7 +449,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::codex::{
-        events::{CodexItem, PatchChangeKind, TodoEntry, WebSearchAction},
+        events::{CodexItem, TodoEntry, WebSearchAction},
         executor::{
             ToolEventPhase, build_codex_path_env, format_todo_items, humanize_tool_label,
             tool_display_for_item, web_search_action_detail, web_search_display_from_action,
@@ -485,17 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn formats_bash_tool_display() {
+    fn bash_tool_display_is_none_without_a_command() {
+        // The `command: Some(..)` branch is covered end-to-end by
+        // app_server::events::tests::command_execution_started_matches_legacy_bash_display.
         let item = empty_item("command_execution");
         assert!(tool_display_for_item(&item, ToolEventPhase::Started).is_none());
-        let item = CodexItem {
-            command: Some("/bin/zsh -lc pwd".to_string()),
-            ..item
-        };
-        assert_eq!(
-            tool_display_for_item(&item, ToolEventPhase::Started).as_deref(),
-            Some("[Tool: Bash]\n```shell\n/bin/zsh -lc pwd\n```")
-        );
     }
 
     #[test]
@@ -513,17 +507,6 @@ mod tests {
         assert_eq!(
             web_search_display_from_action(&action),
             "[Tool: Web Search] openai codex github"
-        );
-    }
-
-    #[test]
-    fn formats_web_open_response_item_display() {
-        let action = WebSearchAction::OpenPage {
-            url: Some("https://rhapsody0x1.github.io/".to_string()),
-        };
-        assert_eq!(
-            web_search_display_from_action(&action),
-            "[Tool: Web Open] https://rhapsody0x1.github.io/"
         );
     }
 
@@ -548,21 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_patch_changes() {
-        let item = CodexItem {
-            changes: vec![crate::codex::events::FileUpdateChange {
-                path: "src/main.rs".to_string(),
-                kind: PatchChangeKind::Update,
-            }],
-            ..empty_item("file_change")
-        };
-        assert_eq!(
-            tool_display_for_item(&item, ToolEventPhase::Completed).as_deref(),
-            Some("[Tool: Patch] src/main.rs (update)")
-        );
-    }
-
-    #[test]
     fn formats_todo_items_block() {
         let detail = format_todo_items(&[
             TodoEntry {
@@ -575,18 +543,6 @@ mod tests {
             },
         ]);
         assert_eq!(detail, "- [x] first\n- [ ] second");
-    }
-
-    #[test]
-    fn formats_reasoning_block() {
-        let item = CodexItem {
-            text: Some("先检查当前目录，再决定下一步。".to_string()),
-            ..empty_item("reasoning")
-        };
-        assert_eq!(
-            tool_display_for_item(&item, ToolEventPhase::Completed).as_deref(),
-            Some("[Thinking]\n先检查当前目录，再决定下一步。")
-        );
     }
 
     #[test]

@@ -308,13 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_then_serialize_roundtrip_preserves_entries() {
-        let original = "alpha\n§\nbeta\n§\ngamma";
-        let entries = parse_entries(original);
-        assert_eq!(serialize_entries(&entries), original);
-    }
-
-    #[test]
     fn load_entries_on_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.md");

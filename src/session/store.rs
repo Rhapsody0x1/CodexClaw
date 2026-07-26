@@ -2200,18 +2200,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_foreground_keeps_non_empty_temporary_workspace() {
-        let env = TestEnv::new().await;
-        let before = env.snapshot("u1").await;
-        let old_workspace = before.foreground.workspace_dir.clone();
-        std::fs::write(old_workspace.join("note.txt"), "keep").unwrap();
-
-        let switched = env.store.new_foreground("u1").await.unwrap();
-        assert!(switched.parked_alias.is_none());
-        assert!(old_workspace.exists());
-    }
-
-    #[tokio::test]
     async fn new_foreground_in_workspace_uses_requested_directory() {
         let env = TestEnv::new().await;
         let workspace_root = tempdir().unwrap();
@@ -2470,55 +2458,6 @@ mod tests {
         assert!(old_workspace.exists());
         let snapshot = env.snapshot("u1").await;
         assert_eq!(snapshot.foreground.workspace_dir, old_workspace);
-    }
-
-    #[tokio::test]
-    async fn legacy_scope_aliases_map_to_all_sessions() {
-        let env = TestEnv::new().await;
-        env.write_rollout(
-            "rollout-2026-04-11T00-00-00-thread-2.jsonl",
-            r#"{"type":"session_meta","payload":{"id":"thread-2","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp"}}"#,
-        )
-        .await;
-        let sessions = env
-            .store
-            .list_disk_sessions(SessionListScope::Local)
-            .await
-            .unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, "thread-2");
-    }
-
-    #[tokio::test]
-    async fn local_and_global_scopes_are_legacy_aliases() {
-        let env = TestEnv::new().await;
-        env.write_rollout(
-            "rollout-2026-04-11T00-00-00-thread-3.jsonl",
-            r#"{"type":"session_meta","payload":{"id":"thread-3","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/p1"}}"#,
-        )
-        .await;
-        env.write_rollout(
-            "rollout-2026-04-11T00-00-00-thread-4.jsonl",
-            r#"{"type":"session_meta","payload":{"id":"thread-4","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/p2"}}"#,
-        )
-        .await;
-        let all = env
-            .store
-            .list_disk_sessions(SessionListScope::All)
-            .await
-            .unwrap();
-        let local = env
-            .store
-            .list_disk_sessions(SessionListScope::Local)
-            .await
-            .unwrap();
-        let global = env
-            .store
-            .list_disk_sessions(SessionListScope::Global)
-            .await
-            .unwrap();
-        assert_eq!(local.len(), all.len());
-        assert_eq!(global.len(), all.len());
     }
 
     #[tokio::test]

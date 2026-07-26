@@ -142,13 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_arrays_ok() {
-        let parsed = parse_memory_response(r#"{"memory":[],"user":[]}"#).unwrap();
-        assert!(parsed.memory.is_empty());
-        assert!(parsed.user.is_empty());
-    }
-
-    #[test]
     fn parse_missing_keys_uses_defaults() {
         let parsed = parse_memory_response("{}").unwrap();
         assert!(parsed.memory.is_empty());
@@ -184,7 +177,9 @@ mod tests {
     #[test]
     fn parse_ignores_unknown_top_level_keys() {
         let raw = r#"{"memory":[],"user":[],"extra":"ignored"}"#;
-        parse_memory_response(raw).unwrap();
+        let parsed = parse_memory_response(raw).unwrap();
+        assert!(parsed.memory.is_empty());
+        assert!(parsed.user.is_empty());
     }
 
     #[test]

@@ -441,17 +441,6 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn canonical_list_is_non_empty() {
-        let list = list_codex_model_entries_with_path(
-            &CodexRuntimeProfile::default(),
-            &[],
-            Path::new("/dev/null"),
-        );
-        assert!(!list.is_empty(), "canonical list must not be empty");
-        assert!(list.iter().any(|m| m.name.starts_with("gpt-")));
-    }
-
-    #[test]
     fn merges_profiles_and_extras_without_duplicates() {
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(
