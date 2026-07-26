@@ -2,7 +2,6 @@ pub mod cli;
 pub(crate) mod cron_expr;
 pub(crate) mod ctx;
 pub(crate) mod interactive;
-pub(crate) mod jobs_file;
 pub(crate) mod loop_;
 pub(crate) mod runner;
 pub(crate) mod store;

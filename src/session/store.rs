@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::{Mutex, RwLock};
 
+use super::jobs_file;
 use crate::model::cron::CronJob;
-use crate::scheduler::jobs_file;
 use crate::session::rollout::{
     cache_imported_profile, copy_session_index_entry, copy_session_rollout,
     dialog_from_disk_session, extract_session_profile, insert_prefer_recent, prune_session_files,

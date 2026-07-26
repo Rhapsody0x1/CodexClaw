@@ -1,3 +1,4 @@
+pub(crate) mod jobs_file;
 mod rollout;
 pub mod state;
 pub(crate) mod store;

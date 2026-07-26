@@ -336,9 +336,7 @@ pub(crate) struct CollaborationMode {
 pub(crate) enum ModeKind {
     Default,
     Plan,
-    #[allow(dead_code)]
     Execute,
-    #[allow(dead_code)]
     PairProgramming,
 }
 
