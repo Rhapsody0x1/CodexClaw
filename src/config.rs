@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::session::state::ReasoningEffort;
+use crate::model::settings::ReasoningEffort;
 use crate::util::{layout::DataLayout, path::home_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

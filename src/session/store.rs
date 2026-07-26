@@ -12,7 +12,7 @@ use fs2::FileExt;
 use rand::{Rng, seq::SliceRandom};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::scheduler::store::CronJob;
+use crate::model::cron::CronJob;
 use crate::session::state::{
     CommandAlias, ContextMode, DialogOrigin, DialogProfile, DialogState, ImportedSessionProfile,
     PendingSetting, PersistedSessionState, ReasoningEffort, ServiceTier, SessionSettings,
@@ -1700,8 +1700,8 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::fs;
 
-    use crate::scheduler::store::fixtures::{shell_job, ts};
-    use crate::scheduler::store::{CronJob, CronKind};
+    use crate::model::cron::fixtures::{shell_job, ts};
+    use crate::model::cron::{CronJob, CronKind};
     use crate::session::state::{
         ContextMode, DialogOrigin, DialogProfile, DialogState, PersistedSessionState,
         ReasoningEffort, ServiceTier, UserSessionState,
