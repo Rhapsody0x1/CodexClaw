@@ -534,6 +534,10 @@ impl App {
         };
         let build_result = self_update::ensure_successful_build(&self.config).await?;
         if !build_result.success {
+            // Release the slot before the (network) reply, matching the
+            // pre-guard ordering: a message arriving mid-send should start a
+            // turn, not be bounced with "busy".
+            drop(busy);
             self.reply_text(openid, message_id, &build_result.summary)
                 .await?;
             return Ok(());
@@ -543,6 +547,8 @@ impl App {
         // service via an external supervisor's crash loop.
         if let Err(err) = self_update::smoke_test_binary(&build_result.binary_path).await {
             warn!(error = %err, "self-update smoke test failed; aborting update");
+            // Same as the build-failure path: free the slot before replying.
+            drop(busy);
             self.reply_text(
                 openid,
                 message_id,
