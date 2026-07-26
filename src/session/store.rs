@@ -1801,67 +1801,103 @@ fn write_cron_jobs_file(path: &Path, jobs: &BTreeMap<String, CronJob>) -> Result
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
 
-    use chrono::{DateTime, Utc};
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
     use tokio::fs;
 
-    use crate::scheduler::store::{CronJob, CronKind, DeliverPolicy, JobAction};
+    use crate::scheduler::store::fixtures::{shell_job, ts};
+    use crate::scheduler::store::{CronJob, CronKind};
     use crate::session::state::{
         ContextMode, DialogOrigin, DialogProfile, DialogState, PersistedSessionState,
-        ReasoningEffort, ServiceTier,
+        ReasoningEffort, ServiceTier, UserSessionState,
     };
 
     use super::{ALIAS_WORDS, SessionListScope, SessionStore};
 
-    fn sample_cron_job(id: &str, workspace_dir: std::path::PathBuf) -> CronJob {
-        let created_at = DateTime::parse_from_rfc3339("2026-05-10T10:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let next_run_at = DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        CronJob {
-            id: id.to_string(),
-            owner_openid: "owner-1".to_string(),
-            title: "drink reminder".to_string(),
-            kind: CronKind::OneShot { at: next_run_at },
-            action: JobAction::Shell {
-                program: "/bin/echo".to_string(),
-                args: vec!["ok".to_string()],
-                env: BTreeMap::new(),
-            },
-            workspace_dir,
-            deliver: DeliverPolicy::LogOnly,
-            created_at,
-            next_run_at: Some(next_run_at),
-            run_now_at: None,
-            last_run_at: None,
-            last_run_status: None,
-            run_count: 0,
-            failure_streak: 0,
-            disabled: false,
+    /// Shared harness for the store tests.
+    ///
+    /// The `TempDir` handles must outlive the store — dropping them is what
+    /// deletes the directories — so they are owned here rather than by a
+    /// helper that returns only the store.
+    struct TestEnv {
+        data: TempDir,
+        home: TempDir,
+        store: SessionStore,
+    }
+
+    impl TestEnv {
+        async fn new() -> Self {
+            Self::with_persisted_state(None).await
         }
+
+        /// Same as `new`, but seeds `session/state.json` before the store is
+        /// loaded so migrations run against it.
+        async fn with_persisted_state(state: Option<&PersistedSessionState>) -> Self {
+            let data = tempdir().unwrap();
+            let home = tempdir().unwrap();
+            if let Some(state) = state {
+                let state_path = data.path().join("session/state.json");
+                fs::create_dir_all(state_path.parent().unwrap())
+                    .await
+                    .unwrap();
+                fs::write(&state_path, serde_json::to_string_pretty(state).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let store = SessionStore::load_or_init(data.path(), home.path(), home.path())
+                .await
+                .unwrap();
+            Self { data, home, store }
+        }
+
+        fn data_path(&self) -> &Path {
+            self.data.path()
+        }
+
+        /// Codex home used both as the global and the system rollout root.
+        fn home_path(&self) -> &Path {
+            self.home.path()
+        }
+
+        async fn snapshot(&self, openid: &str) -> UserSessionState {
+            self.store.snapshot_for_user(openid).await.unwrap()
+        }
+
+        /// Writes one rollout file under the codex home and returns its path.
+        async fn write_rollout(&self, name: &str, body: &str) -> PathBuf {
+            let session_dir = self.home_path().join("sessions/2026/04/11");
+            fs::create_dir_all(&session_dir).await.unwrap();
+            let path = session_dir.join(name);
+            fs::write(&path, body).await.unwrap();
+            path
+        }
+    }
+
+    fn sample_cron_job(id: &str, workspace_dir: PathBuf) -> CronJob {
+        let next_run_at = ts("2026-05-10T12:00:00Z");
+        let mut job = shell_job(id, workspace_dir, ts("2026-05-10T10:00:00Z"));
+        job.owner_openid = "owner-1".to_string();
+        job.title = "drink reminder".to_string();
+        job.kind = CronKind::OneShot { at: next_run_at };
+        job.next_run_at = Some(next_run_at);
+        job
     }
 
     #[tokio::test]
     async fn cron_jobs_persist_to_scheduler_file() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
+        let env = TestEnv::new().await;
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
         let job = sample_cron_job("job-1", workspace.path().join("cron-workspace"));
 
-        store.upsert_cron_job(job.clone()).await.unwrap();
+        env.store.upsert_cron_job(job.clone()).await.unwrap();
 
-        let jobs_path = data.path().join("scheduler/jobs.json");
+        let jobs_path = env.data_path().join("scheduler/jobs.json");
         let raw_jobs = fs::read_to_string(&jobs_path).await.unwrap();
         let persisted_jobs: BTreeMap<String, CronJob> = serde_json::from_str(&raw_jobs).unwrap();
         assert_eq!(persisted_jobs.get("job-1"), Some(&job));
 
-        let state_raw = fs::read_to_string(data.path().join("session/state.json"))
+        let state_raw = fs::read_to_string(env.data_path().join("session/state.json"))
             .await
             .unwrap();
         let state: PersistedSessionState = serde_json::from_str(&state_raw).unwrap();
@@ -1870,52 +1906,42 @@ mod tests {
 
     #[tokio::test]
     async fn migrates_inline_cron_jobs_to_scheduler_file_once() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
         let workspace = tempdir().unwrap();
-        let state_path = data.path().join("session/state.json");
-        fs::create_dir_all(state_path.parent().unwrap())
-            .await
-            .unwrap();
         let job = sample_cron_job("legacy-job", workspace.path().join("legacy-workspace"));
         let mut state = PersistedSessionState::default();
         state.cron_jobs.insert(job.id.clone(), job.clone());
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap())
-            .await
-            .unwrap();
 
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
+        let env = TestEnv::with_persisted_state(Some(&state)).await;
 
-        assert_eq!(store.get_cron_job("legacy-job").await.unwrap(), Some(job));
-        let jobs_path = data.path().join("scheduler/jobs.json");
+        assert_eq!(
+            env.store.get_cron_job("legacy-job").await.unwrap(),
+            Some(job)
+        );
+        let jobs_path = env.data_path().join("scheduler/jobs.json");
         assert!(jobs_path.exists());
-        let state_raw = fs::read_to_string(&state_path).await.unwrap();
+        let state_raw = fs::read_to_string(env.data_path().join("session/state.json"))
+            .await
+            .unwrap();
         let migrated_state: PersistedSessionState = serde_json::from_str(&state_raw).unwrap();
         assert!(migrated_state.cron_jobs.is_empty());
     }
 
     #[tokio::test]
     async fn session_state_persist_does_not_overwrite_scheduler_jobs() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
+        let env = TestEnv::new().await;
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
         let job = sample_cron_job("job-keep", workspace.path().join("cron-workspace"));
-        store.upsert_cron_job(job.clone()).await.unwrap();
+        env.store.upsert_cron_job(job.clone()).await.unwrap();
 
-        store
+        env.store
             .update_settings_for_user("u1", |settings| {
                 settings.model_override = Some("gpt-test".to_string());
             })
             .await
             .unwrap();
 
-        assert_eq!(store.get_cron_job("job-keep").await.unwrap(), Some(job));
-        let raw_jobs = fs::read_to_string(data.path().join("scheduler/jobs.json"))
+        assert_eq!(env.store.get_cron_job("job-keep").await.unwrap(), Some(job));
+        let raw_jobs = fs::read_to_string(env.data_path().join("scheduler/jobs.json"))
             .await
             .unwrap();
         let persisted_jobs: BTreeMap<String, CronJob> = serde_json::from_str(&raw_jobs).unwrap();
@@ -1924,17 +1950,14 @@ mod tests {
 
     #[tokio::test]
     async fn update_cron_job_mutates_existing_record_without_replacing_it() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
+        let env = TestEnv::new().await;
         let workspace = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
         let mut job = sample_cron_job("job-update", workspace.path().join("cron-workspace"));
         job.title = "original title".to_string();
-        store.upsert_cron_job(job).await.unwrap();
+        env.store.upsert_cron_job(job).await.unwrap();
 
-        let updated = store
+        let updated = env
+            .store
             .update_cron_job("job-update", |job| {
                 job.failure_streak = 3;
                 Ok(())
@@ -1946,7 +1969,7 @@ mod tests {
         assert_eq!(updated.title, "original title");
         assert_eq!(updated.failure_streak, 3);
         assert_eq!(
-            store
+            env.store
                 .get_cron_job("job-update")
                 .await
                 .unwrap()
@@ -1958,16 +1981,13 @@ mod tests {
 
     #[tokio::test]
     async fn moves_foreground_to_background_with_generated_alias() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        let env = TestEnv::new().await;
+        env.store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
             .unwrap();
-        let moved = store
+        let moved = env
+            .store
             .move_foreground_to_background("u1", None)
             .await
             .unwrap();
@@ -1978,23 +1998,20 @@ mod tests {
                 || ALIAS_WORDS.iter().any(|word| alias.starts_with(word)
                     && alias[word.len()..].chars().all(|v| v.is_ascii_digit()))
         );
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert!(snapshot.foreground.session_id.is_none());
         assert_eq!(snapshot.background.len(), 1);
     }
 
     #[tokio::test]
     async fn bind_if_matches_applies_only_while_foreground_unchanged() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
+        let env = TestEnv::new().await;
 
         // Foreground unchanged since the turn started: the binding lands,
         // profile included.
-        let turn_start = store.snapshot_for_user("u1").await.unwrap();
-        let applied = store
+        let turn_start = env.snapshot("u1").await;
+        let applied = env
+            .store
             .bind_foreground_session_profile_if_matches(
                 "u1",
                 &turn_start.foreground,
@@ -2009,7 +2026,7 @@ mod tests {
             .await
             .unwrap();
         assert!(applied);
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert_eq!(
             snapshot.foreground.session_id.as_deref(),
             Some("interrupted-thread")
@@ -2025,12 +2042,13 @@ mod tests {
 
         // Foreground swapped mid-turn (e.g. /stop restored the parked
         // conversation): the stale turn must not clobber it.
-        let turn_start = store.snapshot_for_user("u2").await.unwrap();
-        store
+        let turn_start = env.snapshot("u2").await;
+        env.store
             .set_foreground_session_id("u2", Some("restored-thread".into()))
             .await
             .unwrap();
-        let applied = store
+        let applied = env
+            .store
             .bind_foreground_session_profile_if_matches(
                 "u2",
                 &turn_start.foreground,
@@ -2040,7 +2058,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!applied);
-        let snapshot = store.snapshot_for_user("u2").await.unwrap();
+        let snapshot = env.snapshot("u2").await;
         assert_eq!(
             snapshot.foreground.session_id.as_deref(),
             Some("restored-thread")
@@ -2049,13 +2067,14 @@ mod tests {
         // Same (None) session id but a different workspace — the foreground
         // was replaced by a fresh dialog elsewhere (cron per-invocation
         // stop): still refused.
-        let turn_start = store.snapshot_for_user("u3").await.unwrap();
+        let turn_start = env.snapshot("u3").await;
         let other_workspace = tempdir().unwrap();
-        store
+        env.store
             .new_foreground_in_workspace("u3", other_workspace.path())
             .await
             .unwrap();
-        let applied = store
+        let applied = env
+            .store
             .bind_foreground_session_profile_if_matches(
                 "u3",
                 &turn_start.foreground,
@@ -2065,32 +2084,30 @@ mod tests {
             .await
             .unwrap();
         assert!(!applied);
-        let snapshot = store.snapshot_for_user("u3").await.unwrap();
+        let snapshot = env.snapshot("u3").await;
         assert!(snapshot.foreground.session_id.is_none());
     }
 
     #[tokio::test]
     async fn supports_multiple_background_dialogs() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        let env = TestEnv::new().await;
+        env.store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
             .unwrap();
-        let alias_1 = store
+        let alias_1 = env
+            .store
             .move_foreground_to_background("u1", None)
             .await
             .unwrap()
             .parked_alias
             .unwrap();
-        store
+        env.store
             .set_foreground_session_id("u1", Some("thread-2".into()))
             .await
             .unwrap();
-        let alias_2 = store
+        let alias_2 = env
+            .store
             .move_foreground_to_background("u1", None)
             .await
             .unwrap()
@@ -2098,19 +2115,15 @@ mod tests {
             .unwrap();
 
         assert_ne!(alias_1, alias_2);
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert_eq!(snapshot.background.len(), 2);
     }
 
     #[tokio::test]
     async fn stop_foreground_restores_most_recent_background_dialog() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
+        let env = TestEnv::new().await;
 
-        store
+        env.store
             .bind_foreground_session_profile(
                 "u1",
                 Some("thread-older".into()),
@@ -2123,12 +2136,12 @@ mod tests {
             )
             .await
             .unwrap();
-        store
+        env.store
             .move_foreground_to_background("u1", Some("older"))
             .await
             .unwrap();
 
-        store
+        env.store
             .bind_foreground_session_profile(
                 "u1",
                 Some("thread-newer".into()),
@@ -2141,19 +2154,19 @@ mod tests {
             )
             .await
             .unwrap();
-        store
+        env.store
             .move_foreground_to_background("u1", Some("newer"))
             .await
             .unwrap();
 
-        store
+        env.store
             .set_foreground_session_id("u1", Some("thread-current".into()))
             .await
             .unwrap();
-        let result = store.stop_foreground("u1").await.unwrap();
+        let result = env.store.stop_foreground("u1").await.unwrap();
         assert_eq!(result.restored_alias.as_deref(), Some("newer"));
 
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert_eq!(
             snapshot.foreground.session_id.as_deref(),
             Some("thread-newer")
@@ -2172,57 +2185,46 @@ mod tests {
 
     #[tokio::test]
     async fn new_foreground_reuses_shared_workspace() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        let before = store.snapshot_for_user("u1").await.unwrap();
+        let env = TestEnv::new().await;
+        let before = env.snapshot("u1").await;
         let old_workspace = before.foreground.workspace_dir.clone();
         assert!(old_workspace.exists());
 
-        let switched = store.new_foreground("u1").await.unwrap();
+        let switched = env.store.new_foreground("u1").await.unwrap();
         assert!(switched.parked_alias.is_none());
         assert!(old_workspace.exists());
 
-        let after = store.snapshot_for_user("u1").await.unwrap();
+        let after = env.snapshot("u1").await;
         assert_eq!(after.foreground.workspace_dir, old_workspace);
         assert!(after.foreground.workspace_dir.exists());
     }
 
     #[tokio::test]
     async fn new_foreground_keeps_non_empty_temporary_workspace() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        let before = store.snapshot_for_user("u1").await.unwrap();
+        let env = TestEnv::new().await;
+        let before = env.snapshot("u1").await;
         let old_workspace = before.foreground.workspace_dir.clone();
         std::fs::write(old_workspace.join("note.txt"), "keep").unwrap();
 
-        let switched = store.new_foreground("u1").await.unwrap();
+        let switched = env.store.new_foreground("u1").await.unwrap();
         assert!(switched.parked_alias.is_none());
         assert!(old_workspace.exists());
     }
 
     #[tokio::test]
     async fn new_foreground_in_workspace_uses_requested_directory() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
+        let env = TestEnv::new().await;
         let workspace_root = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
         let requested = workspace_root.path().join("manual workspace");
 
-        let switched = store
+        let switched = env
+            .store
             .new_foreground_in_workspace("u1", &requested)
             .await
             .unwrap();
 
         assert!(switched.parked_alias.is_none());
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert_eq!(
             snapshot.foreground.workspace_dir,
             std::fs::canonicalize(&requested).unwrap()
@@ -2232,26 +2234,22 @@ mod tests {
 
     #[tokio::test]
     async fn temporary_dialog_settings_update_global_defaults() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
+        let env = TestEnv::new().await;
 
-        store
+        env.store
             .set_model_override_for_active("u1", Some("gpt-global".into()))
             .await
             .unwrap();
-        store
+        env.store
             .set_reasoning_for_active("u1", Some(ReasoningEffort::High))
             .await
             .unwrap();
-        store
+        env.store
             .set_context_mode_for_active("u1", Some(ContextMode::OneM))
             .await
             .unwrap();
 
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert!(snapshot.foreground.profile.is_none());
         assert_eq!(
             snapshot.settings.model_override.as_deref(),
@@ -2269,12 +2267,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_temporary_dialog_settings_bind_to_session_profile() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        let env = TestEnv::new().await;
+        env.store
             .update_settings_for_user("u1", |settings| {
                 settings.model_override = Some("gpt-global".into());
                 settings.reasoning_effort = Some(ReasoningEffort::Low);
@@ -2283,29 +2277,29 @@ mod tests {
             })
             .await
             .unwrap();
-        store
+        env.store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
             .unwrap();
 
-        store
+        env.store
             .set_model_override_for_active("u1", Some("gpt-dialog".into()))
             .await
             .unwrap();
-        store
+        env.store
             .set_reasoning_for_active("u1", Some(ReasoningEffort::High))
             .await
             .unwrap();
-        store
+        env.store
             .set_context_mode_for_active("u1", Some(ContextMode::OneM))
             .await
             .unwrap();
-        store
+        env.store
             .set_service_tier_for_active("u1", Some(ServiceTier::Fast))
             .await
             .unwrap();
 
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         let profile = snapshot.foreground.profile.unwrap();
         assert_eq!(
             snapshot.settings.model_override.as_deref(),
@@ -2328,7 +2322,8 @@ mod tests {
         assert_eq!(profile.service_tier, Some(ServiceTier::Fast));
         assert_eq!(profile.context_mode, Some(ContextMode::OneM));
 
-        let cached = store
+        let cached = env
+            .store
             .imported_profile_for_session("thread-1")
             .await
             .unwrap()
@@ -2341,25 +2336,17 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_from_background_hydrates_legacy_session_profile() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
+        let env = TestEnv::new().await;
         let workspace = tempdir().unwrap();
-        let session_dir = global_home.path().join("sessions/2026/04/11");
-        fs::create_dir_all(&session_dir).await.unwrap();
-        let rollout = session_dir.join("rollout-2026-04-11T00-00-00-thread-legacy.jsonl");
-        fs::write(
-            &rollout,
+        env.write_rollout(
+            "rollout-2026-04-11T00-00-00-thread-legacy.jsonl",
             r#"{"type":"session_meta","payload":{"id":"thread-legacy","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/project-legacy"}}
 {"type":"turn_context","payload":{"cwd":"/tmp/project-legacy","model":"gpt-5.4","effort":"medium"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":950000}}}
 "#,
         )
-        .await
-        .unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        .await;
+        env.store
             .update_settings_for_user("u1", |settings| {
                 settings.model_override = Some("gpt-global".into());
                 settings.reasoning_effort = Some(ReasoningEffort::Xhigh);
@@ -2367,7 +2354,7 @@ mod tests {
             })
             .await
             .unwrap();
-        store
+        env.store
             .mutate_state(|state| {
                 let user = state.users.get_mut("u1").unwrap();
                 user.background.insert(
@@ -2386,11 +2373,11 @@ mod tests {
             .await
             .unwrap();
 
-        store
+        env.store
             .foreground_from_background("u1", "quill")
             .await
             .unwrap();
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         let profile = snapshot.foreground.profile.unwrap();
         assert_eq!(profile.model_override.as_deref(), Some("gpt-5.4"));
         assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::Medium));
@@ -2399,27 +2386,19 @@ mod tests {
 
     #[tokio::test]
     async fn resume_local_session_extracts_profile_and_last_user_message() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_dir = global_home.path().join("sessions/2026/04/11");
-        fs::create_dir_all(&session_dir).await.unwrap();
-        let rollout = session_dir.join("rollout-2026-04-11T00-00-00-thread-local.jsonl");
-        fs::write(
-            &rollout,
+        let env = TestEnv::new().await;
+        env.write_rollout(
+            "rollout-2026-04-11T00-00-00-thread-local.jsonl",
             r#"{"type":"session_meta","payload":{"id":"thread-local","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/project-a"}}
 {"type":"turn_context","payload":{"cwd":"/tmp/project-a","model":"gpt-5.4","effort":"high"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":950000}}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are CodexClaw running behind QQ official bot.\n\nUser message:\n请帮我修复登录接口"}]}}
 "#,
         )
-        .await
-        .unwrap();
+        .await;
 
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-
-        let sessions = store
+        let sessions = env
+            .store
             .list_disk_sessions(SessionListScope::All)
             .await
             .unwrap();
@@ -2428,8 +2407,11 @@ mod tests {
             Some("请帮我修复登录接口")
         );
 
-        store.resume_disk_session("u1", &sessions[0]).await.unwrap();
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        env.store
+            .resume_disk_session("u1", &sessions[0])
+            .await
+            .unwrap();
+        let snapshot = env.snapshot("u1").await;
         let profile = snapshot.foreground.profile.unwrap();
         assert_eq!(profile.model_override.as_deref(), Some("gpt-5.4"));
         assert_eq!(profile.reasoning_effort, Some(ReasoningEffort::High));
@@ -2438,30 +2420,17 @@ mod tests {
 
     #[tokio::test]
     async fn stop_drops_unsaved_local_session() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_path = global_home.path().join("sessions/2026/04/11");
-        tokio::fs::create_dir_all(&session_path).await.unwrap();
-        tokio::fs::write(
-            session_path.join("rollout-2026-04-11T00-00-00-thread-1.jsonl"),
-            "{}",
-        )
-        .await
-        .unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        let env = TestEnv::new().await;
+        let rollout = env
+            .write_rollout("rollout-2026-04-11T00-00-00-thread-1.jsonl", "{}")
+            .await;
+        env.store
             .set_foreground_session_id("u1", Some("thread-1".into()))
             .await
             .unwrap();
-        let result = store.stop_foreground("u1").await.unwrap();
+        let result = env.store.stop_foreground("u1").await.unwrap();
         assert!(result.dropped_unsaved);
-        assert!(
-            !session_path
-                .join("rollout-2026-04-11T00-00-00-thread-1.jsonl")
-                .exists()
-        );
+        assert!(!rollout.exists());
     }
 
     #[tokio::test]
@@ -2469,65 +2438,50 @@ mod tests {
         // Mirrors interactive cron finish for SessionStrategy::Persistent:
         // end the dialog without a bg entry, but keep the rollout so the job's
         // stored thread id can be resumed on the next run.
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_path = global_home.path().join("sessions/2026/04/11");
-        tokio::fs::create_dir_all(&session_path).await.unwrap();
-        let rollout = session_path.join("rollout-2026-04-11T00-00-00-thread-keep.jsonl");
-        tokio::fs::write(&rollout, "{}").await.unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        store
+        let env = TestEnv::new().await;
+        let rollout = env
+            .write_rollout("rollout-2026-04-11T00-00-00-thread-keep.jsonl", "{}")
+            .await;
+        env.store
             .set_foreground_session_id("u1", Some("thread-keep".into()))
             .await
             .unwrap();
-        assert!(store.save_foreground("u1").await.unwrap());
-        let result = store.stop_foreground("u1").await.unwrap();
+        assert!(env.store.save_foreground("u1").await.unwrap());
+        let result = env.store.stop_foreground("u1").await.unwrap();
         assert!(!result.dropped_unsaved);
         assert!(result.saved);
         assert!(rollout.exists());
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert!(snapshot.background.is_empty());
         assert!(snapshot.foreground.session_id.is_none());
     }
 
     #[tokio::test]
     async fn stop_keeps_shared_workspace_for_unsaved_temporary_dialog() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        let before = store.snapshot_for_user("u1").await.unwrap();
+        let env = TestEnv::new().await;
+        let before = env.snapshot("u1").await;
         let old_workspace = before.foreground.workspace_dir.clone();
         assert!(old_workspace.exists());
 
-        let result = store.stop_foreground("u1").await.unwrap();
+        let result = env.store.stop_foreground("u1").await.unwrap();
         assert!(!result.saved);
         assert!(!result.had_session);
         assert!(!result.dropped_unsaved);
         assert!(old_workspace.exists());
-        let snapshot = store.snapshot_for_user("u1").await.unwrap();
+        let snapshot = env.snapshot("u1").await;
         assert_eq!(snapshot.foreground.workspace_dir, old_workspace);
     }
 
     #[tokio::test]
     async fn legacy_scope_aliases_map_to_all_sessions() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_path = global_home.path().join("sessions/2026/04/11");
-        tokio::fs::create_dir_all(&session_path).await.unwrap();
-        tokio::fs::write(
-            session_path.join("rollout-2026-04-11T00-00-00-thread-2.jsonl"),
+        let env = TestEnv::new().await;
+        env.write_rollout(
+            "rollout-2026-04-11T00-00-00-thread-2.jsonl",
             r#"{"type":"session_meta","payload":{"id":"thread-2","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp"}}"#,
         )
-        .await
-        .unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        let sessions = store
+        .await;
+        let sessions = env
+            .store
             .list_disk_sessions(SessionListScope::Local)
             .await
             .unwrap();
@@ -2537,34 +2491,29 @@ mod tests {
 
     #[tokio::test]
     async fn local_and_global_scopes_are_legacy_aliases() {
-        let data = tempdir().unwrap();
-        let global_home = tempdir().unwrap();
-        let session_path = global_home.path().join("sessions/2026/04/11");
-        tokio::fs::create_dir_all(&session_path).await.unwrap();
-        tokio::fs::write(
-            session_path.join("rollout-2026-04-11T00-00-00-thread-3.jsonl"),
+        let env = TestEnv::new().await;
+        env.write_rollout(
+            "rollout-2026-04-11T00-00-00-thread-3.jsonl",
             r#"{"type":"session_meta","payload":{"id":"thread-3","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/p1"}}"#,
         )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            session_path.join("rollout-2026-04-11T00-00-00-thread-4.jsonl"),
+        .await;
+        env.write_rollout(
+            "rollout-2026-04-11T00-00-00-thread-4.jsonl",
             r#"{"type":"session_meta","payload":{"id":"thread-4","timestamp":"2026-04-11T00:00:00Z","cwd":"/tmp/p2"}}"#,
         )
-        .await
-        .unwrap();
-        let store = SessionStore::load_or_init(data.path(), global_home.path(), global_home.path())
-            .await
-            .unwrap();
-        let all = store
+        .await;
+        let all = env
+            .store
             .list_disk_sessions(SessionListScope::All)
             .await
             .unwrap();
-        let local = store
+        let local = env
+            .store
             .list_disk_sessions(SessionListScope::Local)
             .await
             .unwrap();
-        let global = store
+        let global = env
+            .store
             .list_disk_sessions(SessionListScope::Global)
             .await
             .unwrap();
@@ -2574,6 +2523,8 @@ mod tests {
 
     #[tokio::test]
     async fn imports_system_session_and_records_profile() {
+        // The only test that needs the system codex home to differ from the
+        // claw-managed one, so it wires the store up by hand.
         let data = tempdir().unwrap();
         let system_home = tempdir().unwrap();
         let claw_home = tempdir().unwrap();
@@ -2603,10 +2554,7 @@ mod tests {
             result.profile.reasoning_effort.map(|value| value.as_str()),
             Some("high")
         );
-        assert_eq!(
-            result.profile.context_mode,
-            Some(crate::session::state::ContextMode::OneM)
-        );
+        assert_eq!(result.profile.context_mode, Some(ContextMode::OneM));
         let imported = claw_home
             .path()
             .join("sessions/2026/04/11/rollout-2026-04-11T00-00-00-thread-import.jsonl");

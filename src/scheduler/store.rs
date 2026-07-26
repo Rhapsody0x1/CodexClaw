@@ -420,24 +420,30 @@ pub fn new_id() -> String {
     Ulid::new().to_string()
 }
 
+/// Cron-job fixtures shared by the tests of every module that touches
+/// `CronJob`, so the eighteen-field literal is written once.
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
+pub(crate) mod fixtures {
+    use std::{collections::BTreeMap, path::PathBuf};
 
-    use chrono::{DateTime, Duration, Utc};
-    use tempfile::tempdir;
+    use chrono::{DateTime, Utc};
 
-    use super::*;
+    use super::{CronJob, CronKind, DeliverPolicy, JobAction};
 
-    fn sample_job(workspace_dir: PathBuf) -> CronJob {
-        let created_at = DateTime::parse_from_rfc3339("2026-05-10T10:00:00Z")
+    pub(crate) fn ts(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
             .unwrap()
-            .with_timezone(&Utc);
+            .with_timezone(&Utc)
+    }
+
+    /// Baseline one-shot shell job. Callers override just the fields their
+    /// assertions depend on.
+    pub(crate) fn shell_job(id: &str, workspace_dir: PathBuf, at: DateTime<Utc>) -> CronJob {
         CronJob {
-            id: "job-1".to_string(),
+            id: id.to_string(),
             owner_openid: "owner".to_string(),
             title: "sample".to_string(),
-            kind: CronKind::OneShot { at: created_at },
+            kind: CronKind::OneShot { at },
             action: JobAction::Shell {
                 program: "/bin/echo".to_string(),
                 args: vec!["ok".to_string()],
@@ -445,8 +451,8 @@ mod tests {
             },
             workspace_dir,
             deliver: DeliverPolicy::LogOnly,
-            created_at,
-            next_run_at: Some(created_at),
+            created_at: at,
+            next_run_at: Some(at),
             run_now_at: None,
             last_run_at: None,
             last_run_status: None,
@@ -455,6 +461,19 @@ mod tests {
             disabled: false,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+    use tempfile::tempdir;
+
+    use super::fixtures::{shell_job, ts};
+    use super::*;
+
+    fn sample_job(workspace_dir: PathBuf) -> CronJob {
+        shell_job("job-1", workspace_dir, ts("2026-05-10T10:00:00Z"))
+    }
 
     #[tokio::test]
     async fn write_run_log_prunes_old_logs() {
@@ -462,9 +481,7 @@ mod tests {
         let workspace_dir = temp.path().join("workspace");
         tokio::fs::create_dir_all(&workspace_dir).await.unwrap();
         let job = sample_job(workspace_dir);
-        let base = DateTime::parse_from_rfc3339("2026-05-10T10:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let base = ts("2026-05-10T10:00:00Z");
 
         for offset in 0..4 {
             write_run_log(

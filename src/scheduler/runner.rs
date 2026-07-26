@@ -719,37 +719,24 @@ fn truncate_for_log(output: &str, max_chars: usize) -> String {
 mod tests {
     use super::{codex_exec_args, extract_codex_exec_agent_messages, keep_interrupted_thread};
     use crate::codex::executor::ExecutionUpdate;
-    use crate::scheduler::store::{CronJob, CronKind, DeliverPolicy, JobAction, SessionStrategy};
+    use crate::scheduler::store::fixtures::shell_job;
+    use crate::scheduler::store::{CronJob, JobAction, SessionStrategy};
     use crate::session::state::SessionState;
     use chrono::Utc;
     use tokio::sync::mpsc;
 
     fn codex_turn_job(strategy: SessionStrategy) -> CronJob {
-        let now = Utc::now();
-        CronJob {
-            id: "job-1".to_string(),
-            owner_openid: "owner".to_string(),
-            title: "sample".to_string(),
-            kind: CronKind::OneShot { at: now },
-            action: JobAction::CodexTurn {
-                prompt: "p".to_string(),
-                model: None,
-                session_state: None,
-                approval_policy: None,
-                session_strategy: strategy,
-                interactive: None,
-            },
-            workspace_dir: std::path::PathBuf::from("/tmp"),
-            deliver: DeliverPolicy::LogOnly,
-            created_at: now,
-            next_run_at: None,
-            run_now_at: None,
-            last_run_at: None,
-            last_run_status: None,
-            run_count: 0,
-            failure_streak: 0,
-            disabled: false,
-        }
+        let mut job = shell_job("job-1", std::path::PathBuf::from("/tmp"), Utc::now());
+        job.action = JobAction::CodexTurn {
+            prompt: "p".to_string(),
+            model: None,
+            session_state: None,
+            approval_policy: None,
+            session_strategy: strategy,
+            interactive: None,
+        };
+        job.next_run_at = None;
+        job
     }
 
     fn job_session_id(job: &CronJob) -> Option<String> {
