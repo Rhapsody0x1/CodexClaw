@@ -15,25 +15,29 @@ use tracing::{error, info, warn};
 
 use crate::app::App;
 
-use super::{cron_expr, interactive, runner, store};
+use super::{cron_expr, ctx::SchedulerCtx, interactive, runner, store};
 
 pub struct Scheduler {
-    app: Weak<App>,
+    ctx: Weak<SchedulerCtx>,
     in_flight: Arc<Mutex<HashSet<String>>>,
     sem: Arc<Semaphore>,
 }
 
 impl Scheduler {
     pub fn spawn(app: Arc<App>) {
-        if !app.config.scheduler.enabled {
+        // The app keeps the only strong `SchedulerCtx` reference; the tick
+        // loop below holds it weakly so dropping the `App` parks the
+        // scheduler.
+        let ctx = app.scheduler_ctx.clone();
+        if !ctx.config.scheduler.enabled {
             info!("scheduler disabled");
             return;
         }
         let sem = Arc::new(Semaphore::new(
-            app.config.scheduler.max_concurrent_jobs.max(1),
+            ctx.config.scheduler.max_concurrent_jobs.max(1),
         ));
         let scheduler = Arc::new(Self {
-            app: Arc::downgrade(&app),
+            ctx: Arc::downgrade(&ctx),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             sem,
         });
@@ -43,9 +47,9 @@ impl Scheduler {
     async fn run(self: Arc<Self>) {
         self.bootstrap_next_runs().await;
         let tick_secs = self
-            .app
+            .ctx
             .upgrade()
-            .map(|app| app.config.scheduler.tick_secs.max(1))
+            .map(|ctx| ctx.config.scheduler.tick_secs.max(1))
             .unwrap_or(30);
         let mut interval = tokio::time::interval(Duration::from_secs(tick_secs));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -56,14 +60,14 @@ impl Scheduler {
     }
 
     async fn bootstrap_next_runs(&self) {
-        let Some(app) = self.app.upgrade() else {
+        let Some(ctx) = self.ctx.upgrade() else {
             return;
         };
-        if let Err(err) = interactive::sweep_expired(&app).await {
+        if let Err(err) = interactive::sweep_expired(&ctx).await {
             warn!(error = %err, "failed to sweep expired interactive cron jobs");
         }
         let now = Utc::now();
-        let Ok(jobs) = app.session.list_cron_jobs().await else {
+        let Ok(jobs) = ctx.session.list_cron_jobs().await else {
             return;
         };
         for mut job in jobs {
@@ -75,7 +79,7 @@ impl Scheduler {
             }
             if cron_expr::due_or_past(&job.kind, now) {
                 job.next_run_at = Some(now);
-                if let Err(err) = app.session.upsert_cron_job(job).await {
+                if let Err(err) = ctx.session.upsert_cron_job(job).await {
                     warn!(error = %err, "failed to persist scheduler bootstrap state");
                 }
                 continue;
@@ -90,7 +94,7 @@ impl Scheduler {
             match cron_expr::next_after(&job.kind, now) {
                 Ok(next) => {
                     job.next_run_at = next;
-                    if let Err(err) = app.session.upsert_cron_job(job).await {
+                    if let Err(err) = ctx.session.upsert_cron_job(job).await {
                         warn!(error = %err, "failed to persist scheduler bootstrap state");
                     }
                 }
@@ -100,14 +104,14 @@ impl Scheduler {
     }
 
     async fn tick(self: &Arc<Self>) {
-        let Some(app) = self.app.upgrade() else {
+        let Some(ctx) = self.ctx.upgrade() else {
             return;
         };
-        if let Err(err) = interactive::sweep_expired(&app).await {
+        if let Err(err) = interactive::sweep_expired(&ctx).await {
             warn!(error = %err, "failed to sweep expired interactive cron jobs");
         }
         let now = Utc::now();
-        let mut due = match app.session.list_cron_jobs().await {
+        let mut due = match ctx.session.list_cron_jobs().await {
             Ok(jobs) => jobs
                 .into_iter()
                 .filter(|job| is_due(job, now))
@@ -120,14 +124,14 @@ impl Scheduler {
         due.sort_by_key(|job| job.next_run_at);
         for job in due {
             let scheduler = self.clone();
-            let app = app.clone();
+            let ctx = ctx.clone();
             tokio::spawn(async move {
-                scheduler.spawn_job(app, job).await;
+                scheduler.spawn_job(ctx, job).await;
             });
         }
     }
 
-    async fn spawn_job(self: Arc<Self>, app: Arc<App>, job: store::CronJob) {
+    async fn spawn_job(self: Arc<Self>, ctx: Arc<SchedulerCtx>, job: store::CronJob) {
         {
             let mut guard = self.in_flight.lock().await;
             if !guard.insert(job.id.clone()) {
@@ -140,7 +144,7 @@ impl Scheduler {
             Err(_) => return,
         };
         let job_id = job.id.clone();
-        let result = runner::run_job(app, job).await;
+        let result = runner::run_job(ctx, job).await;
         drop(permit);
         self.in_flight.lock().await.remove(&job_id);
         match result {

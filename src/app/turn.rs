@@ -331,8 +331,12 @@ impl App {
                 .await?;
         }
 
-        if let Err(err) =
-            crate::scheduler::on_fg_turn_completed(self, &message.sender_openid, &output.text).await
+        if let Err(err) = crate::scheduler::on_fg_turn_completed(
+            &self.scheduler_ctx,
+            &message.sender_openid,
+            &output.text,
+        )
+        .await
         {
             warn!(
                 sender_openid = %message.sender_openid,

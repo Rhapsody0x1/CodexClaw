@@ -153,6 +153,16 @@ impl SessionStore {
             .map(|user| crate::util::lang::normalize_lang(&user.settings.language).to_string())
     }
 
+    /// Resolve a user's UI language, falling back to the canonical default
+    /// when they have no session record yet. Shared by the app's command
+    /// handlers and the scheduler so locale resolution stays consistent in one
+    /// place.
+    pub(crate) async fn command_locale(&self, openid: &str) -> String {
+        self.language_for_user(openid)
+            .await
+            .unwrap_or_else(crate::session::state::default_language)
+    }
+
     pub(crate) async fn snapshot_for_user(&self, openid: &str) -> Result<UserSessionState> {
         if let Some(snapshot) = self.state.read().await.users.get(openid).cloned() {
             return Ok(snapshot);

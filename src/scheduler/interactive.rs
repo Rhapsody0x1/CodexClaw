@@ -6,9 +6,9 @@ use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::app::App;
 use crate::util::{fs::read_json_opt_async, layout::DataLayout, text::strip_end_signal};
 
+use super::ctx::SchedulerCtx;
 use super::store::{CronJob, InteractiveSpec, JobAction, SessionStrategy, new_job_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,11 +47,11 @@ Do not emit the token until the interaction is truly complete. Hard cap: at most
 }
 
 pub(crate) async fn prepare_foreground(
-    app: &App,
+    ctx: &SchedulerCtx,
     job: &CronJob,
     spec: &InteractiveSpec,
 ) -> Result<PendingInteraction> {
-    let switched = app
+    let switched = ctx
         .session
         .new_foreground_in_workspace(&job.owner_openid, &job.workspace_dir)
         .await?;
@@ -79,8 +79,8 @@ pub(crate) async fn prepare_foreground(
             _ => SessionStrategy::PerInvocation,
         },
     };
-    write_pending(&app.config.general.data_dir, &pending).await?;
-    let lang = app.command_locale(&job.owner_openid).await;
+    write_pending(&ctx.config.general.data_dir, &pending).await?;
+    let lang = ctx.session.command_locale(&job.owner_openid).await;
     let locale = lang.as_str();
     let banner = if let Some(alias) = pending.parked_fg_alias.as_deref() {
         t!(
@@ -98,7 +98,7 @@ pub(crate) async fn prepare_foreground(
         )
         .into_owned()
     };
-    super::runner::push_or_queue(app, &job.owner_openid, &job.id, &job.title, banner).await?;
+    super::runner::push_or_queue(ctx, &job.owner_openid, &job.id, &job.title, banner).await?;
     Ok(pending)
 }
 
@@ -115,7 +115,7 @@ pub(crate) async fn update_pending_session(
 }
 
 pub(crate) async fn finish_if_needed_after_scheduler_turn(
-    app: &App,
+    ctx: &SchedulerCtx,
     job: &CronJob,
     output: &str,
 ) -> Result<String> {
@@ -124,22 +124,22 @@ pub(crate) async fn finish_if_needed_after_scheduler_turn(
     };
     let (stripped, ended) = strip_end_signal(output, &spec.end_signal);
     if ended {
-        finish_job(app, &job.id, "ended").await?;
+        finish_job(ctx, &job.id, "ended").await?;
     }
     Ok(stripped)
 }
 
 pub(crate) async fn on_fg_turn_completed(
-    app: &App,
+    ctx: &SchedulerCtx,
     openid: &str,
     assistant_text: &str,
 ) -> Result<()> {
-    let mut pending = match pending_for_owner(&app.config.general.data_dir, openid).await? {
+    let mut pending = match pending_for_owner(&ctx.config.general.data_dir, openid).await? {
         Some(pending) => pending,
         None => return Ok(()),
     };
     if let Some(expected_session_id) = pending.codex_session_id.as_deref() {
-        let snapshot = app.session.snapshot_for_user(openid).await?;
+        let snapshot = ctx.session.snapshot_for_user(openid).await?;
         if snapshot.foreground.session_id.as_deref() != Some(expected_session_id) {
             return Ok(());
         }
@@ -148,24 +148,28 @@ pub(crate) async fn on_fg_turn_completed(
     let ended = assistant_text.contains(&pending.end_signal)
         || pending.rounds_done >= pending.max_rounds_hard_cap;
     if ended {
-        finish_job(app, &pending.job_id, "ended").await?;
+        finish_job(ctx, &pending.job_id, "ended").await?;
     } else {
-        write_pending(&app.config.general.data_dir, &pending).await?;
+        write_pending(&ctx.config.general.data_dir, &pending).await?;
     }
     Ok(())
 }
 
-pub(crate) async fn finish_job_for_owner(app: &App, openid: &str, reason: &str) -> Result<()> {
-    let Some(pending) = pending_for_owner(&app.config.general.data_dir, openid).await? else {
+pub(crate) async fn finish_job_for_owner(
+    ctx: &SchedulerCtx,
+    openid: &str,
+    reason: &str,
+) -> Result<()> {
+    let Some(pending) = pending_for_owner(&ctx.config.general.data_dir, openid).await? else {
         return Ok(());
     };
-    finish_job(app, &pending.job_id, reason).await
+    finish_job(ctx, &pending.job_id, reason).await
 }
 
-pub(crate) async fn sweep_expired(app: &App) -> Result<()> {
+pub(crate) async fn sweep_expired(ctx: &SchedulerCtx) -> Result<()> {
     // Tolerant scan: one unreadable pending.json must not stop the sweep from
     // reaping the others, so failures are logged and skipped.
-    for (path, read) in list_pending(&app.config.general.data_dir).await? {
+    for (path, read) in list_pending(&ctx.config.general.data_dir).await? {
         let pending = match read {
             PendingRead::Parsed(pending) => *pending,
             PendingRead::Unreadable(err) => {
@@ -178,14 +182,14 @@ pub(crate) async fn sweep_expired(app: &App) -> Result<()> {
             }
         };
         if pending.expires_at <= Utc::now() {
-            finish_job(app, &pending.job_id, "no_answer").await?;
+            finish_job(ctx, &pending.job_id, "no_answer").await?;
         }
     }
     Ok(())
 }
 
-pub(crate) async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<()> {
-    let Some(pending) = read_pending(&app.config.general.data_dir, job_id).await? else {
+pub(crate) async fn finish_job(ctx: &SchedulerCtx, job_id: &str, reason: &str) -> Result<()> {
+    let Some(pending) = read_pending(&ctx.config.general.data_dir, job_id).await? else {
         return Ok(());
     };
     // session_strategy only controls whether the codex thread id is kept on the
@@ -196,17 +200,17 @@ pub(crate) async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<
     // saved before stop_foreground; otherwise an unsaved Local session would be
     // pruned and the next invocation could not reopen the stored thread id.
     if pending.session_strategy == SessionStrategy::Persistent {
-        let _ = app.session.save_foreground(&pending.owner_openid).await;
+        let _ = ctx.session.save_foreground(&pending.owner_openid).await;
     }
-    let _ = app.session.stop_foreground(&pending.owner_openid).await;
+    let _ = ctx.session.stop_foreground(&pending.owner_openid).await;
     if let Some(alias) = pending.parked_fg_alias.as_deref() {
-        let _ = app
+        let _ = ctx
             .session
             .foreground_from_background(&pending.owner_openid, alias)
             .await;
     }
-    remove_pending(&app.config.general.data_dir, job_id).await?;
-    let lang = app.command_locale(&pending.owner_openid).await;
+    remove_pending(&ctx.config.general.data_dir, job_id).await?;
+    let lang = ctx.session.command_locale(&pending.owner_openid).await;
     let locale = lang.as_str();
     let suffix = if let Some(alias) = pending.parked_fg_alias.as_deref() {
         t!(
@@ -248,7 +252,7 @@ pub(crate) async fn finish_job(app: &App, job_id: &str, reason: &str) -> Result<
         }
     };
     super::runner::push_or_queue(
-        app,
+        ctx,
         &pending.owner_openid,
         &pending.job_id,
         &pending.title,

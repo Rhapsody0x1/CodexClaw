@@ -46,8 +46,12 @@ impl App {
             .await?
             .is_some()
         {
-            crate::scheduler::finish_job_for_owner(self, &normalized.sender_openid, "stopped")
-                .await?;
+            crate::scheduler::finish_job_for_owner(
+                &self.scheduler_ctx,
+                &normalized.sender_openid,
+                "stopped",
+            )
+            .await?;
             let lang = self.command_locale(&normalized.sender_openid).await;
             self.reply_text(
                 &normalized.sender_openid,

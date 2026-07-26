@@ -11,7 +11,6 @@ use tokio::{
 };
 
 use crate::{
-    app::App,
     codex::{ExecutionRequest, ExecutionUpdate, agent_messages_from_stdout},
     session::state::{ApprovalPolicySetting, DialogProfile, SessionSettings, SessionState},
     util::{layout::DataLayout, text::truncate_middle},
@@ -19,6 +18,7 @@ use crate::{
 
 use super::{
     cron_expr,
+    ctx::SchedulerCtx,
     store::{
         CronJob, CronKind, DeliverPolicy, InteractiveSpec, JobAction, RunStatus, SessionStrategy,
         write_run_log,
@@ -37,17 +37,20 @@ struct CodexTurnRun {
     interactive: Option<InteractiveSpec>,
 }
 
-pub(crate) async fn run_job(app: std::sync::Arc<App>, mut job: CronJob) -> Result<CronJob> {
+pub(crate) async fn run_job(
+    ctx: std::sync::Arc<SchedulerCtx>,
+    mut job: CronJob,
+) -> Result<CronJob> {
     let started_at = Utc::now();
     let manual_run = job
         .run_now_at
         .is_some_and(|run_now_at| run_now_at <= started_at);
     let timer = Instant::now();
-    let max_duration = std::time::Duration::from_secs(app.config.scheduler.max_turn_secs);
-    let outcome = execute_with_retries(&app, &mut job, max_duration, timer).await;
+    let max_duration = std::time::Duration::from_secs(ctx.config.scheduler.max_turn_secs);
+    let outcome = execute_with_retries(&ctx, &mut job, max_duration, timer).await;
     let next_run_at = compute_next_run(&job, manual_run)?;
-    let job = commit_run_result(&app, job, &outcome, started_at, manual_run, next_run_at).await?;
-    notify_circuit_breaker(&app, &job, &outcome.status).await;
+    let job = commit_run_result(&ctx, job, &outcome, started_at, manual_run, next_run_at).await?;
+    notify_circuit_breaker(&ctx, &job, &outcome.status).await;
     Ok(job)
 }
 
@@ -63,12 +66,12 @@ struct RetriesOutcome {
 /// failures with exponential backoff (`retry_backoff_secs * 2^(attempt-1)`,
 /// exponent capped at 5).
 async fn execute_with_retries(
-    app: &std::sync::Arc<App>,
+    ctx: &std::sync::Arc<SchedulerCtx>,
     job: &mut CronJob,
     max_duration: std::time::Duration,
     timer: Instant,
 ) -> RetriesOutcome {
-    let max_attempts = app.config.scheduler.max_attempts.max(1);
+    let max_attempts = ctx.config.scheduler.max_attempts.max(1);
     let mut attempt_logs = Vec::new();
     let mut final_output = String::new();
     let mut final_attempt = 1;
@@ -78,7 +81,7 @@ async fn execute_with_retries(
     for attempt in 1..=max_attempts {
         final_attempt = attempt;
         let attempt_started = Utc::now();
-        let result = run_job_inner(app.clone(), job, max_duration).await;
+        let result = run_job_inner(ctx.clone(), job, max_duration).await;
         match result {
             Ok(output) => {
                 final_output = output;
@@ -93,7 +96,7 @@ async fn execute_with_retries(
             Err(err) => {
                 let error = err.to_string();
                 if is_interactive_job(job) {
-                    super::interactive::finish_job(app, &job.id, "failed")
+                    super::interactive::finish_job(ctx, &job.id, "failed")
                         .await
                         .ok();
                 }
@@ -110,7 +113,7 @@ async fn execute_with_retries(
         }
         let multiplier = 1_u64 << (attempt - 1).min(5);
         sleep(std::time::Duration::from_secs(
-            app.config
+            ctx.config
                 .scheduler
                 .retry_backoff_secs
                 .saturating_mul(multiplier),
@@ -152,7 +155,7 @@ fn compute_next_run(job: &CronJob, manual_run: bool) -> Result<Option<chrono::Da
 /// circuit breaker, one-shot completion), write the run log, and recycle a
 /// completed scheduled one-shot's files.
 async fn commit_run_result(
-    app: &std::sync::Arc<App>,
+    ctx: &std::sync::Arc<SchedulerCtx>,
     job: CronJob,
     outcome: &RetriesOutcome,
     started_at: chrono::DateTime<Utc>,
@@ -160,8 +163,8 @@ async fn commit_run_result(
     next_run_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<CronJob> {
     let scheduled_one_shot_complete = !manual_run && matches!(job.kind, CronKind::OneShot { .. });
-    let circuit_breaker_threshold = app.config.scheduler.circuit_breaker_threshold.max(1);
-    let job = app
+    let circuit_breaker_threshold = ctx.config.scheduler.circuit_breaker_threshold.max(1);
+    let job = ctx
         .session
         .update_cron_job(&job.id, {
             let status = outcome.status.clone();
@@ -204,13 +207,13 @@ async fn commit_run_result(
         &outcome.attempt_logs,
         &outcome.output,
     );
-    write_run_log(&job, started_at, &log, app.config.scheduler.runs_retention)
+    write_run_log(&job, started_at, &log, ctx.config.scheduler.runs_retention)
         .await
         .ok();
     if scheduled_one_shot_complete {
         super::store::recycle_job_files(
-            &app.config.general.data_dir,
-            &app.config.general.codex_home_global,
+            &ctx.config.general.data_dir,
+            &ctx.config.general.codex_home_global,
             &job.id,
         )
         .await
@@ -222,15 +225,15 @@ async fn commit_run_result(
 /// If this run's failure tripped the circuit breaker (the commit above just
 /// disabled the job), tell the owner; a failed queue write is swallowed here
 /// because the run result itself is already persisted.
-async fn notify_circuit_breaker(app: &App, job: &CronJob, status: &RunStatus) {
-    let circuit_breaker_threshold = app.config.scheduler.circuit_breaker_threshold.max(1);
+async fn notify_circuit_breaker(ctx: &SchedulerCtx, job: &CronJob, status: &RunStatus) {
+    let circuit_breaker_threshold = ctx.config.scheduler.circuit_breaker_threshold.max(1);
     if !(matches!(status, RunStatus::Failure { .. })
         && job.disabled
         && job.failure_streak >= circuit_breaker_threshold)
     {
         return;
     }
-    let lang = app.command_locale(&job.owner_openid).await;
+    let lang = ctx.session.command_locale(&job.owner_openid).await;
     let text = t!(
         "scheduler.failure.disabled",
         title = job.title.as_str(),
@@ -238,24 +241,24 @@ async fn notify_circuit_breaker(app: &App, job: &CronJob, status: &RunStatus) {
         locale = lang.as_str()
     )
     .into_owned();
-    push_or_queue(app, &job.owner_openid, &job.id, &job.title, text)
+    push_or_queue(ctx, &job.owner_openid, &job.id, &job.title, text)
         .await
         .ok();
 }
 
 async fn run_job_inner(
-    app: std::sync::Arc<App>,
+    ctx: std::sync::Arc<SchedulerCtx>,
     job: &mut CronJob,
     max_duration: std::time::Duration,
 ) -> Result<String> {
     match job.action.clone() {
         JobAction::Reminder { message } => {
-            deliver(&app, job, &message).await?;
+            deliver(&ctx, job, &message).await?;
             Ok(message)
         }
         JobAction::Shell { program, args, env } => {
             let output = run_shell(&program, &args, &env, &job.workspace_dir, max_duration).await?;
-            deliver(&app, job, &output).await?;
+            deliver(&ctx, job, &output).await?;
             Ok(output)
         }
         JobAction::CodexExec {
@@ -265,7 +268,7 @@ async fn run_job_inner(
             env,
         } => {
             let output = run_codex_exec(
-                &app,
+                &ctx,
                 job,
                 &prompt,
                 model.as_deref(),
@@ -274,7 +277,7 @@ async fn run_job_inner(
                 max_duration,
             )
             .await?;
-            deliver(&app, job, &output).await?;
+            deliver(&ctx, job, &output).await?;
             Ok(output)
         }
         JobAction::CodexTurn {
@@ -286,7 +289,7 @@ async fn run_job_inner(
             interactive,
         } => {
             let output = run_codex_turn(
-                &app,
+                &ctx,
                 job,
                 CodexTurnRun {
                     prompt,
@@ -299,7 +302,7 @@ async fn run_job_inner(
                 max_duration,
             )
             .await?;
-            deliver(&app, job, &output).await?;
+            deliver(&ctx, job, &output).await?;
             Ok(output)
         }
     }
@@ -340,7 +343,7 @@ async fn run_shell(
 }
 
 async fn run_codex_exec(
-    app: &App,
+    ctx: &SchedulerCtx,
     job: &CronJob,
     prompt: &str,
     model: Option<&str>,
@@ -348,9 +351,9 @@ async fn run_codex_exec(
     env: &std::collections::BTreeMap<String, String>,
     max_duration: std::time::Duration,
 ) -> Result<String> {
-    let mut cmd = Command::new(&app.config.general.codex_binary);
+    let mut cmd = Command::new(&ctx.config.general.codex_binary);
     cmd.args(codex_exec_args(model, extra_args, prompt));
-    cmd.env("CODEX_HOME", &app.config.general.codex_home_global);
+    cmd.env("CODEX_HOME", &ctx.config.general.codex_home_global);
     cmd.envs(env);
     cmd.current_dir(&job.workspace_dir);
     cmd.stdout(Stdio::piped());
@@ -433,13 +436,13 @@ fn codex_exec_args(model: Option<&str>, extra_args: &[String], prompt: &str) -> 
 }
 
 async fn run_codex_turn(
-    app: &App,
+    ctx: &SchedulerCtx,
     job: &mut CronJob,
     run: CodexTurnRun,
     max_duration: std::time::Duration,
 ) -> Result<String> {
     if let Some(spec) = run.interactive.as_ref() {
-        super::interactive::prepare_foreground(app, job, spec).await?;
+        super::interactive::prepare_foreground(ctx, job, spec).await?;
     }
     write_scheduler_turn_context(&job.workspace_dir, &job.owner_openid, &job.id)
         .await
@@ -470,20 +473,20 @@ async fn run_codex_turn(
     let request = ExecutionRequest {
         prompt: prompt_text,
         workspace_dir: job.workspace_dir.clone(),
-        codex_home: app.config.general.codex_home_global.clone(),
+        codex_home: ctx.config.general.codex_home_global.clone(),
         config_overrides: Vec::new(),
-        add_dirs: scheduler_add_dirs(app),
+        add_dirs: scheduler_add_dirs(ctx),
         session_state: state,
         model: run
             .model
             .clone()
-            .or_else(|| Some(app.config.general.default_model.clone())),
+            .or_else(|| Some(ctx.config.general.default_model.clone())),
         service_tier: None,
         context_mode: None,
-        reasoning_effort: app.config.general.default_reasoning_effort,
+        reasoning_effort: ctx.config.general.default_reasoning_effort,
         image_paths: Vec::new(),
     };
-    let codex = app.codex.clone();
+    let codex = ctx.codex.clone();
     let handle =
         tokio::spawn(async move { codex.execute(request, Some(cancel_rx), Some(tx)).await });
     let execution = timeout(max_duration, handle).await;
@@ -493,7 +496,7 @@ async fn run_codex_turn(
             let _ = cancel_tx.send(());
             keep_interrupted_thread(job, run.session_strategy, &mut rx);
             if run.interactive.is_some() {
-                super::interactive::finish_job(app, &job.id, "timed_out")
+                super::interactive::finish_job(ctx, &job.id, "timed_out")
                     .await
                     .ok();
             }
@@ -524,12 +527,12 @@ async fn run_codex_turn(
     }
     if run.interactive.is_some() {
         super::interactive::update_pending_session(
-            &app.config.general.data_dir,
+            &ctx.config.general.data_dir,
             &job.id,
             execution.session_id.clone(),
         )
         .await?;
-        app.session
+        ctx.session
             .bind_foreground_session_profile(
                 &job.owner_openid,
                 execution.session_id.clone(),
@@ -537,8 +540,8 @@ async fn run_codex_turn(
                     model_override: run
                         .model
                         .clone()
-                        .or_else(|| Some(app.config.general.default_model.clone())),
-                    reasoning_effort: Some(app.config.general.default_reasoning_effort),
+                        .or_else(|| Some(ctx.config.general.default_model.clone())),
+                    reasoning_effort: Some(ctx.config.general.default_reasoning_effort),
                     service_tier: None,
                     context_mode: None,
                 },
@@ -551,7 +554,7 @@ async fn run_codex_turn(
         streamed
     };
     if run.interactive.is_some() {
-        super::interactive::finish_if_needed_after_scheduler_turn(app, job, &output).await
+        super::interactive::finish_if_needed_after_scheduler_turn(ctx, job, &output).await
     } else {
         Ok(output)
     }
@@ -592,7 +595,7 @@ fn drain_session_started(rx: &mut mpsc::UnboundedReceiver<ExecutionUpdate>) -> O
     found
 }
 
-async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
+async fn deliver(ctx: &SchedulerCtx, job: &CronJob, output: &str) -> Result<()> {
     let payload = match job.deliver {
         DeliverPolicy::LogOnly => None,
         DeliverPolicy::PushIfNonEmpty if output.trim().is_empty() => None,
@@ -606,7 +609,7 @@ async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
     let Some(text) = payload else {
         return Ok(());
     };
-    push_or_queue(app, &job.owner_openid, &job.id, &job.title, text).await
+    push_or_queue(ctx, &job.owner_openid, &job.id, &job.title, text).await
 }
 
 /// Push `text` to the owner proactively; when the QQ send fails, queue it as a
@@ -614,18 +617,18 @@ async fn deliver(app: &App, job: &CronJob, output: &str) -> Result<()> {
 /// `Result` is the queueing outcome: callers deliberately differ on whether
 /// they propagate it (`?`) or swallow it (`.ok()`).
 pub(crate) async fn push_or_queue(
-    app: &App,
+    ctx: &SchedulerCtx,
     openid: &str,
     job_id: &str,
     title: &str,
     text: String,
 ) -> Result<()> {
-    match app.qq_client.send_markdown_proactive(openid, &text).await {
+    match ctx.notifier.send_markdown_proactive(openid, &text).await {
         Ok(()) => Ok(()),
         Err(err) => {
             let error = err.to_string();
             super::store::queue_pending_delivery(
-                &app.config.general.data_dir,
+                &ctx.config.general.data_dir,
                 openid,
                 &super::store::PendingDelivery {
                     job_id: job_id.to_string(),
@@ -640,9 +643,9 @@ pub(crate) async fn push_or_queue(
     }
 }
 
-fn scheduler_add_dirs(app: &App) -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![app.session.inbox_dir().to_path_buf()];
-    dirs.extend(DataLayout::new(&app.config.general.data_dir).turn_add_dirs());
+fn scheduler_add_dirs(ctx: &SchedulerCtx) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![ctx.session.inbox_dir().to_path_buf()];
+    dirs.extend(DataLayout::new(&ctx.config.general.data_dir).turn_add_dirs());
     dirs
 }
 

@@ -31,9 +31,23 @@ use crate::{
     memory::store::MemoryStore,
     message::IncomingMessage,
     qq::{Directive, QqApiClient},
+    scheduler::{ProactiveNotifier, SchedulerCtx},
     session::SessionStore,
     shadow::ShadowWorker,
 };
+
+/// `QqApiClient` is the production notifier behind the scheduler's
+/// [`ProactiveNotifier`] seam; the impl lives here (not in `qq/` or
+/// `scheduler/`) so neither of those modules depends on the other.
+impl ProactiveNotifier for QqApiClient {
+    fn send_markdown_proactive<'a>(
+        &'a self,
+        openid: &'a str,
+        text: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(QqApiClient::send_markdown_proactive(self, openid, text))
+    }
+}
 
 pub struct App {
     pub config: AppConfig,
@@ -42,6 +56,10 @@ pub struct App {
     pub codex: Arc<CodexExecutor>,
     pub(crate) memory: Arc<MemoryStore>,
     pub(crate) shadow: Option<Arc<ShadowWorker>>,
+    /// The scheduler's slice of the app. The `App` holds the only strong
+    /// reference (the tick loop keeps a `Weak`), so dropping the `App` still
+    /// parks the scheduler exactly as when it held `Weak<App>` directly.
+    pub(crate) scheduler_ctx: Arc<SchedulerCtx>,
     busy: AtomicBool,
     active_turn: Mutex<Option<oneshot::Sender<()>>>,
     /// The QQ openid whose turn currently holds `busy`. Used to route
@@ -84,6 +102,12 @@ impl App {
         memory: Arc<MemoryStore>,
         shadow: Option<Arc<ShadowWorker>>,
     ) -> Arc<Self> {
+        let scheduler_ctx = Arc::new(SchedulerCtx {
+            config: config.clone(),
+            session: session.clone(),
+            codex: codex.clone(),
+            notifier: qq_client.clone(),
+        });
         let app = Arc::new(Self {
             config,
             session,
@@ -91,6 +115,7 @@ impl App {
             codex,
             memory,
             shadow,
+            scheduler_ctx,
             busy: AtomicBool::new(false),
             active_turn: Mutex::new(None),
             active_openid: Mutex::new(None),
@@ -121,10 +146,7 @@ impl App {
     /// they have no session record yet. Shared by command handlers and the
     /// scheduler so locale resolution stays consistent in one place.
     pub(crate) async fn command_locale(&self, openid: &str) -> String {
-        self.session
-            .language_for_user(openid)
-            .await
-            .unwrap_or_else(crate::session::state::default_language)
+        self.session.command_locale(openid).await
     }
 
     /// Reply to `message_id` from `openid` with `text`, quoting the original
