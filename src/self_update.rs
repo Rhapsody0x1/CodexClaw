@@ -6,25 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::warn;
 
 use crate::{
     config::AppConfig,
-    util::{
-        layout::DataLayout, path::search_path_dirs as util_search_path_dirs,
-        text::truncate_with_marker,
-    },
+    util::{path::search_path_dirs as util_search_path_dirs, text::truncate_with_marker},
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BuildRecord {
-    pub(crate) built_at: String,
-    pub(crate) command: String,
-    pub(crate) binary_path: String,
-    pub(crate) success: bool,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildResult {
@@ -105,13 +93,6 @@ pub(crate) async fn run_build(config: &AppConfig) -> Result<BuildResult> {
             .join(&config.general.self_binary_path)
     };
     let success = output.status.success() && binary_path.exists();
-    let record = BuildRecord {
-        built_at: Utc::now().to_rfc3339(),
-        command: config.general.self_build_command.clone(),
-        binary_path: binary_path.display().to_string(),
-        success,
-    };
-    save_last_build_record(&config.general.data_dir, &record).await?;
     let summary = if success {
         format!("构建成功：`{}`", binary_path.display())
     } else {
@@ -131,22 +112,6 @@ pub(crate) async fn run_build(config: &AppConfig) -> Result<BuildResult> {
         binary_path,
         summary,
     })
-}
-
-async fn save_last_build_record(data_dir: &Path, record: &BuildRecord) -> Result<()> {
-    let path = last_build_path(data_dir);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let raw = serde_json::to_string_pretty(record)?;
-    tokio::fs::write(&path, raw)
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn last_build_path(data_dir: &Path) -> PathBuf {
-    DataLayout::new(data_dir).last_build_file()
 }
 
 fn resolve_program(program: &str) -> PathBuf {

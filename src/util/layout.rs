@@ -87,14 +87,6 @@ impl DataLayout {
         self.qq_dir().join("gateway-session.json")
     }
 
-    fn self_update_dir(&self) -> PathBuf {
-        self.root.join("self-update")
-    }
-
-    pub(crate) fn last_build_file(&self) -> PathBuf {
-        self.self_update_dir().join("last-build.json")
-    }
-
     /// Directories every codex turn gets write access to on top of its own
     /// workspace, so a turn can read its session state and reach the cron job
     /// tree. Shared by the foreground and the scheduler paths: adding a
@@ -152,10 +144,6 @@ mod tests {
         assert_eq!(
             layout.gateway_session_file(),
             Path::new("/data/qq/gateway-session.json")
-        );
-        assert_eq!(
-            layout.last_build_file(),
-            Path::new("/data/self-update/last-build.json")
         );
     }
 
