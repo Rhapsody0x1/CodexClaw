@@ -418,5 +418,8 @@ pub(super) fn dialog_from_disk_session(
         saved: true,
         profile: profile.map(|value| value.dialog_profile()),
         last_usage: None,
+        // Meaningful only while installed as the foreground; the installer
+        // (`install_foreground`) assigns the real value.
+        generation: 0,
     }
 }

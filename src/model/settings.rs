@@ -327,6 +327,13 @@ pub(crate) struct DialogState {
     pub(crate) profile: Option<DialogProfile>,
     #[serde(default)]
     pub(crate) last_usage: Option<TokenUsageSnapshot>,
+    /// Monotonically bumped every time this dialog is installed as the
+    /// foreground. Two fresh temporary dialogs are value-identical in every
+    /// other field, so an interrupted turn's compare-and-set binding needs
+    /// this to notice that /stop or /new swapped the foreground mid-turn.
+    /// Absent in state files written before the field existed (reads as 0).
+    #[serde(default)]
+    pub(crate) generation: u64,
 }
 
 impl DialogState {
@@ -338,6 +345,7 @@ impl DialogState {
             saved: false,
             profile: None,
             last_usage: None,
+            generation: 0,
         }
     }
 

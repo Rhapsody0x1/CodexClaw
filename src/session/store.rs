@@ -301,13 +301,16 @@ impl SessionStore {
     /// Compare-and-set variant of [`Self::bind_foreground_session_profile`]
     /// for turns that ended without completing (/stop or a mid-flight
     /// failure): the binding is applied only while the foreground is still
-    /// the dialog the turn started on — same session id and workspace as the
-    /// `expected` snapshot taken at turn start. If /stop, /new or the cron
-    /// sweeper swapped the foreground mid-turn, the comparison fails and
-    /// nothing is written, so the orphaned turn cannot point the foreground
-    /// at its dead thread and lose the conversation the user switched to.
-    /// Returns whether the binding was applied. The check and the write
-    /// happen under one state lock, so no swap can slip in between.
+    /// the dialog the turn started on — same generation, session id and
+    /// workspace as the `expected` snapshot taken at turn start. If /stop,
+    /// /new or the cron sweeper swapped the foreground mid-turn, the
+    /// comparison fails and nothing is written, so the orphaned turn cannot
+    /// point the foreground at its dead thread and lose the conversation the
+    /// user switched to. The generation counter is what makes a temp→temp
+    /// swap visible: the outgoing and incoming dialogs are value-identical in
+    /// every other field. Returns whether the binding was applied. The check
+    /// and the write happen under one state lock, so no swap can slip in
+    /// between.
     pub(crate) async fn bind_foreground_session_profile_if_matches(
         &self,
         openid: &str,
@@ -315,12 +318,14 @@ impl SessionStore {
         session_id: String,
         profile: DialogProfile,
     ) -> Result<bool> {
+        let expected_generation = expected.generation;
         let expected_session_id = expected.session_id.clone();
         let expected_workspace_dir = expected.workspace_dir.clone();
         self.mutate_state(|state| {
             let (applied, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
-                if user.foreground.session_id != expected_session_id
+                if user.foreground.generation != expected_generation
+                    || user.foreground.session_id != expected_session_id
                     || user.foreground.workspace_dir != expected_workspace_dir
                 {
                     return Ok(false);
@@ -534,7 +539,7 @@ impl SessionStore {
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
                 self.new_temporary_dialog()
             })?;
-            user.foreground = target.clone();
+            install_foreground(user, target.clone());
             Ok(SwitchResult { parked_alias })
         })
         .await
@@ -572,7 +577,10 @@ impl SessionStore {
             let parked_alias = park_foreground(user, None, &self.attachment_workspace_dir, || {
                 self.new_temporary_dialog()
             })?;
-            user.foreground = dialog_from_disk_session(target, resolved_profile.as_ref());
+            install_foreground(
+                user,
+                dialog_from_disk_session(target, resolved_profile.as_ref()),
+            );
             Ok(SwitchResult { parked_alias })
         })
         .await
@@ -691,10 +699,10 @@ impl SessionStore {
                         dialog.workspace_dir = profile.workspace_dir.clone();
                         dialog.profile = Some(profile.dialog_profile());
                     }
-                    user.foreground = dialog;
+                    install_foreground(user, dialog);
                     Ok(Some(alias))
                 } else {
-                    user.foreground = self.new_temporary_dialog()?;
+                    install_foreground(user, self.new_temporary_dialog()?);
                     Ok(None)
                 }
             })
@@ -1004,9 +1012,18 @@ fn ensure_user_mut<'a>(
     }
     let temporary = build_temporary()?;
     let mut user = UserSessionState::new(temporary.workspace_dir.clone());
-    user.foreground = temporary;
+    install_foreground(&mut user, temporary);
     state.users.insert(openid.to_string(), user);
     Ok(state.users.get_mut(openid).expect("user entry must exist"))
+}
+
+/// The single way to replace the foreground dialog: bumps the generation
+/// counter so that every swap is observable to the interrupted-turn CAS
+/// binding, even when the outgoing and incoming dialogs are value-identical
+/// (two fresh temporaries — the /stop-during-first-turn case).
+fn install_foreground(user: &mut UserSessionState, mut dialog: DialogState) {
+    dialog.generation = user.foreground.generation.wrapping_add(1);
+    user.foreground = dialog;
 }
 
 fn persist_cached_profile(
@@ -1088,7 +1105,7 @@ fn park_foreground(
 ) -> Result<Option<String>> {
     if user.foreground.session_id.is_none() && !user.foreground.saved {
         let discarded_workspace = user.foreground.workspace_dir.clone();
-        user.foreground = new_temporary()?;
+        install_foreground(user, new_temporary()?);
         if discarded_workspace != user.foreground.workspace_dir
             && discarded_workspace != shared_workspace_dir
         {
@@ -1106,7 +1123,7 @@ fn park_foreground(
     }
     user.background.insert(alias.clone(), parked);
     record_background_alias(user, &alias);
-    user.foreground = new_temporary()?;
+    install_foreground(user, new_temporary()?);
     Ok(Some(alias))
 }
 
@@ -1493,6 +1510,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_if_matches_rejects_after_temp_to_temp_swap() {
+        let env = TestEnv::new().await;
+
+        // First turn ever: the foreground is a fresh temporary dialog
+        // (session_id None, shared workspace). /stop mid-turn installs a new
+        // temporary that is value-identical in every field except the
+        // generation counter.
+        let turn_start = env.snapshot("u1").await;
+        assert!(turn_start.foreground.session_id.is_none());
+        env.store.stop_foreground("u1").await.unwrap();
+
+        // The aborted turn's tail must not bind its dead thread to the
+        // dialog the user just reset.
+        let applied = env
+            .store
+            .bind_foreground_session_profile_if_matches(
+                "u1",
+                &turn_start.foreground,
+                "stopped-thread".to_string(),
+                DialogProfile::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!applied, "temp→temp swap must invalidate the turn snapshot");
+        let snapshot = env.snapshot("u1").await;
+        assert!(
+            snapshot.foreground.session_id.is_none(),
+            "the reset foreground must stay unbound"
+        );
+    }
+
+    #[tokio::test]
     async fn supports_multiple_background_dialogs() {
         let env = TestEnv::new().await;
         env.store
@@ -1765,6 +1814,7 @@ mod tests {
                         saved: true,
                         profile: None,
                         last_usage: None,
+                        generation: 0,
                     },
                 );
                 Ok(())
