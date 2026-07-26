@@ -1046,7 +1046,19 @@ mod tests {
     fn split_text_bounds_mixed_long_and_short_lines() {
         let text = format!("{}\nshort tail", "y".repeat(9000));
         let chunks = split_text(&text, 4500);
+        assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| c.chars().count() <= 4500));
+        // Content preservation is only modulo line separators: `split_text`
+        // rebuilds chunks from `text.lines()`, so a separator that lands on a
+        // chunk boundary is dropped, and a hard split inside an over-limit
+        // line introduces a boundary that was never a separator. Every
+        // non-separator char must survive, in order.
+        assert_eq!(
+            chunks.concat().replace('\n', ""),
+            text.replace('\n', ""),
+            "split_text dropped or reordered content"
+        );
+        assert_eq!(chunks.last().map(String::as_str), Some("short tail"));
     }
 
     #[test]

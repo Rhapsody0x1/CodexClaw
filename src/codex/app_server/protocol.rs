@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_policy_read_only_roundtrips() {
+    fn sandbox_policy_read_only_serializes_tagged() {
         let p = SandboxPolicy::ReadOnly {
             network_access: false,
         };
