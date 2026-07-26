@@ -311,7 +311,8 @@ fn fuzzy_fallback(outcome: FuzzyOutcome, locale: &str, input: &str) -> CommandOu
 }
 
 pub(super) fn model_extras(snapshot: &UserSessionState) -> Vec<String> {
-    merged_settings(snapshot)
+    snapshot
+        .effective_settings()
         .model_override
         .map(|value| vec![value])
         .unwrap_or_default()

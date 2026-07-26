@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) use crate::util::text::format_tokens_compact;
+
 pub(super) const PROJECT_KEY_SEP: char = '\u{1f}';
 
 #[derive(Debug, Clone)]
@@ -15,7 +17,7 @@ pub(super) fn build_status_text(
     runtime_profile: &CodexRuntimeProfile,
     is_busy: bool,
 ) -> String {
-    let effective = merged_settings(state);
+    let effective = state.effective_settings();
     let lang = state.settings.language.as_str();
     let mut lines: Vec<String> = Vec::new();
     lines.push(
@@ -115,23 +117,14 @@ pub(super) fn effective_context_window(
     state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> u64 {
-    match merged_settings(state)
+    match state
+        .effective_settings()
         .context_mode
         .or(runtime_profile.context_mode)
         .unwrap_or(ContextMode::Standard)
     {
         ContextMode::Standard => ContextMode::STANDARD_CONTEXT_WINDOW,
         ContextMode::OneM => 1_000_000,
-    }
-}
-
-pub(super) fn format_tokens_compact(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{}K", (value + 500) / 1_000)
-    } else {
-        value.to_string()
     }
 }
 
@@ -217,7 +210,7 @@ pub(super) fn effective_model(
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
 ) -> String {
-    let effective = merged_settings(state);
+    let effective = state.effective_settings();
     effective
         .model_override
         .clone()
@@ -225,37 +218,16 @@ pub(super) fn effective_model(
         .unwrap_or_else(|| default_model.to_string())
 }
 
-pub(super) fn session_profile_for_effective_settings(
-    state: &UserSessionState,
-) -> Option<&crate::session::state::DialogProfile> {
-    if state.foreground.saved {
-        state.foreground.profile.as_ref()
-    } else {
-        None
-    }
-}
-
 pub(super) fn effective_reasoning(
     state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> &'static str {
-    let effective = merged_settings(state);
+    let effective = state.effective_settings();
     effective
         .reasoning_effort
         .or(runtime_profile.reasoning_effort)
         .unwrap_or(ReasoningEffort::Medium)
         .as_str()
-}
-
-pub(super) fn effective_fast_label(
-    _state: &UserSessionState,
-    runtime_profile: &CodexRuntimeProfile,
-) -> &'static str {
-    match runtime_profile.service_tier {
-        Some(ServiceTier::Fast) => "on",
-        Some(ServiceTier::Flex) => "off",
-        None => "inherit",
-    }
 }
 
 pub(super) fn effective_tier_token(
@@ -273,7 +245,7 @@ pub(super) fn effective_context_label(
     state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> &'static str {
-    let effective = merged_settings(state);
+    let effective = state.effective_settings();
     match effective.context_mode.or(runtime_profile.context_mode) {
         Some(mode) => mode.label(),
         None => "inherit",
@@ -284,20 +256,11 @@ pub(super) fn effective_context_token(
     state: &UserSessionState,
     runtime_profile: &CodexRuntimeProfile,
 ) -> Option<String> {
-    let effective = merged_settings(state);
+    let effective = state.effective_settings();
     effective
         .context_mode
         .or(runtime_profile.context_mode)
         .map(|mode| mode.label().to_string())
-}
-
-pub(super) fn merged_settings(state: &UserSessionState) -> crate::session::state::SessionSettings {
-    let mut base = state.settings.clone();
-    base.model_override = None;
-    base.reasoning_effort = None;
-    base.service_tier = None;
-    base.context_mode = None;
-    base.merged_with_profile(session_profile_for_effective_settings(state))
 }
 
 pub(super) fn parse_scope(value: &str, lang: &str) -> Result<SessionListScope> {

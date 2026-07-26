@@ -85,6 +85,16 @@ impl ServiceTier {
             Self::Flex => "flex",
         }
     }
+
+    /// The user-facing on/off/inherit label for a fast-tier setting. Shared by
+    /// the `/fast` status view and the global-setting confirmation reply.
+    pub(crate) fn fast_label(tier: Option<ServiceTier>) -> &'static str {
+        match tier {
+            Some(Self::Fast) => "on",
+            Some(Self::Flex) => "off",
+            None => "inherit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -534,6 +544,29 @@ impl UserSessionState {
             command_aliases: BTreeMap::new(),
             pending_setting: None,
         }
+    }
+
+    /// The dialog profile that participates in effective-settings resolution:
+    /// only a *saved* foreground dialog carries one; temporary dialogs always
+    /// resolve against the user's own settings.
+    pub(crate) fn foreground_profile(&self) -> Option<&DialogProfile> {
+        if self.foreground.saved {
+            self.foreground.profile.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// The settings a turn actually runs with: the user's settings with the
+    /// four runtime overrides (model / reasoning / tier / context) replaced by
+    /// the saved foreground dialog profile, if any.
+    pub(crate) fn effective_settings(&self) -> SessionSettings {
+        let mut base = self.settings.clone();
+        base.model_override = None;
+        base.reasoning_effort = None;
+        base.service_tier = None;
+        base.context_mode = None;
+        base.merged_with_profile(self.foreground_profile())
     }
 }
 

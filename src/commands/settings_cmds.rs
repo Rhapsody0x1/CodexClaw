@@ -52,7 +52,7 @@ pub(super) async fn handle_model(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comma
         .first()
         .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
     {
-        let active_override = merged_settings(&snapshot).model_override;
+        let active_override = snapshot.effective_settings().model_override;
         return Ok(CommandOutcome::reply(t!(
             "commands.model.status",
             effective = effective_model(&snapshot, default_model, runtime_profile),
@@ -110,7 +110,7 @@ pub(super) async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
             lang.as_str(),
             "commands.fast.prompt_current",
             "commands.fast.prompt_header",
-            effective_fast_label(&snapshot, runtime_profile),
+            ServiceTier::fast_label(runtime_profile.service_tier),
             PendingSetting::Fast,
         )
         .await;
@@ -118,7 +118,7 @@ pub(super) async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
     if args[0].eq_ignore_ascii_case("status") {
         return Ok(CommandOutcome::reply(t!(
             "commands.fast.status",
-            value = effective_fast_label(&snapshot, runtime_profile),
+            value = ServiceTier::fast_label(runtime_profile.service_tier),
             locale = lang.as_str()
         )));
     }

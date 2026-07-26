@@ -101,6 +101,17 @@ pub(crate) fn strip_end_signal(text: &str, signal: &str) -> (String, bool) {
     (stripped, true)
 }
 
+/// Render a token count compactly for chat output: `1.2M`, `220K`, `999`.
+pub(crate) fn format_tokens_compact(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{}K", (value + 500) / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Strip a leading ```` ```json ```` / ```` ``` ```` fence and its closing
 /// fence, returning the trimmed body.
 fn strip_fenced(s: &str) -> Option<&str> {

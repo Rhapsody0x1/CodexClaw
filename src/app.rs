@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -22,7 +22,7 @@ use crate::{
         write_context_mode_to_config_path, write_model_to_config_path,
         write_reasoning_effort_to_config_path, write_service_tier_to_config_path,
     },
-    commands::{ApprovalIntent, CommandOutcome, CommandReply, maybe_handle_command},
+    commands::{ApprovalIntent, CommandOutcome, maybe_handle_command},
     config::AppConfig,
     memory::{inject as memory_inject, store::MemoryStore},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
@@ -34,12 +34,12 @@ use crate::{
     session::{
         SessionStore,
         state::{
-            ContextMode, DialogProfile, PendingSetting, ServiceTier, SessionState,
-            TokenUsageSnapshot, UserSessionState,
+            ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,
+            SessionSettings, SessionState, TokenUsageSnapshot,
         },
     },
     shadow::{ShadowContext, ShadowWorker},
-    util::{lang::normalize_lang, layout::DataLayout},
+    util::{lang::normalize_lang, layout::DataLayout, text::format_tokens_compact},
 };
 
 const CONTEXT_WARNING_THRESHOLD: f64 = 0.80;
@@ -71,6 +71,19 @@ enum PendingApprovalEntry {
     Outcome(oneshot::Sender<ApprovalOutcome>),
 }
 
+/// RAII ownership of the singleton `App::busy` slot: dropping the guard
+/// releases the slot, so every early-return and panic path unwinds it without
+/// a hand-written `store(false)`. Acquired via [`App::try_acquire_busy`].
+struct BusyGuard<'a> {
+    busy: &'a AtomicBool,
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        self.busy.store(false, Ordering::SeqCst);
+    }
+}
+
 impl App {
     pub fn new(
         config: AppConfig,
@@ -95,6 +108,17 @@ impl App {
         });
         app.clone().install_approval_handler();
         app
+    }
+
+    /// Try to reserve the singleton busy slot (one turn at a time across all
+    /// users). Returns `None` when another turn already holds it; the caller
+    /// should report "busy" to the user and bail.
+    fn try_acquire_busy(&self) -> Option<BusyGuard<'_>> {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(BusyGuard { busy: &self.busy })
+        }
     }
 
     /// Wire the approval broker to forward requests into our QQ prompt +
@@ -161,11 +185,7 @@ impl App {
         let slot = guard.entry(openid.clone()).or_default();
         slot.push_back(PendingApprovalEntry::Outcome(tx));
         drop(guard);
-        if let Err(err) = self
-            .qq_client
-            .send_text(&openid, &reply_message_id, &prompt, Some(&reply_message_id))
-            .await
-        {
+        if let Err(err) = self.reply_text(&openid, &reply_message_id, &prompt).await {
             warn!(error = %err, openid = %openid, "failed to deliver approval prompt to QQ");
         }
     }
@@ -219,17 +239,15 @@ impl App {
             crate::scheduler::finish_job_for_owner(self, &normalized.sender_openid, "stopped")
                 .await?;
             let lang = self.command_locale(&normalized.sender_openid).await;
-            self.qq_client
-                .send_text(
-                    &normalized.sender_openid,
-                    &normalized.message_id,
-                    &t!(
-                        "scheduler.interactive.stop_confirmed",
-                        locale = lang.as_str()
-                    ),
-                    Some(&normalized.message_id),
-                )
-                .await?;
+            self.reply_text(
+                &normalized.sender_openid,
+                &normalized.message_id,
+                &t!(
+                    "scheduler.interactive.stop_confirmed",
+                    locale = lang.as_str()
+                ),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -251,181 +269,130 @@ impl App {
                 .remove(&normalized.sender_openid);
         }
 
-        match command_outcome {
+        self.dispatch_outcome(command_outcome, normalized, runtime_profile)
+            .await
+    }
+
+    /// Turn a `CommandOutcome` decision into effects: a direct reply, a turn
+    /// cancellation, a global-setting write, an approval resolution, or a full
+    /// codex turn (`Continue`).
+    async fn dispatch_outcome(
+        &self,
+        outcome: CommandOutcome,
+        normalized: IncomingMessage,
+        runtime_profile: CodexRuntimeProfile,
+    ) -> Result<()> {
+        let openid = &normalized.sender_openid;
+        let message_id = &normalized.message_id;
+        match outcome {
             CommandOutcome::Reply(reply) => {
                 info!(
-                    sender_openid = %normalized.sender_openid,
-                    message_id = %normalized.message_id,
+                    sender_openid = %openid,
+                    message_id = %message_id,
                     "handled as direct command"
                 );
-                self.send_command_reply(&normalized.sender_openid, &normalized.message_id, &reply)
-                    .await?;
-                return Ok(());
+                self.reply_text(openid, message_id, &reply.text).await
             }
-            CommandOutcome::CancelCurrent(message) => {
+            CommandOutcome::CancelCurrent(message) | CommandOutcome::StopCurrent(message) => {
                 self.cancel_active_turn().await;
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &message,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                self.reply_text(openid, message_id, &message).await
             }
-            CommandOutcome::StopCurrent(message) => {
-                self.cancel_active_turn().await;
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &message,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
-            }
-            CommandOutcome::SelfUpdate => {
-                self.handle_self_update_command(&normalized.sender_openid, &normalized.message_id)
-                    .await?;
-                return Ok(());
-            }
+            CommandOutcome::SelfUpdate => self.handle_self_update_command(openid, message_id).await,
             CommandOutcome::Compact => {
-                self.handle_compact_command(
-                    &normalized.sender_openid,
-                    &normalized.message_id,
-                    &runtime_profile,
-                )
-                .await?;
-                return Ok(());
+                self.handle_compact_command(openid, message_id, &runtime_profile)
+                    .await
             }
             CommandOutcome::RetryResume => {
-                let mut retry_message = {
-                    self.pending_resume_messages
-                        .lock()
-                        .await
-                        .remove(&normalized.sender_openid)
-                };
-                let Some(mut retry_message) = retry_message.take() else {
-                    let lang = self.command_locale(&normalized.sender_openid).await;
-                    self.qq_client
-                        .send_text(
-                            &normalized.sender_openid,
-                            &normalized.message_id,
+                let retry_message = self.pending_resume_messages.lock().await.remove(openid);
+                let Some(mut retry_message) = retry_message else {
+                    let lang = self.command_locale(openid).await;
+                    return self
+                        .reply_text(
+                            openid,
+                            message_id,
                             &t!("commands.resume.no_recovery", locale = lang.as_str()),
-                            Some(&normalized.message_id),
                         )
-                        .await?;
-                    return Ok(());
+                        .await;
                 };
                 retry_message.message_id = normalized.message_id.clone();
                 self.run_normal_message(retry_message, runtime_profile)
-                    .await?;
-                return Ok(());
+                    .await
             }
             CommandOutcome::SetGlobalModel(value) => {
-                let lang = self.command_locale(&normalized.sender_openid).await;
-                let profile_path = self.runtime_profile_path();
-                write_model_to_config_path(&profile_path, value.as_deref())?;
-                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
-                let effective_model = updated_profile
-                    .configured_model
-                    .unwrap_or_else(|| self.config.general.default_model.clone());
-                let msg = t!(
-                    "commands.model.updated",
-                    model = effective_model,
-                    locale = lang.as_str()
+                self.apply_global_setting(
+                    openid,
+                    message_id,
+                    |path| write_model_to_config_path(path, value.as_deref()),
+                    |profile, locale| {
+                        let effective_model = profile
+                            .configured_model
+                            .clone()
+                            .unwrap_or_else(|| self.config.general.default_model.clone());
+                        t!(
+                            "commands.model.updated",
+                            model = effective_model,
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
                 )
-                .into_owned();
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &msg,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                .await
             }
             CommandOutcome::SetGlobalReasoning(value) => {
-                let lang = self.command_locale(&normalized.sender_openid).await;
-                let profile_path = self.runtime_profile_path();
-                write_reasoning_effort_to_config_path(&profile_path, value)?;
-                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
-                let effective_reasoning = updated_profile
-                    .reasoning_effort
-                    .unwrap_or(self.config.general.default_reasoning_effort)
-                    .as_str();
-                let msg = t!(
-                    "commands.reasoning.updated",
-                    value = effective_reasoning,
-                    locale = lang.as_str()
+                self.apply_global_setting(
+                    openid,
+                    message_id,
+                    |path| write_reasoning_effort_to_config_path(path, value),
+                    |profile, locale| {
+                        let effective_reasoning = profile
+                            .reasoning_effort
+                            .unwrap_or(self.config.general.default_reasoning_effort)
+                            .as_str();
+                        t!(
+                            "commands.reasoning.updated",
+                            value = effective_reasoning,
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
                 )
-                .into_owned();
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &msg,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                .await
             }
             CommandOutcome::SetGlobalFast(value) => {
-                let lang = self.command_locale(&normalized.sender_openid).await;
-                let profile_path = self.runtime_profile_path();
-                write_service_tier_to_config_path(&profile_path, value)?;
-                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
-                let msg = t!(
-                    "commands.fast.updated",
-                    value = global_fast_label(updated_profile.service_tier),
-                    locale = lang.as_str()
+                self.apply_global_setting(
+                    openid,
+                    message_id,
+                    |path| write_service_tier_to_config_path(path, value),
+                    |profile, locale| {
+                        t!(
+                            "commands.fast.updated",
+                            value = ServiceTier::fast_label(profile.service_tier),
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
                 )
-                .into_owned();
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &msg,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                .await
             }
             CommandOutcome::SetGlobalContext(value) => {
-                let lang = self.command_locale(&normalized.sender_openid).await;
-                let profile_path = self.runtime_profile_path();
-                write_context_mode_to_config_path(&profile_path, value)?;
-                let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
-                let msg = t!(
-                    "commands.context.updated",
-                    value = global_context_label(updated_profile.context_mode),
-                    locale = lang.as_str()
+                self.apply_global_setting(
+                    openid,
+                    message_id,
+                    |path| write_context_mode_to_config_path(path, value),
+                    |profile, locale| {
+                        t!(
+                            "commands.context.updated",
+                            value = global_context_label(profile.context_mode),
+                            locale = locale
+                        )
+                        .into_owned()
+                    },
                 )
-                .into_owned();
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        &msg,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                .await
             }
             CommandOutcome::Approval(intent) => {
-                let resolved = self
-                    .resolve_pending_approval(&normalized.sender_openid, intent)
-                    .await;
-                let zh = self
-                    .session
-                    .snapshot_for_user(&normalized.sender_openid)
-                    .await
-                    .ok()
-                    .map(|snap| snap.settings.language.starts_with("zh"))
-                    .unwrap_or(true);
+                let resolved = self.resolve_pending_approval(openid, intent).await;
+                let zh = self.command_locale(openid).await.starts_with("zh");
                 let msg = if resolved {
                     match intent {
                         ApprovalIntent::Accept => {
@@ -462,20 +429,28 @@ impl App {
                 } else {
                     "no pending approval to respond to."
                 };
-                self.qq_client
-                    .send_text(
-                        &normalized.sender_openid,
-                        &normalized.message_id,
-                        msg,
-                        Some(&normalized.message_id),
-                    )
-                    .await?;
-                return Ok(());
+                self.reply_text(openid, message_id, msg).await
             }
-            CommandOutcome::Continue => {}
+            CommandOutcome::Continue => self.run_normal_message(normalized, runtime_profile).await,
         }
+    }
 
-        self.run_normal_message(normalized, runtime_profile).await
+    /// Shared body of the four `SetGlobal*` outcomes: resolve the user's
+    /// locale, apply `write` to the global codex config, re-read the runtime
+    /// profile, and reply with `render`'s confirmation message.
+    async fn apply_global_setting(
+        &self,
+        openid: &str,
+        message_id: &str,
+        write: impl FnOnce(&std::path::Path) -> Result<()>,
+        render: impl FnOnce(&CodexRuntimeProfile, &str) -> String,
+    ) -> Result<()> {
+        let lang = self.command_locale(openid).await;
+        let profile_path = self.runtime_profile_path();
+        write(&profile_path)?;
+        let updated_profile = read_codex_runtime_profile_from_path(&profile_path);
+        let msg = render(&updated_profile, lang.as_str());
+        self.reply_text(openid, message_id, &msg).await
     }
 
     async fn run_normal_message(
@@ -483,22 +458,20 @@ impl App {
         normalized: IncomingMessage,
         runtime_profile: CodexRuntimeProfile,
     ) -> Result<()> {
-        if self.busy.swap(true, Ordering::SeqCst) {
+        let Some(_busy) = self.try_acquire_busy() else {
             warn!(
                 sender_openid = %normalized.sender_openid,
                 message_id = %normalized.message_id,
                 "rejected because another turn is still running"
             );
-            self.qq_client
-                .send_text(
-                    &normalized.sender_openid,
-                    &normalized.message_id,
-                    "上一轮仍在处理中，请稍后再试。",
-                    Some(&normalized.message_id),
-                )
-                .await?;
+            self.reply_text(
+                &normalized.sender_openid,
+                &normalized.message_id,
+                "上一轮仍在处理中，请稍后再试。",
+            )
+            .await?;
             return Ok(());
-        }
+        };
 
         *self.active_openid.lock().await = Some(ActiveTurnContext {
             openid: normalized.sender_openid.clone(),
@@ -522,7 +495,8 @@ impl App {
                 );
             }
         }
-        self.busy.store(false, Ordering::SeqCst);
+        // `_busy` drops here, releasing the busy slot last — the same order
+        // the hand-written `store(false)` used to run in.
         result
     }
 
@@ -575,7 +549,7 @@ impl App {
             .session
             .snapshot_for_user(&message.sender_openid)
             .await?;
-        let effective_settings = effective_session_settings(&user_snapshot);
+        let effective_settings = user_snapshot.effective_settings();
         let runtime_state = SessionState {
             session_id: user_snapshot.foreground.session_id.clone(),
             settings: effective_settings.clone(),
@@ -584,19 +558,9 @@ impl App {
         let shared_workspace_dir = self.session.attachment_workspace_dir().to_path_buf();
         let codex_home = self.session.codex_home().to_path_buf();
         write_turn_context(&workspace_dir, &message.sender_openid).await;
-        let effective_model = effective_settings
-            .model_override
-            .clone()
-            .or_else(|| runtime_profile.configured_model.clone())
-            .unwrap_or_else(|| self.config.general.default_model.clone());
-        let reasoning = effective_settings
-            .reasoning_effort
-            .or(runtime_profile.reasoning_effort)
-            .unwrap_or(self.config.general.default_reasoning_effort);
+        let (effective_model, reasoning, context_mode) =
+            self.effective_runtime_triple(&effective_settings, &runtime_profile);
         let service_tier = runtime_profile.service_tier;
-        let context_mode = effective_settings
-            .context_mode
-            .or(runtime_profile.context_mode);
         // snapshot_for does synchronous file reads (and fsync on the write
         // paths); run it off the reactor so the per-message hot path never
         // blocks a tokio worker thread.
@@ -774,13 +738,7 @@ impl App {
                 } else {
                     None
                 };
-                let lang_for_warning = self
-                    .session
-                    .snapshot_for_user(&message.sender_openid)
-                    .await
-                    .ok()
-                    .map(|snap| snap.settings.language)
-                    .unwrap_or_else(|| "en".to_string());
+                let lang_for_warning = self.command_locale(&message.sender_openid).await;
                 let context_warning = usage_snapshot
                     .as_ref()
                     .and_then(|snap| build_context_warning(snap, &lang_for_warning));
@@ -794,13 +752,7 @@ impl App {
                         payload.push_str(warning);
                     }
                     if !payload.is_empty() {
-                        self.qq_client
-                            .send_text(
-                                &message.sender_openid,
-                                &message.message_id,
-                                &payload,
-                                Some(&message.message_id),
-                            )
+                        self.reply_text(&message.sender_openid, &message.message_id, &payload)
                             .await?;
                     }
                     for directive in parsed.directives {
@@ -808,13 +760,7 @@ impl App {
                             .await?;
                     }
                 } else if let Some(warning) = context_warning.as_deref() {
-                    self.qq_client
-                        .send_text(
-                            &message.sender_openid,
-                            &message.message_id,
-                            warning,
-                            Some(&message.message_id),
-                        )
+                    self.reply_text(&message.sender_openid, &message.message_id, warning)
                         .await?;
                 }
 
@@ -847,13 +793,7 @@ impl App {
                     let lang = effective_settings.language.as_str();
                     let prompt = build_plan_followup_prompt(lang);
                     let _ = self
-                        .qq_client
-                        .send_text(
-                            &message.sender_openid,
-                            &message.message_id,
-                            &prompt,
-                            Some(&message.message_id),
-                        )
+                        .reply_text(&message.sender_openid, &message.message_id, &prompt)
                         .await;
                 }
 
@@ -882,13 +822,7 @@ impl App {
                             format!("检测到修改了 codex-claw 源码，但自动构建触发失败：{err}")
                         }
                     };
-                    self.qq_client
-                        .send_text(
-                            &message.sender_openid,
-                            &message.message_id,
-                            &text,
-                            Some(&message.message_id),
-                        )
+                    self.reply_text(&message.sender_openid, &message.message_id, &text)
                         .await?;
                 }
                 Ok(())
@@ -956,14 +890,12 @@ impl App {
                             Some(PendingSetting::ResumeRecovery),
                         )
                         .await?;
-                    self.qq_client
-                        .send_text(
-                            &message.sender_openid,
-                            &message.message_id,
-                            &t!("commands.resume.recovery_prompt", locale = lang.as_str()),
-                            Some(&message.message_id),
-                        )
-                        .await?;
+                    self.reply_text(
+                        &message.sender_openid,
+                        &message.message_id,
+                        &t!("commands.resume.recovery_prompt", locale = lang.as_str()),
+                    )
+                    .await?;
                     return Ok(());
                 }
                 error!("codex execution failed: {err:#}");
@@ -971,13 +903,7 @@ impl App {
                     .format_execution_error_message(&err, &workspace_dir)
                     .unwrap_or_else(|| format!("Codex 执行失败：{err}"));
                 if dispatch_report.sent_replies == 0 {
-                    self.qq_client
-                        .send_text(
-                            &message.sender_openid,
-                            &message.message_id,
-                            &text,
-                            Some(&message.message_id),
-                        )
+                    self.reply_text(&message.sender_openid, &message.message_id, &text)
                         .await?;
                 }
                 Err(err)
@@ -1027,31 +953,22 @@ impl App {
     }
 
     async fn handle_self_update_command(&self, openid: &str, message_id: &str) -> Result<()> {
-        // Reserve the busy slot for the whole update (swap, not load): otherwise
-        // a message arriving during the multi-minute build would see busy=false,
-        // start a real turn, and be silently killed by the exit(0) below.
-        if self.busy.swap(true, Ordering::SeqCst) {
-            self.qq_client
-                .send_text(
-                    openid,
-                    message_id,
-                    "当前有任务在运行，请先等待当前任务完成后再执行 `/self-update`。",
-                    Some(message_id),
-                )
-                .await?;
+        // Reserve the busy slot for the whole update: otherwise a message
+        // arriving during the multi-minute build would see busy=false, start a
+        // real turn, and be silently killed by the exit(0) below. Every
+        // early-return below releases the slot by dropping the guard.
+        let Some(busy) = self.try_acquire_busy() else {
+            self.reply_text(
+                openid,
+                message_id,
+                "当前有任务在运行，请先等待当前任务完成后再执行 `/self-update`。",
+            )
+            .await?;
             return Ok(());
-        }
-        let build_result = match self_update::ensure_successful_build(&self.config).await {
-            Ok(result) => result,
-            Err(err) => {
-                self.busy.store(false, Ordering::SeqCst);
-                return Err(err);
-            }
         };
+        let build_result = self_update::ensure_successful_build(&self.config).await?;
         if !build_result.success {
-            self.busy.store(false, Ordering::SeqCst);
-            self.qq_client
-                .send_text(openid, message_id, &build_result.summary, Some(message_id))
+            self.reply_text(openid, message_id, &build_result.summary)
                 .await?;
             return Ok(());
         }
@@ -1059,44 +976,34 @@ impl App {
         // so a binary that compiles but panics on startup can't brick the
         // service via an external supervisor's crash loop.
         if let Err(err) = self_update::smoke_test_binary(&build_result.binary_path).await {
-            self.busy.store(false, Ordering::SeqCst);
             warn!(error = %err, "self-update smoke test failed; aborting update");
-            self.qq_client
-                .send_text(
-                    openid,
-                    message_id,
-                    &format!("新构建的二进制启动自检失败，已放弃本次更新：{err}"),
-                    Some(message_id),
-                )
-                .await?;
+            self.reply_text(
+                openid,
+                message_id,
+                &format!("新构建的二进制启动自检失败，已放弃本次更新：{err}"),
+            )
+            .await?;
             return Ok(());
         }
-        let running_binary = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(err) => {
-                self.busy.store(false, Ordering::SeqCst);
-                return Err(anyhow::Error::new(err).context("failed to detect current executable"));
-            }
-        };
-        if let Err(err) =
-            self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary)
-                .await
-        {
-            self.busy.store(false, Ordering::SeqCst);
-            return Err(err);
-        }
-        // The binary is already replaced; the notification is best-effort so a
-        // send failure must not leave us stuck with busy=true and no exit.
+        let running_binary =
+            std::env::current_exe().context("failed to detect current executable")?;
+        self_update::replace_binary_for_restart(&build_result.binary_path, &running_binary).await?;
+        // Point of no return: the running binary is already replaced, so the
+        // busy slot must stay held until the process exits — a message arriving
+        // now must not start a turn that exit(0) would kill mid-flight.
+        // `process::exit` would skip the guard's Drop anyway, but leak it
+        // explicitly so the intent doesn't hinge on that coincidence.
+        std::mem::forget(busy);
+        // The notification is best-effort: a send failure must not leave us
+        // stuck with busy=true and no exit.
         if let Err(err) = self
-            .qq_client
-            .send_text(
+            .reply_text(
                 openid,
                 message_id,
                 &format!(
                     "已覆盖运行中的二进制：`{}`\n即将退出当前进程（已通知 codex app-server 关闭）。若已配置外部守护服务，将自动重启；否则请手动重新启动。",
                     running_binary.display()
                 ),
-                Some(message_id),
             )
             .await
         {
@@ -1121,24 +1028,20 @@ impl App {
         message_id: &str,
         runtime_profile: &CodexRuntimeProfile,
     ) -> Result<()> {
-        if self.busy.swap(true, Ordering::SeqCst) {
+        let Some(_busy) = self.try_acquire_busy() else {
             let lang = self.command_locale(openid).await;
-            self.qq_client
-                .send_text(
-                    openid,
-                    message_id,
-                    &t!("commands.compact.busy", locale = lang.as_str()),
-                    Some(message_id),
-                )
-                .await?;
+            self.reply_text(
+                openid,
+                message_id,
+                &t!("commands.compact.busy", locale = lang.as_str()),
+            )
+            .await?;
             return Ok(());
-        }
+        };
 
-        let result = self
-            .handle_compact_command_inner(openid, message_id, runtime_profile)
-            .await;
-        self.busy.store(false, Ordering::SeqCst);
-        result
+        self.handle_compact_command_inner(openid, message_id, runtime_profile)
+            .await
+        // `_busy` drops here, releasing the busy slot.
     }
 
     async fn handle_compact_command_inner(
@@ -1148,41 +1051,27 @@ impl App {
         runtime_profile: &CodexRuntimeProfile,
     ) -> Result<()> {
         let user_snapshot = self.session.snapshot_for_user(openid).await?;
-        let lang = user_snapshot.settings.language.clone();
+        let lang = self.command_locale(openid).await;
         let locale = lang.as_str();
         let Some(session_id) = user_snapshot.foreground.session_id.clone() else {
-            self.qq_client
-                .send_text(
-                    openid,
-                    message_id,
-                    &t!("commands.compact.missing_session", locale = locale),
-                    Some(message_id),
-                )
-                .await?;
-            return Ok(());
-        };
-        self.qq_client
-            .send_text(
+            self.reply_text(
                 openid,
                 message_id,
-                &t!("commands.compact.start", locale = locale),
-                Some(message_id),
+                &t!("commands.compact.missing_session", locale = locale),
             )
             .await?;
+            return Ok(());
+        };
+        self.reply_text(
+            openid,
+            message_id,
+            &t!("commands.compact.start", locale = locale),
+        )
+        .await?;
 
-        let effective_settings = effective_session_settings(&user_snapshot);
-        let effective_model = effective_settings
-            .model_override
-            .clone()
-            .or_else(|| runtime_profile.configured_model.clone())
-            .unwrap_or_else(|| self.config.general.default_model.clone());
-        let reasoning = effective_settings
-            .reasoning_effort
-            .or(runtime_profile.reasoning_effort)
-            .unwrap_or(self.config.general.default_reasoning_effort);
-        let context_mode = effective_settings
-            .context_mode
-            .or(runtime_profile.context_mode);
+        let effective_settings = user_snapshot.effective_settings();
+        let (effective_model, reasoning, context_mode) =
+            self.effective_runtime_triple(&effective_settings, runtime_profile);
         let request = CompactRequest {
             session_id: session_id.clone(),
             workspace_dir: user_snapshot.foreground.workspace_dir.clone(),
@@ -1201,40 +1090,56 @@ impl App {
                     t!("commands.compact.success", locale = locale),
                     t!("commands.compact.warning", locale = locale),
                 );
-                self.qq_client
-                    .send_text(openid, message_id, &text, Some(message_id))
-                    .await?;
+                self.reply_text(openid, message_id, &text).await?;
             }
             Err(err) => {
                 if err.to_string().contains("aborted by user") {
                     return Ok(());
                 }
-                self.qq_client
-                    .send_text(
-                        openid,
-                        message_id,
-                        &format!(
-                            "{}: {err:#}",
-                            t!("commands.compact.failed", locale = locale)
-                        ),
-                        Some(message_id),
-                    )
-                    .await?;
+                self.reply_text(
+                    openid,
+                    message_id,
+                    &format!(
+                        "{}: {err:#}",
+                        t!("commands.compact.failed", locale = locale)
+                    ),
+                )
+                .await?;
             }
         }
 
         Ok(())
     }
 
-    async fn send_command_reply(
-        &self,
-        openid: &str,
-        message_id: &str,
-        reply: &CommandReply,
-    ) -> Result<()> {
+    /// Reply to `message_id` from `openid` with `text`, quoting the original
+    /// message — the reply shape every user-facing message in this file uses.
+    async fn reply_text(&self, openid: &str, message_id: &str, text: &str) -> Result<()> {
         self.qq_client
-            .send_text(openid, message_id, &reply.text, Some(message_id))
+            .send_text(openid, message_id, text, Some(message_id))
             .await
+    }
+
+    /// Resolve the (model, reasoning effort, context mode) triple a codex call
+    /// runs with: per-dialog effective settings first, then the global runtime
+    /// profile, then the config defaults. Shared by `run_turn` and `/compact`.
+    fn effective_runtime_triple(
+        &self,
+        effective_settings: &SessionSettings,
+        runtime_profile: &CodexRuntimeProfile,
+    ) -> (String, ReasoningEffort, Option<ContextMode>) {
+        let effective_model = effective_settings
+            .model_override
+            .clone()
+            .or_else(|| runtime_profile.configured_model.clone())
+            .unwrap_or_else(|| self.config.general.default_model.clone());
+        let reasoning = effective_settings
+            .reasoning_effort
+            .or(runtime_profile.reasoning_effort)
+            .unwrap_or(self.config.general.default_reasoning_effort);
+        let context_mode = effective_settings
+            .context_mode
+            .or(runtime_profile.context_mode);
+        (effective_model, reasoning, context_mode)
     }
 
     async fn install_active_turn(&self) -> oneshot::Receiver<()> {
@@ -1357,40 +1262,6 @@ impl App {
             .download_attachment(&attachment.url, &destination)
             .await?;
         Ok(destination)
-    }
-}
-
-fn format_tokens_compact(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{}K", (value + 500) / 1_000)
-    } else {
-        value.to_string()
-    }
-}
-
-fn effective_session_settings(
-    snapshot: &UserSessionState,
-) -> crate::session::state::SessionSettings {
-    let mut base = snapshot.settings.clone();
-    base.model_override = None;
-    base.reasoning_effort = None;
-    base.service_tier = None;
-    base.context_mode = None;
-    let profile = if snapshot.foreground.saved {
-        snapshot.foreground.profile.as_ref()
-    } else {
-        None
-    };
-    base.merged_with_profile(profile)
-}
-
-fn global_fast_label(service_tier: Option<ServiceTier>) -> &'static str {
-    match service_tier {
-        Some(ServiceTier::Fast) => "on",
-        Some(ServiceTier::Flex) => "off",
-        None => "inherit",
     }
 }
 
