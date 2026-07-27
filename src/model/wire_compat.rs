@@ -231,6 +231,7 @@ fn persisted() -> PersistedSessionState {
             page: 2,
             alias: Some("al".to_string()),
         }),
+        pending_park_alias: Some("held".to_string()),
     };
 
     PersistedSessionState {
@@ -333,7 +334,8 @@ const PERSISTED_STATE_JSON: &str = r#"{
         "project_key": "pk",
         "page": 2,
         "alias": "al"
-      }
+      },
+      "pending_park_alias": "held"
     }
   },
   "imported_profiles": {

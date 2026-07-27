@@ -48,6 +48,10 @@ pub(crate) struct DiskSessionMeta {
 #[derive(Debug, Clone)]
 pub(crate) struct SwitchResult {
     pub(crate) parked_alias: Option<String>,
+    /// Set when the foreground was a blank temporary and therefore discarded
+    /// rather than parked: the alias the user asked for, validated and still
+    /// free. See `SessionStore::set_pending_park_alias`.
+    pub(crate) reserved_alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +350,12 @@ impl SessionStore {
         self.mutate_state(|state| {
             let (parked_alias, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                // The reservation belongs to *this* turn either way: consume it
+                // up front so it can never leak into a later park.
+                let reserved = user
+                    .pending_park_alias
+                    .take()
+                    .filter(|alias| !user.background.contains_key(alias));
                 let Some(session_id) = session_id else {
                     // No thread came out of the turn: clear the stale binding,
                     // but only if the foreground is still the turn's dialog.
@@ -374,8 +384,10 @@ impl SessionStore {
                         generation: 0,
                     };
                     let cached = cached_profile_from_dialog(&parked);
+                    // Honor an alias reserved by `/bg <alias>` mid-turn; fall
+                    // back to a generated one if it got taken meanwhile.
                     let mut dialogs = Dialogs::of(user);
-                    let alias = dialogs.add_background(None, parked)?;
+                    let alias = dialogs.add_background(reserved.as_deref(), parked)?;
                     dialogs.register_saved_session(&session_id);
                     (Some(alias), cached)
                 }
@@ -532,6 +544,7 @@ impl SessionStore {
         }
         Ok(SwitchResult {
             parked_alias: outcome.parked_alias,
+            reserved_alias: outcome.reserved_alias,
         })
     }
 
@@ -806,6 +819,20 @@ impl SessionStore {
 
     pub(crate) async fn last_sessions_view(&self, openid: &str) -> Result<Vec<String>> {
         self.view(openid, |user| user.last_sessions_view).await
+    }
+
+    /// Reserve the alias the turn-end park should use (see
+    /// `pending_park_alias`); the alias is already normalized by the caller.
+    pub(crate) async fn set_pending_park_alias(
+        &self,
+        openid: &str,
+        alias: Option<String>,
+    ) -> Result<()> {
+        self.mutate_user(openid, |user| {
+            user.pending_park_alias = alias;
+            Ok(())
+        })
+        .await
     }
 
     pub(crate) async fn set_last_cron_view(&self, openid: &str, ids: Vec<String>) -> Result<()> {
@@ -1614,6 +1641,78 @@ mod tests {
                 .iter()
                 .any(|id| id == "finished-thread"),
             "rollout must survive pruning"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_turn_result_honors_the_alias_reserved_by_bg() {
+        let env = TestEnv::new().await;
+
+        // `/bg main` during the very first turn: nothing to park yet, so the
+        // alias is only reserved.
+        let turn_start = env.snapshot("u1").await;
+        let moved = env
+            .store
+            .move_foreground_to_background("u1", Some("main"))
+            .await
+            .unwrap();
+        assert!(moved.parked_alias.is_none());
+        assert_eq!(moved.reserved_alias.as_deref(), Some("main"));
+        env.store
+            .set_pending_park_alias("u1", moved.reserved_alias)
+            .await
+            .unwrap();
+
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("finished-thread".into()),
+                DialogProfile::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(parked.as_deref(), Some("main"));
+        let snapshot = env.snapshot("u1").await;
+        assert_eq!(
+            snapshot
+                .background
+                .get("main")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("finished-thread")
+        );
+        assert!(
+            snapshot.pending_park_alias.is_none(),
+            "the reservation is consumed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_turn_result_clears_a_reservation_it_did_not_use() {
+        let env = TestEnv::new().await;
+        env.store
+            .set_pending_park_alias("u1", Some("main".into()))
+            .await
+            .unwrap();
+        let turn_start = env.snapshot("u1").await;
+        env.store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("live-thread".into()),
+                DialogProfile::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let snapshot = env.snapshot("u1").await;
+        assert!(
+            snapshot.pending_park_alias.is_none(),
+            "a reservation must never leak into a later park"
         );
     }
 

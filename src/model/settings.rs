@@ -534,6 +534,11 @@ pub(crate) struct UserSessionState {
     pub(crate) command_aliases: BTreeMap<String, CommandAlias>,
     #[serde(default)]
     pub(crate) pending_setting: Option<PendingSetting>,
+    /// Alias reserved by `/bg <alias>` while the foreground's first turn was
+    /// still running (nothing to park yet); consumed by the turn-end park so
+    /// the finished conversation lands under the name the user asked for.
+    #[serde(default)]
+    pub(crate) pending_park_alias: Option<String>,
 }
 
 impl UserSessionState {
@@ -556,6 +561,7 @@ impl UserSessionState {
             saved_local_session_ids: Vec::new(),
             command_aliases: BTreeMap::new(),
             pending_setting: None,
+            pending_park_alias: None,
         }
     }
 

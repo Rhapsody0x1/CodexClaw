@@ -56,7 +56,10 @@ pub(super) async fn handle_new(raw_args: &str, ctx: CmdCtx<'_>) -> Result<Comman
 
 pub(super) async fn handle_bg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandOutcome> {
     let CmdCtx {
-        openid, session, ..
+        openid,
+        session,
+        is_busy,
+        ..
     } = ctx;
     let lang = user_locale(session, openid).await;
     let moved = session
@@ -67,6 +70,22 @@ pub(super) async fn handle_bg(args: &[&str], ctx: CmdCtx<'_>) -> Result<CommandO
             "{}\n{}",
             t!(
                 "commands.bg.moved",
+                alias = alias.as_str(),
+                locale = lang.as_str()
+            ),
+            t!("commands.bg.nav_hint", locale = lang.as_str())
+        )
+    } else if let Some(alias) = moved.reserved_alias.filter(|_| is_busy) {
+        // The foreground was blank because its very first turn is still
+        // running, so there is nothing to park *yet*. Hold the requested name
+        // for the turn-end park instead of dropping it on the floor.
+        session
+            .set_pending_park_alias(openid, Some(alias.clone()))
+            .await?;
+        format!(
+            "{}\n{}",
+            t!(
+                "commands.bg.reserved",
                 alias = alias.as_str(),
                 locale = lang.as_str()
             ),

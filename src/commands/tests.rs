@@ -6,7 +6,7 @@ use tokio::fs;
 use crate::{
     codex::CodexRuntimeProfile,
     session::{
-        SessionStore,
+        DialogError, SessionStore,
         state::{
             ContextMode, DialogProfile, PendingSetting, ReasoningEffort, ServiceTier,
             UserSessionState, fixtures::usage,
@@ -90,6 +90,21 @@ impl TestEnv {
         )
         .await
         .unwrap()
+    }
+
+    /// Busy dispatch that keeps the `Result`, for the paths whose failure the
+    /// shell (not the command layer) is responsible for rendering.
+    async fn try_dispatch_busy(&self, text: &str) -> anyhow::Result<CommandOutcome> {
+        maybe_handle_command(
+            text,
+            USER,
+            &self.session,
+            self.default_model,
+            &CodexRuntimeProfile::default(),
+            true,
+            chrono_tz::Asia::Shanghai,
+        )
+        .await
     }
 
     async fn reply(&self, text: &str) -> CommandReply {
@@ -529,6 +544,60 @@ async fn alias_names_are_normalized_to_lowercase() {
     let invoke = env.run("/EXPERT").await;
     assert!(matches!(invoke, CommandOutcome::Reply(_)));
     assert!(env.snapshot().await.settings.verbose);
+}
+
+#[tokio::test]
+async fn bg_with_alias_during_the_first_turn_reserves_that_alias() {
+    let env = TestEnv::new().await;
+
+    // The foreground is a blank temporary because its first turn is still
+    // running, so there is nothing to park yet — but `main` must survive.
+    let reply = env.reply_busy("/bg main").await;
+
+    assert!(reply.text.contains("main"), "got: {}", reply.text);
+    assert_eq!(
+        env.snapshot().await.pending_park_alias.as_deref(),
+        Some("main")
+    );
+}
+
+#[tokio::test]
+async fn bg_with_alias_while_idle_reserves_nothing() {
+    let env = TestEnv::new().await;
+
+    let _ = env.reply("/bg main").await;
+
+    assert!(
+        env.snapshot().await.pending_park_alias.is_none(),
+        "no turn is running, so there is nothing to name"
+    );
+}
+
+#[tokio::test]
+async fn bg_rejects_a_taken_alias_instead_of_resetting_the_foreground() {
+    let env = TestEnv::new().await;
+    env.session
+        .set_foreground_session_id(USER, Some("thread".into()))
+        .await
+        .unwrap();
+    let _ = env.run("/bg focus").await;
+    let before = env.snapshot().await;
+
+    let Err(err) = env.try_dispatch_busy("/bg focus").await else {
+        panic!("a taken alias must be reported, not silently dropped");
+    };
+
+    assert!(matches!(
+        err.downcast_ref::<DialogError>(),
+        Some(DialogError::AliasExists { .. })
+    ));
+    let after = env.snapshot().await;
+    assert!(after.pending_park_alias.is_none());
+    assert_eq!(
+        after.foreground.generation, before.foreground.generation,
+        "the rejected command must leave the foreground alone"
+    );
+    assert_eq!(after.background.len(), 1);
 }
 
 #[tokio::test]

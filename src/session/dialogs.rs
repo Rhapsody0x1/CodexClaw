@@ -63,6 +63,10 @@ pub(super) struct ParkOutcome {
     /// The alias the old foreground was parked under, or `None` when it was
     /// an unsaved, unbound temporary and got discarded instead.
     pub(super) parked_alias: Option<String>,
+    /// On the discard path only: the requested alias, validated and free.
+    /// Nothing was parked under it — the shell decides whether to hold it for
+    /// a turn that is still in flight (see `UserSessionState::pending_park_alias`).
+    pub(super) reserved_alias: Option<String>,
     /// A workspace directory the *shell* should try to garbage-collect: set
     /// only on the discard path, and never for the shared attachment
     /// workspace or the directory the incoming dialog is about to use.
@@ -104,6 +108,12 @@ impl<'a> Dialogs<'a> {
         incoming: DialogState,
     ) -> Result<ParkOutcome> {
         if self.user.foreground.session_id.is_none() && !self.user.foreground.saved {
+            // Nothing to park. Validate the requested alias anyway — before
+            // touching any slot — so an invalid or taken name is reported
+            // instead of being swallowed along with the discarded dialog.
+            let reserved_alias = requested
+                .map(|alias| self.pick_alias(Some(alias)))
+                .transpose()?;
             let discarded_workspace = self.user.foreground.workspace_dir.clone();
             self.install(incoming);
             let cleanup_workspace = (discarded_workspace != self.user.foreground.workspace_dir
@@ -111,6 +121,7 @@ impl<'a> Dialogs<'a> {
                 .then_some(discarded_workspace);
             return Ok(ParkOutcome {
                 parked_alias: None,
+                reserved_alias,
                 cleanup_workspace,
             });
         }
@@ -127,6 +138,7 @@ impl<'a> Dialogs<'a> {
         self.install(incoming);
         Ok(ParkOutcome {
             parked_alias: Some(alias),
+            reserved_alias: None,
             cleanup_workspace: None,
         })
     }
@@ -441,6 +453,43 @@ mod tests {
             vec!["thread-1".to_string()],
             "a parked local thread enters the saved-session ledger"
         );
+    }
+
+    #[test]
+    fn park_reserves_the_requested_alias_when_there_is_nothing_to_park() {
+        let mut u = user();
+        let outcome = Dialogs::of(&mut u)
+            .park(
+                Some("Main"),
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+        assert!(outcome.parked_alias.is_none());
+        assert_eq!(outcome.reserved_alias.as_deref(), Some("main"));
+        assert!(u.background.is_empty(), "nothing was parked");
+    }
+
+    #[test]
+    fn park_rejects_a_bad_alias_before_discarding_the_foreground() {
+        let mut u = user();
+        u.background.insert("mint".to_string(), bound("t", "/ws"));
+        record_alias(&mut u, "mint");
+        let before = u.foreground.clone();
+        for requested in ["Mint", "not a valid alias"] {
+            let err = Dialogs::of(&mut u)
+                .park(
+                    Some(requested),
+                    Path::new("/shared"),
+                    DialogState::new_temporary(PathBuf::from("/new-ws")),
+                )
+                .unwrap_err();
+            assert!(err.downcast_ref::<DialogError>().is_some());
+            assert_eq!(
+                u.foreground, before,
+                "the foreground must survive `{requested}`"
+            );
+        }
     }
 
     #[test]

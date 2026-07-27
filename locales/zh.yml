@@ -221,6 +221,7 @@ commands:
     auto_parked: "刚完成的那轮对话已存入后台：`%{alias}`。"
     moved: "前台会话已转为后台：`%{alias}`。"
     reset_empty: "当前前台是空白临时会话，已重置为新的临时会话。"
+    reserved: "前台正在进行首轮对话，将在本轮结束后存入后台：`%{alias}`。"
     usage: "用法：`/后台 <别名>`"
 
   fg:

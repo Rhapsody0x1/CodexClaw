@@ -221,6 +221,7 @@ commands:
     auto_parked: "The turn that just finished was parked in the background as `%{alias}`."
     moved: "Foreground moved to background: `%{alias}`."
     reset_empty: "The foreground was an empty temporary session, so it was reset to a new temporary session."
+    reserved: "The foreground's first turn is still running; it will be parked as `%{alias}` once it finishes."
     usage: "usage: `/bg <alias>`"
 
   fg:
