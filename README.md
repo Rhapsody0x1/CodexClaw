@@ -112,7 +112,7 @@ CodexClaw 是一个构建于 Codex App Server 上、接入 QQ 官方机器人平
 - `/verbose [on\|off]` / `/详细`：切换详细输出
 - `/save` / `/保存`：显式保存当前前台会话
 - `/bg [alias]` / `/后台`：将当前会话转入后台
-- `/fg <alias>` / `/前台`：切回后台会话
+- `/fg [alias]` / `/前台`：切回指定或最近的后台会话
 - `/resume <id>` / `/恢复`：恢复磁盘会话
 - `/import` / `/导入`：导入系统 Codex 会话
 - `/loadbg <id> [alias]` / `/载入后台`：加载会话到后台

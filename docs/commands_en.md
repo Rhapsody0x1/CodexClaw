@@ -508,20 +508,20 @@ Load a disk session into the background.
 Move the current foreground session to the background.
 
 ```
-/bg <alias>
-/后台 <alias>
+/bg [alias]
+/后台 [alias]
 ```
 
 **Chinese alias:** `/后台`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `alias` | string | Yes | Alias label for the background session |
+| `alias` | string | No | Alias label for the background session; generated when omitted |
 
 **Behavior:**
-- Move the current foreground session to the background with the specified alias.
-- If the foreground is a blank temporary session (no session_id, not saved), it will not be moved to the background; it will simply be reset to a new temporary session.
-- When invoked without arguments, displays usage instructions.
+- Move the foreground session to the background with an optional alias; an omitted alias is generated and remains sticky across later `/fg` ↔ `/bg` switches.
+- If the first turn of a blank temporary foreground is still running, reserve the requested or generated alias and park the dialog once the turn establishes a thread.
+- If the foreground is blank and no turn is running, reset it without creating a background entry.
 
 **Example:**
 ```
@@ -529,7 +529,7 @@ Move the current foreground session to the background.
 → Foreground session moved to background: `work`.
 
 /bg temp
-→ Current foreground is a blank temporary session; it has been reset to a new temporary session.
+→ The foreground's first turn is still running; it will be parked as `temp` once it finishes.
 ```
 
 ---
@@ -539,8 +539,8 @@ Move the current foreground session to the background.
 Switch a background session to the foreground.
 
 ```
-/fg <alias>
-/前台 <alias>
+/fg [alias]
+/前台 [alias]
 ```
 
 **Chinese alias:** `/前台`
@@ -551,7 +551,7 @@ Switch a background session to the foreground.
 
 **Behavior:**
 - With alias specified: Switch the corresponding background session to the foreground; the previous foreground is moved to the background.
-- No argument: Enter interactive background session selector listing all background sessions for selection. If there are no background sessions, displays "No background sessions available."
+- No argument: Switch directly to the most recently parked background session. If none exists, report that the background is empty.
 
 **Example:**
 ```
@@ -560,9 +560,8 @@ Switch a background session to the foreground.
   Switched to background session `work`.
 
 /fg
-→ Background sessions:
-    • `work`
-    • `debug`
+→ Previous foreground moved to background: `bg-2`.
+  Switched to background session `debug`.
 ```
 
 ---
@@ -1372,7 +1371,7 @@ Retry restoration in the resume-failure interactive mode.
 
 ## Interactive Mode Rules
 
-The following commands enter an interactive setting mode when invoked without arguments: `/model`, `/fast`, `/context`, `/reasoning`, `/verbose`, `/lang`, `/approvals`, `/plan`, `/sessions`, `/import`, `/fg`, `/resume`, `/loadbg`.
+The following commands enter an interactive setting mode when invoked without arguments: `/model`, `/fast`, `/context`, `/reasoning`, `/verbose`, `/lang`, `/approvals`, `/plan`, `/sessions`, `/import`, `/resume`, `/loadbg`.
 
 Behavior rules in interactive mode:
 

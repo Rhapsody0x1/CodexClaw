@@ -159,11 +159,8 @@ fn truncate(input: &str, max_chars: usize) -> String {
     truncate_with_marker(input, max_chars, " ...")
 }
 
-/// Run a freshly built binary with `--smoke-test` and require a clean, timely
-/// exit, so a binary that compiles but panics on startup (bad config parse,
-/// arg handling, env drift) is caught BEFORE it overwrites the running binary.
-/// `--smoke-test` loads and normalizes config, unlike `--help` which returns
-/// before any startup work.
+/// Stage a freshly built binary next to the target, preserve executable
+/// permissions, back up the current target, then replace it atomically.
 pub(crate) async fn replace_binary_for_restart(
     source_binary: &Path,
     target_binary: &Path,

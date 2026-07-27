@@ -112,7 +112,7 @@ If you want to take advantage of the quick commands provided by the QQ official 
 - `/verbose [on|off]`: Toggle verbose output
 - `/save`: Explicitly save the current foreground session
 - `/bg [alias]`: Move the current session to the background
-- `/fg <alias>`: Switch back to a background session
+- `/fg [alias]`: Switch to a named or the most recent background session
 - `/resume <id>`: Resume a disk session
 - `/import`: Import system Codex sessions
 - `/loadbg <id> [alias]`: Load a session to the background

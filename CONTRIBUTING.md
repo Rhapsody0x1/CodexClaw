@@ -81,7 +81,7 @@ CodexClaw 是一个使用 Rust 编写、通过 QQ 平台提供 Codex 能力的�
 
 - 异步测试使用 `#[tokio::test]` 宏。
 - 单元测试应放在对应模块旁边（同文件或同目录的 `tests` 子模块）。
-- 跨模块或 HTTP 流程的集成测试放在 `tests/app_server_smoke.rs`。
+- 需要真实 Codex app-server 进程的跨模块集成测试放在 `tests/app_server_smoke.rs`。
 - 使用 `wiremock` 模拟网络调用，使用 `tempfile` 管理临时文件系统状态。
 
 示例：
@@ -158,4 +158,3 @@ let msg = t!("commands.help.description");
 ## 10. 许可证
 
 本项目基于 [MIT License](LICENSE) 发布。提交代码即表示你同意以相同许可证授权你的贡献。
-

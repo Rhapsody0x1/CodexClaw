@@ -65,27 +65,29 @@ CodexClaw 是一个 Rust 异步应用，通过长驻的 app-server 子进程将 
 - QQ Gateway 通过 WebSocket 将消息事件推送到 `qq/gateway.rs`。
 - `App`（`app/mod.rs`）作为中央调度器，协调命令解析、Codex 执行、审批流程和消息发送。
 - `CodexExecutor`（`codex/executor.rs`）通过 JSON-RPC（stdio 管道）与长驻的 codex app-server 子进程通信。
-- `Scheduler` 独立运行定时任务，通过 `ProactiveNotifier` trait 发送合成消息。
+- `Scheduler` 独立运行定时任务，通过 `ProactiveNotifier` trait 发送主动通知。
 - `ShadowWorker`（`shadow/mod.rs`）在后台异步提取记忆。
 
 ---
 
 ## 模块职责
 
-模块按依赖关系从底层到上层组织。L0 为叶子模块（无内部依赖），L4 为组合中枢（依赖所有其他模块）。
+模块按依赖关系从底层到上层组织。L0 为叶子模块（无运行时内部依赖），L5 为组合中枢。
 
 ### 依赖 DAG
 
 ```
 util, model  (L0 叶子)
     ↓
-config, memory  (L2)
+config, memory  (L1)
     ↓
-codex, qq, session, self_update  (L2)
+codex, session, self_update  (L2)
     ↓
-commands, shadow, scheduler  (L3)
+qq, scheduler, shadow  (L3)
     ↓
-app  (L4 中枢)
+commands  (L4)
+    ↓
+app  (L5 中枢)
     ↓
 main.rs  (入口)
 ```
@@ -114,11 +116,11 @@ main.rs  (入口)
 | cron.rs       | `CronJob`、`CronKind`、`JobAction`、`DeliverPolicy`、`RunStatus`、`SessionStrategy`、`InteractiveSpec` |
 | wire_compat.rs| Golden serde 快照测试，保护 `state.json`/`jobs.json` 格式兼容性     |
 
-### L2: src/config.rs -- 配置
+### L1: src/config.rs -- 配置
 
 TOML 配置文件（`AppConfig`）加载、路径规范化和校验。
 
-### L2: src/memory/ -- 用户记忆
+### L1: src/memory/ -- 用户记忆
 
 持久化按用户记忆文件的管理。
 
@@ -158,7 +160,7 @@ Codex 集成子系统。
 | prompt.rs           | 组装完整轮次 prompt（系统 prompt + 记忆注入 + qqbot 指令）  |
 | config_snapshot.rs  | 从系统 `~/.codex` 引导初始化 `~/.codex-claw/.codex`        |
 
-### L2: src/qq/ -- QQ 平台集成
+### L3: src/qq/ -- QQ 平台集成
 
 QQ Bot 平台集成模块。
 
@@ -182,9 +184,9 @@ QQ Bot 平台集成模块。
 | jobs_file.rs| 调度器 `jobs.json` 的建议锁持久化                                                    |
 | state.rs    | 对 `model::settings` 类型的重导出 shim                                               |
 
-### L3: src/commands/ -- 斜杠命令分发
+### L4: src/commands/ -- 斜杠命令分发
 
-命令解析与分发模块（纯决策层）。
+命令解析与编排模块。处理函数返回 `CommandOutcome`，并可通过 `SessionStore` 持久化状态或调用 scheduler/文件系统辅助函数；外层 QQ 与全局配置副作用由 `app/` 执行。
 
 | 文件            | 职责                                                       |
 | --------------- | ---------------------------------------------------------- |
@@ -222,19 +224,19 @@ QQ Bot 平台集成模块。
 | prompt.rs | 蒸馏 prompt 模板                                       |
 | runner.rs | 运行一次性 codex exec，严格 success-only 契约          |
 
-### L3: src/self_update.rs -- 自我更新
+### L2: src/self_update.rs -- 自我更新
 
-二进制自更新：构建、冒烟测试、原子替换。
+二进制自更新：构建、暂存、备份与原子替换。
 
-### L4: src/app/ -- 组合中枢
+### L5: src/app/ -- 组合中枢
 
 依赖所有模块的组合层。
 
 | 文件        | 职责                                                                 |
 | ----------- | -------------------------------------------------------------------- |
 | mod.rs      | `App` struct、`BusyGuard` RAII、`ProactiveNotifier` impl              |
-| turn.rs     | 完整轮次生命周期：获取 busy → 注入记忆 → 构建 prompt → 执行 → 渲染被动回复 → shadow 蒸馏 → 中断/取消 |
-| inbound.rs  | 规范化入站 QQ 事件，下载附件，提取引用，分发命令结果，渲染 `DialogError` |
+| turn.rs     | 轮次执行与收尾：注入记忆 → 构建 prompt → 执行并流式渲染 → 绑定结果 → 补发剩余回复/指令 → shadow 蒸馏，并处理成功、失败和中断结果 |
+| inbound.rs  | 规范化入站 QQ 事件，获取 busy guard，下载附件，提取引用，分发命令结果，渲染 `DialogError` |
 | approvals.rs| 将服务端发起的审批请求路由到 QQ 用户                                 |
 | format.rs   | 纯格式化：plan 块、token 快照、上下文警告                            |
 
@@ -270,11 +272,10 @@ QQ WebSocket 事件
   → codex/prompt.rs: 构建完整轮次 prompt
   → codex/app_server/session.rs: turn/start (JSON-RPC)
   → codex/app_server/events.rs: 流式 ExecutionUpdate
-  → qq/render.rs: PassiveTurnEmitter 推送到 QQ
-  → 解析 qqbot 指令 (image/file)
-  → 通过 QQ API 发送指令附件
-  → shadow/runner.rs: 异步启动后台记忆蒸馏
+    → qq/render.rs: PassiveTurnEmitter 推送到 QQ
   → session/store.rs: bind_turn_result 到 SessionStore
+  → 补发流式阶段未发送的文本，并解析、发送 qqbot 指令 (image/file)
+  → shadow/runner.rs: 异步启动后台记忆蒸馏
   → BusyGuard 释放
 ```
 
@@ -299,9 +300,10 @@ Scheduler loop (tick_secs, 默认 30s)
   → 获取信号量许可 (max_concurrent_jobs)
   → scheduler/runner.rs: 按 JobAction 分发
     → Reminder: 通过 QQ API 发送消息
-    → CodexTurn: 通过 App 作为合成消息分发
+    → CodexTurn: 直接调用共享 CodexExecutor（app-server）
+    → CodexExec: 启动 codex exec --json 子进程
     → Shell: 启动子进程
-    → Interactive: 劫持前台会话
+    → 带 interactive 配置的 CodexTurn: 临时接管前台会话
   → 成功时: 更新 run_count、last_run_status、写入运行日志
   → 失败时: 递增 failure_streak、带退避重试
   → 达到 circuit_breaker_threshold: 自动禁用并通知任务所有者
@@ -316,7 +318,7 @@ foreground ↔ background 转换
   /fg: 从后台映射恢复对话到前台，别名随之迁移
   /new: 将当前前台归档，创建新前台对话
   /stop: 终止当前前台对话（清理工作区）
-  
+
 别名粘性：对话在 /fg 和 /bg 之间保持用户给定的别名
 CAS 绑定：代数计数器防止轮次中途的对话切换损坏错误对话
 ```
@@ -329,15 +331,15 @@ CodexClaw 基于 tokio 多线程运行时构建，使用以下异步模式：
 
 | 模式                          | 用途                                        |
 | ----------------------------- | ------------------------------------------- |
-| `Arc<App>`                    | 在 gateway 和 scheduler 任务间共享应用状态  |
+| `Arc<App>`                    | 在 gateway 分发出的 C2C 处理任务间共享应用状态 |
 | `AtomicBool`                  | 全局单轮次忙碌标志（BusyGuard RAII）        |
-| `tokio::sync::Mutex`         | pending_approvals、pending_settings、resume_messages |
-| `tokio::sync::RwLock`        | `PersistedSessionState` 会话状态            |
+| `tokio::sync::Mutex`         | active turn、active openid、pending approvals、resume messages |
+| `tokio::sync::RwLock`        | `PersistedSessionState` 会话状态（含 pending setting） |
 | `tokio::sync::Semaphore`     | 调度器任务并发控制                          |
 | `oneshot` channel             | 审批决议                                   |
 | `mpsc::unbounded_channel`    | gateway → App C2C 事件流转                  |
-| `Weak<SchedulerCtx>`          | 调度器 → App 链路，避免引用循环             |
-| `fs2` 文件锁                 | 会话状态写入的磁盘同步                      |
+| `Weak<SchedulerCtx>`          | scheduler tick loop 指向由 `App` 强持有的调度上下文 |
+| `fs2` 文件锁                 | `scheduler/jobs.json` 的跨进程读写串行化    |
 
 ---
 

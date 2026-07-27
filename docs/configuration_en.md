@@ -26,9 +26,9 @@ The following fields are required and must not be empty strings; otherwise the p
 
 ## Path Handling Notes
 
-- **Tilde Expansion**: In all fields of type `PathBuf`, a leading `~` is expanded at runtime to the actual value of `$HOME`. For example, `~/.codex-claw/data` expands to `/home/youruser/.codex-claw/data`.
-- **Canonicalization**: All paths are automatically canonicalized after loading (resolving symlinks, normalizing `..` components, etc.).
-- **Relative Paths**: If a relative path is used in the configuration (e.g. `"."`), it is resolved relative to the CodexClaw process's current working directory.
+- **Tilde Expansion**: A leading `~` is expanded for regular path fields. A relative `self_binary_path` is first joined to the normalized `self_repo_dir`, so do not use `~/...` in that field.
+- **Canonicalization**: Loading attempts to canonicalize paths. If a target does not exist yet, the absolute path is retained and may still contain `..` components.
+- **Relative Paths**: Regular relative paths use the CodexClaw process's current working directory; `self_binary_path` is relative to `self_repo_dir`.
 
 ---
 
@@ -43,7 +43,7 @@ Controls runtime directories, Codex CLI invocation method, and self-update behav
 | `system_codex_home` | PathBuf | `~/.codex` | System Codex installation directory |
 | `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | Home directory for global codex config |
 | `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | Default workspace for new temporary sessions |
-| `codex_binary` | String | `"codex"` | Name or path of the codex CLI binary. Must be on PATH |
+| `codex_binary` | String | `"codex"` | Name or path of the codex CLI binary; a bare command name must resolve through PATH |
 | `default_model` | String | `"gpt-5.4"` | Default model for new sessions |
 | `default_reasoning_effort` | ReasoningEffort | `"medium"` | Default reasoning effort; valid values: `none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
 | `self_repo_dir` | PathBuf | `"."` | CodexClaw repository root directory (used by the `/self-update` command) |

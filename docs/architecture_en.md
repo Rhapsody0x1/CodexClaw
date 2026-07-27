@@ -65,27 +65,29 @@ CodexClaw is a Rust async application that bridges QQ (China's major messaging p
 - QQ Gateway pushes message events to `qq/gateway.rs` via WebSocket.
 - `App` (`app/mod.rs`) serves as the central dispatcher, coordinating command parsing, Codex execution, approval flows, and message sending.
 - `CodexExecutor` (`codex/executor.rs`) communicates with the long-lived codex app-server child process via JSON-RPC (stdio pipes).
-- `Scheduler` runs scheduled tasks independently and sends synthetic messages through the `ProactiveNotifier` trait.
+- `Scheduler` runs scheduled tasks independently and sends proactive notifications through the `ProactiveNotifier` trait.
 - `ShadowWorker` (`shadow/mod.rs`) asynchronously extracts memories in the background.
 
 ---
 
 ## Module Responsibilities
 
-Modules are organized from bottom to top by dependency. L0 contains leaf modules with no crate-internal dependencies; L4 is the composition hub that depends on everything else.
+Modules are organized from bottom to top by dependency. L0 contains leaf modules with no runtime crate-internal dependencies; L5 is the composition hub.
 
 ### Dependency DAG
 
 ```
 util, model  (L0 leaves)
     ↓
-config, memory  (L2)
+config, memory  (L1)
     ↓
-codex, qq, session, self_update  (L2)
+codex, session, self_update  (L2)
     ↓
-commands, shadow, scheduler  (L3)
+qq, scheduler, shadow  (L3)
     ↓
-app  (L4 hub)
+commands  (L4)
+    ↓
+app  (L5 hub)
     ↓
 main.rs  (entry point)
 ```
@@ -114,11 +116,11 @@ Pure data types with no I/O and no service dependencies.
 | cron.rs       | `CronJob`, `CronKind`, `JobAction`, `DeliverPolicy`, `RunStatus`, `SessionStrategy`, `InteractiveSpec` |
 | wire_compat.rs| Golden serde snapshot tests protecting `state.json`/`jobs.json` format compatibility        |
 
-### L2: src/config.rs -- Configuration
+### L1: src/config.rs -- Configuration
 
 TOML configuration file (`AppConfig`) loading, path normalization, and validation.
 
-### L2: src/memory/ -- User Memory
+### L1: src/memory/ -- User Memory
 
 Management of persistent per-user memory files.
 
@@ -158,7 +160,7 @@ The Codex integration subsystem.
 | prompt.rs           | Assembles the full turn prompt (system prompt + memory injection + qqbot instructions) |
 | config_snapshot.rs  | Bootstraps `~/.codex-claw/.codex` from the system `~/.codex`               |
 
-### L2: src/qq/ -- QQ Platform Integration
+### L3: src/qq/ -- QQ Platform Integration
 
 QQ Bot platform integration module.
 
@@ -182,9 +184,9 @@ Session state management module.
 | jobs_file.rs| Advisory-locked persistence for scheduler `jobs.json`                                                   |
 | state.rs    | Re-export shim for `model::settings` types                                                              |
 
-### L3: src/commands/ -- Slash Command Dispatch
+### L4: src/commands/ -- Slash Command Dispatch
 
-Command parsing and dispatch module (pure decision layer).
+Command parsing and orchestration module. Handlers return `CommandOutcome` and may persist through `SessionStore` or use scheduler/filesystem helpers; `app/` owns the outer QQ and global-config effects.
 
 | File            | Responsibility                                                              |
 | --------------- | --------------------------------------------------------------------------- |
@@ -222,19 +224,19 @@ Background distillation module.
 | prompt.rs | Distillation prompt template                                     |
 | runner.rs | Runs one-shot codex exec with strict success-only contract       |
 
-### L3: src/self_update.rs -- Self-Update
+### L2: src/self_update.rs -- Self-Update
 
-Binary self-update: build, smoke-test, atomic replacement.
+Binary self-update: build, stage, back up, and atomically replace.
 
-### L4: src/app/ -- Composition Hub
+### L5: src/app/ -- Composition Hub
 
 The composition layer that depends on all other modules.
 
 | File        | Responsibility                                                                              |
 | ----------- | ------------------------------------------------------------------------------------------- |
 | mod.rs      | `App` struct, `BusyGuard` RAII, `ProactiveNotifier` impl                                    |
-| turn.rs     | Full turn lifecycle: busy acquire → memory inject → prompt build → execute → render passive reply → shadow distillation → interrupt/cancel |
-| inbound.rs  | Normalizes incoming QQ events, downloads attachments, extracts quotes, dispatches command outcomes, renders `DialogError` |
+| turn.rs     | Turn execution and finalization: memory inject → prompt build → execute with streamed rendering → bind result → deliver remaining replies/directives → shadow distillation, including success, failure, and interruption outcomes |
+| inbound.rs  | Normalizes incoming QQ events, acquires the busy guard, downloads attachments, extracts quotes, dispatches command outcomes, and renders `DialogError` |
 | approvals.rs| Routes server-initiated approval requests to QQ users                                       |
 | format.rs   | Pure formatting: plan blocks, token snapshots, context warnings                             |
 
@@ -270,11 +272,10 @@ QQ WebSocket event
   → codex/prompt.rs: build full turn prompt
   → codex/app_server/session.rs: turn/start (JSON-RPC)
   → codex/app_server/events.rs: stream ExecutionUpdate
-  → qq/render.rs: PassiveTurnEmitter pushes to QQ
-  → Parse qqbot directives (image/file)
-  → Send directive attachments via QQ API
-  → shadow/runner.rs: asynchronously launch background memory distillation
+    → qq/render.rs: PassiveTurnEmitter pushes to QQ
   → session/store.rs: bind_turn_result to SessionStore
+  → Deliver text not sent during streaming, then parse and send qqbot directives (image/file)
+  → shadow/runner.rs: asynchronously launch background memory distillation
   → BusyGuard released
 ```
 
@@ -299,9 +300,10 @@ Scheduler loop (tick_secs, default 30s)
   → Acquire semaphore permit (max_concurrent_jobs)
   → scheduler/runner.rs: dispatch by JobAction
     → Reminder: Send message via QQ API
-    → CodexTurn: Dispatch as synthetic message through App
+    → CodexTurn: Call the shared CodexExecutor (app-server) directly
+    → CodexExec: Launch a codex exec --json subprocess
     → Shell: Launch subprocess
-    → Interactive: Hijack foreground session
+    → CodexTurn with interactive config: Temporarily take over foreground session
   → On success: Update run_count, last_run_status, write run log
   → On failure: Increment failure_streak, retry with backoff
   → On reaching circuit_breaker_threshold: Auto-disable and notify job owner
@@ -329,15 +331,15 @@ CodexClaw is built on the tokio multi-threaded runtime and uses the following as
 
 | Pattern                         | Purpose                                                  |
 | ------------------------------- | -------------------------------------------------------- |
-| `Arc<App>`                      | Shared application state across gateway and scheduler tasks |
+| `Arc<App>`                      | Shared application state across C2C handler tasks spawned by the gateway |
 | `AtomicBool`                    | Global single-turn busy flag (BusyGuard RAII)            |
-| `tokio::sync::Mutex`           | pending_approvals, pending_settings, resume_messages     |
-| `tokio::sync::RwLock`          | `PersistedSessionState` session state                    |
+| `tokio::sync::Mutex`           | active turn, active openid, pending approvals, resume messages |
+| `tokio::sync::RwLock`          | `PersistedSessionState` session state (including pending setting) |
 | `tokio::sync::Semaphore`       | Scheduler job concurrency control                        |
 | `oneshot` channel               | Approval resolution                                      |
 | `mpsc::unbounded_channel`      | gateway → App C2C event flow                             |
-| `Weak<SchedulerCtx>`            | Scheduler → App linkage, avoids reference cycles         |
-| `fs2` file locking              | Disk synchronization for concurrent session state writes |
+| `Weak<SchedulerCtx>`            | Scheduler tick loop points to the context strongly owned by `App` |
+| `fs2` file locking              | Cross-process serialization for `scheduler/jobs.json` reads and writes |
 
 ---
 

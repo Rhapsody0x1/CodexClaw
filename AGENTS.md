@@ -5,7 +5,7 @@
 
 - **`app/`** -- hub that depends on everything else: `App` struct with `BusyGuard` RAII, message/turn flows (`inbound.rs`, `turn.rs`), approval routing (`approvals.rs`), and pure formatting helpers (`format.rs`).
 - **`codex/`** -- Codex execution: three backends (see below), app-server JSON-RPC client (`app_server/`), config snapshot bootstrap, display helpers, event parsing, CLI subprocess execution, prompt building, runtime profile/model reading, and shared types.
-- **`commands/`** -- pure decision layer that returns `CommandOutcome`, never touches I/O directly: alias management, cron commands, interactive session helpers, listing, session commands, and settings commands.
+- **`commands/`** -- command orchestration that returns `CommandOutcome`: alias management, cron commands, interactive session helpers, listing, session commands, and settings commands. Handlers may persist through `SessionStore` or use scheduler/filesystem helpers; `app/` owns the outer QQ/config effects.
 - **`config`** -- application configuration loading (`src/config.rs`).
 - **`memory/`** -- memory store, injection, and scan helpers.
 - **`model/`** -- pure value types (no I/O, no services): message types, session settings, cron job definitions, and golden wire-format compatibility tests (`wire_compat.rs`). Breaks what would otherwise be dependency cycles between `session` <-> `scheduler` and `config` -> `session`.
@@ -16,9 +16,9 @@
 - **`shadow/`** -- memory distillation worker, prompt rendering, and runner.
 - **`util/`** -- leaf helpers with no dependency on any other crate module: filesystem, layout, path, language, text, and time utilities.
 
-Dependency DAG (bottom-up): `util` / `model` -> `config` / `memory` -> `codex` / `qq` / `session` -> `commands` / `shadow` / `scheduler` -> `app` -> `main`
+Dependency layering (bottom-up): `util` / `model` -> `config` / `memory` -> `codex` / `session` / `self_update` -> `qq` / `scheduler` / `shadow` -> `commands` -> `app` -> `main`
 
-Three Codex backends: (1) a long-lived `codex app-server` JSON-RPC child process for foreground turns, (2) `codex exec --json` subprocess for cron `CodexTurn`, and (3) `codex exec --ephemeral --sandbox read-only` for shadow memory distillation. The `codex/app_server/` module is a self-contained HTTP/JSON-RPC client over stdin/stdout to the child process.
+Codex execution has three paths: (1) a long-lived `codex app-server` JSON-RPC child process for foreground turns and scheduler `CodexTurn` jobs, (2) `codex exec --json` subprocesses for scheduler `CodexExec` jobs, and (3) `codex exec --ephemeral --sandbox read-only` for shadow memory distillation. The `codex/app_server/` module is a self-contained JSON-RPC client over stdin/stdout to the child process.
 
 User and operator docs live in `docs/`, especially [`docs/scheduler.md`](docs/scheduler.md), [`docs/configuration.md`](docs/configuration.md), and [`docs/commands.md`](docs/commands.md). Example configuration is in [`config/codexclaw.example.toml`](config/codexclaw.example.toml), with model presets in [`config/codex_models.toml`](config/codex_models.toml). `assets/` holds README images, not runtime code.
 

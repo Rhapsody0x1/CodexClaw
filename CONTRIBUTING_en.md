@@ -81,7 +81,7 @@ Before submitting, make sure `cargo fmt`, `cargo clippy`, and `cargo test` all p
 
 - Async tests use the `#[tokio::test]` macro.
 - Unit tests should be placed alongside the corresponding module (in the same file or in a `tests` submodule in the same directory).
-- Integration tests for cross-module or HTTP flows go in `tests/app_server_smoke.rs`.
+- Cross-module integration tests that require a real Codex app-server process go in `tests/app_server_smoke.rs`.
 - Use `wiremock` to mock network calls and `tempfile` to manage temporary filesystem state.
 
 Example:

@@ -26,9 +26,9 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ## 路径处理说明
 
-- **波浪号展开**：所有 `PathBuf` 类型的字段中，前缀 `~` 会在运行时展开为 `$HOME` 的实际值。例如 `~/.codex-claw/data` 会展开为 `/home/youruser/.codex-claw/data`。
-- **路径规范化**：所有路径在加载后会自动进行规范化处理（解析符号链接、去除 `..` 等），确保路径的规范形式。
-- **相对路径**：如果配置中使用了相对路径（如 `"."`），则相对于 CodexClaw 进程的当前工作目录解析。
+- **波浪号展开**：常规路径字段的前缀 `~` 会在运行时展开为 `$HOME`。相对的 `self_binary_path` 会先拼到已规范化的 `self_repo_dir`，因此不要在该字段中使用 `~/...`。
+- **路径规范化**：加载时会尝试 `canonicalize`；目标尚不存在时保留已转成绝对形式的路径，不保证消除其中的 `..`。
+- **相对路径**：常规相对路径以 CodexClaw 进程当前工作目录为基准；`self_binary_path` 以 `self_repo_dir` 为基准。
 
 ---
 
@@ -43,7 +43,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 | `system_codex_home` | PathBuf | `~/.codex` | 系统 Codex 安装目录 |
 | `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | 全局 Codex 配置的 Home 目录 |
 | `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | 新建临时会话的默认工作目录 |
-| `codex_binary` | String | `"codex"` | Codex CLI 可执行文件路径或命令名。必须在 PATH 中可找到 |
+| `codex_binary` | String | `"codex"` | Codex CLI 可执行文件路径或命令名；裸命令名必须能从 PATH 解析 |
 | `default_model` | String | `"gpt-5.4"` | 新建会话的默认模型 |
 | `default_reasoning_effort` | ReasoningEffort | `"medium"` | 默认推理深度，可选值：`none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
 | `self_repo_dir` | PathBuf | `"."` | CodexClaw 仓库根目录（用于 `/self-update` 命令） |
