@@ -143,13 +143,7 @@ pub(crate) async fn run(spec: ExecSpec<'_>) -> Result<ExecOutput> {
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn {}", spec.binary))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(spec.prompt.as_bytes())
-            .await
-            .with_context(|| format!("failed to write {} prompt to codex stdin", spec.label))?;
-        stdin.shutdown().await.ok();
-    }
+    let stdin = child.stdin.take();
     let stdout = child
         .stdout
         .take()
@@ -159,6 +153,18 @@ pub(crate) async fn run(spec: ExecSpec<'_>) -> Result<ExecOutput> {
     let mut stdout_lines = Vec::new();
     let mut stderr_text = String::new();
     let collect = async {
+        let write_stdin = async {
+            if let Some(mut stdin) = stdin {
+                stdin
+                    .write_all(spec.prompt.as_bytes())
+                    .await
+                    .with_context(|| {
+                        format!("failed to write {} prompt to codex stdin", spec.label)
+                    })?;
+                stdin.shutdown().await.ok();
+            }
+            Ok::<(), anyhow::Error>(())
+        };
         let read_stdout = async {
             let mut reader = BufReader::new(stdout).lines();
             while let Some(line) = reader.next_line().await? {
@@ -177,7 +183,9 @@ pub(crate) async fn run(spec: ExecSpec<'_>) -> Result<ExecOutput> {
                 }
             }
         };
-        let (stdout_result, ()) = tokio::join!(read_stdout, drain_stderr);
+        let (stdin_result, stdout_result, ()) =
+            tokio::join!(write_stdin, read_stdout, drain_stderr);
+        stdin_result?;
         stdout_result
     };
 
@@ -285,5 +293,37 @@ mod tests {
                 "model_reasoning_effort=\"low\"",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deadline_covers_a_blocked_stdin_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("ignore-stdin");
+        std::fs::write(&binary, "#!/bin/sh\nexec sleep 10\n").unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+        let prompt = "x".repeat(2 * 1024 * 1024);
+        let binary = binary.to_string_lossy().into_owned();
+        let spec = ExecSpec::new(
+            &binary,
+            dir.path(),
+            dir.path(),
+            &prompt,
+            "test exec",
+            Duration::from_millis(50),
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(1), run(spec))
+            .await
+            .expect("run must enforce its own deadline");
+        let err = match result {
+            Ok(_) => panic!("blocked stdin write unexpectedly succeeded"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("timed out"), "unexpected: {err:#}");
     }
 }
