@@ -290,6 +290,7 @@ errors:
     bg_not_found: "后台会话 `%{alias}` 不存在。现有：%{aliases}。"
     bg_not_found_empty: "后台会话 `%{alias}` 不存在，后台目前是空的。可用 `/后台` 把当前对话收进去。"
     alias_exists: "标签 `%{alias}` 已存在。"
+    alias_held_by_foreground: "标签 `%{alias}` 归当前前台会话所有，它转入后台时会用回这个名字。"
     alias_invalid: "标签仅允许 1-16 位小写英文或数字，例如 `sage`、`mint2`。"
     alias_alloc_failed: "无法分配新的会话标签，请手动指定标签。"
   busy: "当前有任务在运行，请先等待当前任务完成后再执行，或使用 /中断 中断。"

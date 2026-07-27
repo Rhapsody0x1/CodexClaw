@@ -543,6 +543,12 @@ fn render_command_error(err: &anyhow::Error, locale: &str) -> String {
             locale = locale
         )
         .into_owned(),
+        Some(DialogError::AliasHeldByForeground { alias }) => t!(
+            "errors.session.alias_held_by_foreground",
+            alias = alias,
+            locale = locale
+        )
+        .into_owned(),
         Some(DialogError::AliasInvalid) => {
             t!("errors.session.alias_invalid", locale = locale).into_owned()
         }

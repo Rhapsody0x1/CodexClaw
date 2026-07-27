@@ -334,6 +334,12 @@ pub(crate) struct DialogState {
     /// Absent in state files written before the field existed (reads as 0).
     #[serde(default)]
     pub(crate) generation: u64,
+    /// The background alias this dialog answers to. Set the first time it is
+    /// parked and carried along into the foreground, so `/fg` then `/bg` puts
+    /// it back under the name the user gave it instead of a fresh random one.
+    /// `None` for a dialog that has never been in the background.
+    #[serde(default)]
+    pub(crate) alias: Option<String>,
 }
 
 impl DialogState {
@@ -346,6 +352,7 @@ impl DialogState {
             profile: None,
             last_usage: None,
             generation: 0,
+            alias: None,
         }
     }
 

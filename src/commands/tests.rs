@@ -574,6 +574,54 @@ async fn bg_with_alias_while_idle_reserves_nothing() {
 }
 
 #[tokio::test]
+async fn fg_then_bare_bg_keeps_the_name_the_user_chose() {
+    let env = TestEnv::new().await;
+    env.session
+        .set_foreground_session_id(USER, Some("thread".into()))
+        .await
+        .unwrap();
+
+    let _ = env.reply("/bg main").await;
+    for round in 0..3 {
+        let _ = env.reply("/fg main").await;
+        let reply = env.reply("/bg").await;
+        assert!(
+            reply.text.contains("main"),
+            "round {round} renamed it: {}",
+            reply.text
+        );
+        assert_eq!(
+            env.snapshot().await.background.keys().collect::<Vec<_>>(),
+            vec!["main"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn rename_cannot_steal_the_alias_the_foreground_dialog_holds() {
+    let env = TestEnv::new().await;
+    for (thread, alias) in [("thread-1", "main"), ("thread-2", "other")] {
+        env.session
+            .set_foreground_session_id(USER, Some(thread.into()))
+            .await
+            .unwrap();
+        let _ = env.reply(&format!("/bg {alias}")).await;
+    }
+    // `main` leaves the background listing, but it is still the name that
+    // dialog answers to — so `other` must not be allowed to take it.
+    let _ = env.reply("/fg main").await;
+
+    let Err(err) = env.try_dispatch_busy("/rename other main").await else {
+        panic!("renaming onto a reserved alias must fail");
+    };
+
+    assert!(matches!(
+        err.downcast_ref::<DialogError>(),
+        Some(DialogError::AliasHeldByForeground { .. })
+    ));
+}
+
+#[tokio::test]
 async fn bg_rejects_a_taken_alias_instead_of_resetting_the_foreground() {
     let env = TestEnv::new().await;
     env.session

@@ -102,11 +102,12 @@ impl SessionStore {
         tokio::fs::create_dir_all(global_codex_home.join("sessions")).await?;
         let state_path = layout.session_state_file();
         let cron_jobs_path = layout.cron_jobs_file();
-        let state = match tokio::fs::read_to_string(&state_path).await {
+        let mut state = match tokio::fs::read_to_string(&state_path).await {
             Ok(raw) => serde_json::from_str::<PersistedSessionState>(&raw)
                 .with_context(|| format!("failed to parse {}", state_path.display()))?,
             Err(_) => load_legacy_state(data_dir, &attachment_workspace_dir)?,
         };
+        backfill_background_aliases(&mut state);
         let store = Self {
             root,
             state_path,
@@ -400,6 +401,7 @@ impl SessionStore {
                         profile: Some(profile),
                         last_usage: usage,
                         generation: 0,
+                        alias: None,
                     };
                     let cached = cached_profile_from_dialog(&parked);
                     // Honor an alias reserved by `/bg <alias>` mid-turn; fall
@@ -1091,6 +1093,22 @@ impl SessionStore {
         // parse on the next startup and wipes every user's session state.
         tokio::task::spawn_blocking(move || atomic_write(&path, &raw)).await??;
         Ok(())
+    }
+}
+
+/// Stamp every background entry with the alias it is filed under.
+///
+/// `DialogState::alias` was added after these files were first written, so
+/// state.json from an older build has it unset. The dialog invariants require
+/// the field to agree with the map key, and the sticky-alias behaviour needs it
+/// populated for dialogs parked before the upgrade, so fill it in on load.
+fn backfill_background_aliases(state: &mut PersistedSessionState) {
+    for user in state.users.values_mut() {
+        for (alias, dialog) in &mut user.background {
+            if dialog.alias.as_deref() != Some(alias.as_str()) {
+                dialog.alias = Some(alias.clone());
+            }
+        }
     }
 }
 
@@ -2079,6 +2097,7 @@ mod tests {
                         profile: None,
                         last_usage: None,
                         generation: 0,
+                        alias: Some("quill".into()),
                     },
                 );
                 Ok(())

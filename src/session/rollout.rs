@@ -441,5 +441,8 @@ pub(super) fn dialog_from_disk_session(
         // Meaningful only while installed as the foreground; the installer
         // (`install_foreground`) assigns the real value.
         generation: 0,
+        // Assigned by whichever slot takes it: `add_background` names it, the
+        // foreground leaves it unset until the dialog is first parked.
+        alias: None,
     }
 }

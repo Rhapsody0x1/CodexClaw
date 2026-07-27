@@ -40,6 +40,12 @@ pub(crate) enum DialogError {
     AliasExists {
         alias: String,
     },
+    /// Requested a name the *foreground* dialog will reclaim when it is next
+    /// parked. It is absent from the background listing, so saying it "already
+    /// exists" would only puzzle the user.
+    AliasHeldByForeground {
+        alias: String,
+    },
     AliasInvalid,
     AliasAllocFailed,
 }
@@ -51,6 +57,9 @@ impl std::fmt::Display for DialogError {
                 write!(f, "background session `{alias}` not found")
             }
             Self::AliasExists { alias } => write!(f, "alias `{alias}` already exists"),
+            Self::AliasHeldByForeground { alias } => {
+                write!(f, "alias `{alias}` belongs to the foreground dialog")
+            }
             Self::AliasInvalid => write!(f, "aliases are 1-16 lowercase letters or digits"),
             Self::AliasAllocFailed => write!(f, "could not allocate a new alias"),
         }
@@ -114,7 +123,7 @@ impl<'a> Dialogs<'a> {
             // touching any slot — so an invalid or taken name is reported
             // instead of being swallowed along with the discarded dialog.
             let reserved_alias = requested
-                .map(|alias| self.pick_alias(Some(alias)))
+                .map(|alias| self.pick_alias(Some(alias), None))
                 .transpose()?;
             let discarded_workspace = self.user.foreground.workspace_dir.clone();
             self.install(incoming);
@@ -127,9 +136,20 @@ impl<'a> Dialogs<'a> {
                 cleanup_workspace,
             });
         }
-        let alias = self.pick_alias(requested)?;
+        // With no explicit name, a dialog goes back under the alias it last
+        // answered to, so repeated /fg ↔ /bg keeps calling it the same thing.
+        // It can only have been taken by something else if the user renamed
+        // over it, in which case fall through to a generated alias.
+        let sticky = self
+            .foreground_claim()
+            .filter(|alias| requested.is_none() && !self.user.background.contains_key(alias));
+        let alias = match sticky {
+            Some(alias) => alias,
+            None => self.pick_alias(requested, None)?,
+        };
         let mut parked = self.user.foreground.clone();
         parked.saved = true;
+        parked.alias = Some(alias.clone());
         if parked.origin == DialogOrigin::Local
             && let Some(session_id) = parked.session_id.clone()
         {
@@ -164,9 +184,11 @@ impl<'a> Dialogs<'a> {
     pub(super) fn add_background(
         &mut self,
         requested: Option<&str>,
-        dialog: DialogState,
+        mut dialog: DialogState,
     ) -> Result<String> {
-        let alias = self.pick_alias(requested)?;
+        let claimed = self.foreground_claim();
+        let alias = self.pick_alias(requested, claimed.as_deref())?;
+        dialog.alias = Some(alias.clone());
         self.user.background.insert(alias.clone(), dialog);
         record_alias(self.user, &alias);
         self.assert_invariants();
@@ -176,12 +198,12 @@ impl<'a> Dialogs<'a> {
     /// Rename a background alias, keeping its position in the recency order.
     pub(super) fn rename_background(&mut self, old_alias: &str, new_alias: &str) -> Result<()> {
         let new_alias = normalize_alias(new_alias)?;
-        if self.user.background.contains_key(&new_alias) {
-            return Err(anyhow::Error::new(DialogError::AliasExists {
-                alias: new_alias,
-            }));
-        }
-        let Some(dialog) = self.user.background.remove(old_alias) else {
+        reject_taken_alias(
+            self.user,
+            new_alias.clone(),
+            self.foreground_claim().as_deref(),
+        )?;
+        let Some(mut dialog) = self.user.background.remove(old_alias) else {
             return Err(anyhow::Error::new(DialogError::BackgroundNotFound {
                 alias: old_alias.to_string(),
                 available: self.user.background_order.iter().rev().cloned().collect(),
@@ -199,6 +221,7 @@ impl<'a> Dialogs<'a> {
             }
         }
         self.user.background_order = deduped;
+        dialog.alias = Some(new_alias.clone());
         self.user.background.insert(new_alias, dialog);
         self.assert_invariants();
         Ok(())
@@ -313,14 +336,22 @@ impl<'a> Dialogs<'a> {
             .retain(|value| value != session_id);
     }
 
-    fn pick_alias(&mut self, requested: Option<&str>) -> Result<String> {
+    /// The name the foreground dialog will reclaim the next time it is
+    /// parked. Placing *another* dialog there would silently steal it, so
+    /// every alias handed out to something other than the foreground has to
+    /// route around it.
+    fn foreground_claim(&self) -> Option<String> {
+        self.user.foreground.alias.clone()
+    }
+
+    /// Resolve `requested`, or invent a free alias. `claimed` names one extra
+    /// alias to treat as taken beyond the background keys — see
+    /// [`Self::foreground_claim`]; pass `None` when the dialog being placed
+    /// *is* the foreground, which cannot collide with its own name.
+    fn pick_alias(&mut self, requested: Option<&str>, claimed: Option<&str>) -> Result<String> {
         if let Some(alias) = requested {
             let normalized = normalize_alias(alias)?;
-            if self.user.background.contains_key(&normalized) {
-                return Err(anyhow::Error::new(DialogError::AliasExists {
-                    alias: normalized,
-                }));
-            }
+            reject_taken_alias(self.user, normalized.clone(), claimed)?;
             return Ok(normalized);
         }
         let mut rng = rand::thread_rng();
@@ -328,18 +359,18 @@ impl<'a> Dialogs<'a> {
             let Some(base) = ALIAS_WORDS.choose(&mut rng).copied() else {
                 break;
             };
-            if !self.user.background.contains_key(base) {
+            if !is_taken(self.user, base, claimed) {
                 return Ok(base.to_string());
             }
             // Keep alias shape simple: `<word><digits>` and within the existing 16-char limit.
             let suffix = rng.gen_range(2..=9999);
             let candidate = format!("{base}{suffix}");
-            if candidate.len() <= 16 && !self.user.background.contains_key(&candidate) {
+            if candidate.len() <= 16 && !is_taken(self.user, &candidate, claimed) {
                 return Ok(candidate);
             }
         }
         for base in ALIAS_WORDS {
-            if !self.user.background.contains_key(*base) {
+            if !is_taken(self.user, base, claimed) {
                 return Ok((*base).to_string());
             }
         }
@@ -348,7 +379,7 @@ impl<'a> Dialogs<'a> {
             let index = (self.user.alias_seq % (ALIAS_WORDS.len() as u64)) as usize;
             let base = ALIAS_WORDS[index];
             let candidate = format!("{base}{}", self.user.alias_seq % 10_000);
-            if candidate.len() <= 16 && !self.user.background.contains_key(&candidate) {
+            if candidate.len() <= 16 && !is_taken(self.user, &candidate, claimed) {
                 return Ok(candidate);
             }
         }
@@ -356,7 +387,8 @@ impl<'a> Dialogs<'a> {
     }
 
     /// The slot invariants: `background_order` is duplicate-free and lists
-    /// exactly the keys of `background`.
+    /// exactly the keys of `background`, and every entry's own `alias` field
+    /// agrees with the key it is filed under.
     fn holds_invariants(&self) -> bool {
         let order = &self.user.background_order;
         let no_dups = order
@@ -370,7 +402,12 @@ impl<'a> Dialogs<'a> {
             .background
             .keys()
             .all(|alias| order.contains(alias));
-        no_dups && order_covers && keys_covered
+        let aliases_agree = self
+            .user
+            .background
+            .iter()
+            .all(|(alias, dialog)| dialog.alias.as_deref() == Some(alias.as_str()));
+        no_dups && order_covers && keys_covered && aliases_agree
     }
 
     #[inline]
@@ -399,6 +436,24 @@ pub(super) fn most_recent_background(user: &UserSessionState) -> Option<(String,
 fn record_alias(user: &mut UserSessionState, alias: &str) {
     user.background_order.retain(|value| value != alias);
     user.background_order.push(alias.to_string());
+}
+
+fn is_taken(user: &UserSessionState, alias: &str, claimed: Option<&str>) -> bool {
+    user.background.contains_key(alias) || claimed == Some(alias)
+}
+
+/// The error half of [`is_taken`]: which of the two ways an alias can be
+/// unavailable, so the shell can explain the right one.
+fn reject_taken_alias(user: &UserSessionState, alias: String, claimed: Option<&str>) -> Result<()> {
+    if user.background.contains_key(&alias) {
+        return Err(anyhow::Error::new(DialogError::AliasExists { alias }));
+    }
+    if claimed == Some(alias.as_str()) {
+        return Err(anyhow::Error::new(DialogError::AliasHeldByForeground {
+            alias,
+        }));
+    }
+    Ok(())
 }
 
 fn normalize_alias(input: &str) -> Result<String> {
@@ -551,6 +606,132 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn a_dialog_keeps_its_alias_across_repeated_fg_and_bg() {
+        let mut u = user();
+        u.foreground = bound("thread-1", "/ws1");
+        Dialogs::of(&mut u)
+            .park(
+                Some("main"),
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+
+        // Three round trips through the foreground must not rename it.
+        for round in 0..3 {
+            let dialog = Dialogs::of(&mut u).take_background("main").unwrap();
+            Dialogs::of(&mut u).install(dialog);
+            let outcome = Dialogs::of(&mut u)
+                .park(
+                    None,
+                    Path::new("/shared"),
+                    DialogState::new_temporary(PathBuf::from("/shared")),
+                )
+                .unwrap();
+            assert_eq!(
+                outcome.parked_alias.as_deref(),
+                Some("main"),
+                "round {round} renamed the dialog"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_alias_is_sticky_too() {
+        let mut u = user();
+        u.foreground = bound("thread-1", "/ws1");
+        let first = Dialogs::of(&mut u)
+            .park(
+                None,
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap()
+            .parked_alias
+            .unwrap();
+
+        let dialog = Dialogs::of(&mut u).take_background(&first).unwrap();
+        Dialogs::of(&mut u).install(dialog);
+        let again = Dialogs::of(&mut u)
+            .park(
+                None,
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+
+        assert_eq!(again.parked_alias.as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn the_foreground_alias_is_not_handed_out_to_another_dialog() {
+        let mut u = user();
+        u.foreground = bound("thread-1", "/ws1");
+        Dialogs::of(&mut u)
+            .park(
+                Some("main"),
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+        // `main` leaves the background listing but stays reserved for it.
+        let dialog = Dialogs::of(&mut u).take_background("main").unwrap();
+        Dialogs::of(&mut u).install(dialog);
+
+        let err = Dialogs::of(&mut u)
+            .add_background(Some("main"), bound("thread-2", "/ws2"))
+            .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<DialogError>(),
+            Some(DialogError::AliasHeldByForeground { .. })
+        ));
+
+        let other = Dialogs::of(&mut u)
+            .add_background(None, bound("thread-3", "/ws3"))
+            .unwrap();
+        assert_ne!(other, "main", "generated aliases must route around it too");
+
+        let err = Dialogs::of(&mut u)
+            .rename_background(&other, "main")
+            .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<DialogError>(),
+            Some(DialogError::AliasHeldByForeground { .. })
+        ));
+    }
+
+    #[test]
+    fn a_sticky_alias_taken_by_someone_else_falls_back_to_a_fresh_one() {
+        let mut u = user();
+        u.foreground = DialogState {
+            alias: Some("main".to_string()),
+            ..bound("thread-1", "/ws1")
+        };
+        // Something else is filed under `main` — a hand-edited state file, or
+        // an entry renamed onto it before the invariant existed.
+        u.background
+            .insert("main".to_string(), bound("thread-2", "/ws2"));
+        u.background.get_mut("main").unwrap().alias = Some("main".to_string());
+        record_alias(&mut u, "main");
+
+        let outcome = Dialogs::of(&mut u)
+            .park(
+                None,
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+
+        let alias = outcome.parked_alias.unwrap();
+        assert_ne!(alias, "main");
+        assert_eq!(
+            u.background["main"].session_id.as_deref(),
+            Some("thread-2"),
+            "the squatter must not be overwritten"
+        );
     }
 
     #[test]

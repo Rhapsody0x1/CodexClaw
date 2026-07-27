@@ -196,6 +196,7 @@ fn persisted() -> PersistedSessionState {
             profile: Some(profile()),
             last_usage: Some(usage()),
             generation: 7,
+            alias: Some("home".to_string()),
         },
         background: BTreeMap::from([(
             "bg1".to_string(),
@@ -207,6 +208,7 @@ fn persisted() -> PersistedSessionState {
                 profile: None,
                 last_usage: None,
                 generation: 0,
+                alias: Some("bg1".to_string()),
             },
         )]),
         background_order: vec!["bg1".to_string()],
@@ -274,7 +276,8 @@ const PERSISTED_STATE_JSON: &str = r#"{
           "output_tokens": 234,
           "updated_at": "2023-11-14T22:13:20Z"
         },
-        "generation": 7
+        "generation": 7,
+        "alias": "home"
       },
       "background": {
         "bg1": {
@@ -284,7 +287,8 @@ const PERSISTED_STATE_JSON: &str = r#"{
           "saved": false,
           "profile": null,
           "last_usage": null,
-          "generation": 0
+          "generation": 0,
+          "alias": "bg1"
         }
       },
       "background_order": [
