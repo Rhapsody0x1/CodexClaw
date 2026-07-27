@@ -566,7 +566,10 @@ pub(super) async fn consume_pending_input(
     if is_busy
         && matches!(
             &pending,
-            PendingSetting::Model | PendingSetting::Reasoning | PendingSetting::Context
+            PendingSetting::Model
+                | PendingSetting::Reasoning
+                | PendingSetting::Fast
+                | PendingSetting::Context
         )
     {
         let locale = user_locale(session, openid).await;

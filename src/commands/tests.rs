@@ -772,6 +772,27 @@ async fn busy_pending_profile_input_does_not_apply_or_clear_picker() {
 }
 
 #[tokio::test]
+async fn busy_fast_does_not_enter_or_apply_the_picker() {
+    let env = TestEnv::new().await;
+
+    let reply = env.reply_busy("/fast").await;
+    assert!(reply.text.to_lowercase().contains("already running"));
+    assert!(env.snapshot().await.pending_setting.is_none());
+
+    let _ = env.run("/fast").await;
+    assert!(matches!(
+        env.snapshot().await.pending_setting,
+        Some(PendingSetting::Fast)
+    ));
+    let reply = env.reply_busy("on").await;
+    assert!(reply.text.to_lowercase().contains("already running"));
+    assert!(matches!(
+        env.snapshot().await.pending_setting,
+        Some(PendingSetting::Fast)
+    ));
+}
+
+#[tokio::test]
 async fn back_when_idle_reports_no_interactive_setting() {
     let env = TestEnv::with_default_model("gpt-5.4").await;
 

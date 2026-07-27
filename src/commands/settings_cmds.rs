@@ -105,18 +105,10 @@ pub(super) async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
     } = ctx;
     let snapshot = session.snapshot_for_user(openid).await?;
     let lang = snapshot.settings.language.clone();
-    if args.is_empty() {
-        return interactive::enter_simple_prompt(
-            ctx,
-            lang.as_str(),
-            "commands.fast.prompt_current",
-            "commands.fast.prompt_header",
-            ServiceTier::fast_label(runtime_profile.service_tier),
-            PendingSetting::Fast,
-        )
-        .await;
-    }
-    if args[0].eq_ignore_ascii_case("status") {
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("status"))
+    {
         return Ok(CommandOutcome::reply(t!(
             "commands.fast.status",
             value = ServiceTier::fast_label(runtime_profile.service_tier),
@@ -127,6 +119,17 @@ pub(super) async fn handle_fast(args: &[&str], ctx: CmdCtx<'_>) -> Result<Comman
     // write-back would silently clobber a mid-turn tier change.
     if ctx.is_busy {
         return Ok(busy_reply(lang.as_str()));
+    }
+    if args.is_empty() {
+        return interactive::enter_simple_prompt(
+            ctx,
+            lang.as_str(),
+            "commands.fast.prompt_current",
+            "commands.fast.prompt_header",
+            ServiceTier::fast_label(runtime_profile.service_tier),
+            PendingSetting::Fast,
+        )
+        .await;
     }
     let value = args.join(" ");
     let next = interactive::resolve_fast_input(&value)
