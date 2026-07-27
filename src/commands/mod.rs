@@ -87,6 +87,12 @@ pub(crate) enum ApprovalIntent {
     Cancel,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CommandActivity {
+    pub(crate) is_busy: bool,
+    pub(crate) has_active_turn: bool,
+}
+
 /// Shared per-dispatch context threaded through every command handler.
 ///
 /// Bundles the values the dispatcher previously passed positionally, so all
@@ -98,6 +104,7 @@ struct CmdCtx<'a> {
     default_model: &'a str,
     runtime_profile: &'a CodexRuntimeProfile,
     is_busy: bool,
+    has_active_turn: bool,
     /// Timezone every user-facing timestamp is rendered in.
     display_tz: chrono_tz::Tz,
 }
@@ -120,7 +127,7 @@ pub(crate) async fn maybe_handle_command(
     session: &SessionStore,
     default_model: &str,
     runtime_profile: &CodexRuntimeProfile,
-    is_busy: bool,
+    activity: CommandActivity,
     display_tz: chrono_tz::Tz,
 ) -> Result<CommandOutcome> {
     let ctx = CmdCtx {
@@ -128,7 +135,8 @@ pub(crate) async fn maybe_handle_command(
         session,
         default_model,
         runtime_profile,
-        is_busy,
+        is_busy: activity.is_busy,
+        has_active_turn: activity.has_active_turn,
         display_tz,
     };
     maybe_handle_command_inner(text, ctx, 0).await

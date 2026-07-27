@@ -74,7 +74,8 @@ pub(super) struct ParkOutcome {
     /// The alias the old foreground was parked under, or `None` when it was
     /// an unsaved, unbound temporary and got discarded instead.
     pub(super) parked_alias: Option<String>,
-    /// On the discard path only: the requested alias, validated and free.
+    /// On the discard path only: an alias, requested or generated, validated
+    /// and free.
     /// Nothing was parked under it — the shell decides whether to hold it for
     /// a turn that is still in flight (see `UserSessionState::pending_park_alias`).
     pub(super) reserved_alias: Option<String>,
@@ -119,12 +120,10 @@ impl<'a> Dialogs<'a> {
         incoming: DialogState,
     ) -> Result<ParkOutcome> {
         if self.user.foreground.session_id.is_none() && !self.user.foreground.saved {
-            // Nothing to park. Validate the requested alias anyway — before
-            // touching any slot — so an invalid or taken name is reported
-            // instead of being swallowed along with the discarded dialog.
-            let reserved_alias = requested
-                .map(|alias| self.pick_alias(Some(alias), None))
-                .transpose()?;
+            // Nothing to park. Allocate the name before touching any slot so
+            // a running first turn can still claim it; the shell discards the
+            // reservation when there is no turn in flight.
+            let reserved_alias = Some(self.pick_alias(requested, None)?);
             let discarded_workspace = self.user.foreground.workspace_dir.clone();
             self.install(incoming);
             let cleanup_workspace = (discarded_workspace != self.user.foreground.workspace_dir
@@ -562,6 +561,21 @@ mod tests {
             .unwrap();
         assert!(outcome.parked_alias.is_none());
         assert_eq!(outcome.reserved_alias.as_deref(), Some("main"));
+        assert!(u.background.is_empty(), "nothing was parked");
+    }
+
+    #[test]
+    fn park_generates_a_reservation_when_there_is_nothing_to_park() {
+        let mut u = user();
+        let outcome = Dialogs::of(&mut u)
+            .park(
+                None,
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+        assert!(outcome.parked_alias.is_none());
+        assert!(outcome.reserved_alias.is_some());
         assert!(u.background.is_empty(), "nothing was parked");
     }
 

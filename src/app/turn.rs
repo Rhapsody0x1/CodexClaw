@@ -294,6 +294,7 @@ impl App {
                     context_mode,
                 },
                 usage_snapshot.clone(),
+                true,
             )
             .await?;
         let lang_for_warning = self.command_locale(&message.sender_openid).await;
@@ -418,11 +419,9 @@ impl App {
         // mid-flight. Persist that thread id (with the profile the
         // turn actually ran with) so the next message resumes the same
         // conversation instead of starting fresh and losing all prior
-        // context. Guarded: the write only lands while the foreground
-        // is still the dialog this turn started on — /stop of an
-        // interactive cron task, /new or the expiry sweeper may have
-        // swapped the foreground mid-turn, and overwriting then would
-        // orphan the conversation the user switched back to.
+        // context. Guarded: the write lands on the unchanged foreground, an
+        // already parked copy, or an alias reserved by /bg. /stop and other
+        // swaps that left no claim cannot resurrect the interrupted dialog.
         // Best-effort: a store failure only logs so the user still
         // gets the turn's error report below. Skipped for
         // resume-recovery errors: there the thread failed to load, so
@@ -433,24 +432,22 @@ impl App {
         {
             match self
                 .session
-                .bind_foreground_session_profile_if_matches(
+                .bind_turn_result(
                     &message.sender_openid,
                     &user_snapshot.foreground,
-                    session_id,
+                    Some(session_id),
                     DialogProfile {
                         model_override: Some(effective_model.clone()),
                         reasoning_effort: Some(reasoning),
                         service_tier: None,
                         context_mode,
                     },
+                    None,
+                    false,
                 )
                 .await
             {
-                Ok(true) => {}
-                Ok(false) => info!(
-                    sender_openid = %message.sender_openid,
-                    "skipped persisting interrupted turn thread: foreground changed mid-turn"
-                ),
+                Ok(_) => {}
                 Err(store_err) => warn!(
                     sender_openid = %message.sender_openid,
                     error = %store_err,

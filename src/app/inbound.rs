@@ -13,7 +13,7 @@ use crate::{
         write_context_mode_to_config_path, write_model_to_config_path,
         write_reasoning_effort_to_config_path, write_service_tier_to_config_path,
     },
-    commands::{ApprovalIntent, CommandOutcome, maybe_handle_command},
+    commands::{ApprovalIntent, CommandActivity, CommandOutcome, maybe_handle_command},
     message::{IncomingAttachment, IncomingMessage, QuotedMessage},
     qq::{C2CMessageEvent, MSG_TYPE_QUOTE, MessageAttachment, MsgElement},
     session::state::{ContextMode, ServiceTier},
@@ -77,13 +77,22 @@ impl App {
             self.cancel_active_turn().await;
         }
 
+        let has_active_turn = self
+            .active_openid
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|active| active.openid == normalized.sender_openid);
         let command_outcome = match maybe_handle_command(
             &normalized.text,
             &normalized.sender_openid,
             &self.session,
             &self.config.general.default_model,
             &runtime_profile,
-            self.busy.load(Ordering::SeqCst),
+            CommandActivity {
+                is_busy: self.busy.load(Ordering::SeqCst),
+                has_active_turn,
+            },
             self.display_tz,
         )
         .await

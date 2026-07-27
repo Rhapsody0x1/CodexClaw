@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{CommandOutcome, CommandReply, maybe_handle_command};
+use super::{CommandActivity, CommandOutcome, CommandReply, maybe_handle_command};
 
 /// Every command test drives the same single user.
 const USER: &str = "u1";
@@ -65,7 +65,12 @@ impl TestEnv {
     }
 
     async fn run_busy(&self, text: &str) -> CommandOutcome {
-        self.dispatch(text, &CodexRuntimeProfile::default(), true)
+        self.dispatch_with_activity(text, &CodexRuntimeProfile::default(), true, true)
+            .await
+    }
+
+    async fn run_busy_for_other_user(&self, text: &str) -> CommandOutcome {
+        self.dispatch_with_activity(text, &CodexRuntimeProfile::default(), true, false)
             .await
     }
 
@@ -79,13 +84,27 @@ impl TestEnv {
         runtime: &CodexRuntimeProfile,
         is_busy: bool,
     ) -> CommandOutcome {
+        self.dispatch_with_activity(text, runtime, is_busy, is_busy)
+            .await
+    }
+
+    async fn dispatch_with_activity(
+        &self,
+        text: &str,
+        runtime: &CodexRuntimeProfile,
+        is_busy: bool,
+        has_active_turn: bool,
+    ) -> CommandOutcome {
         maybe_handle_command(
             text,
             USER,
             &self.session,
             self.default_model,
             runtime,
-            is_busy,
+            CommandActivity {
+                is_busy,
+                has_active_turn,
+            },
             chrono_tz::Asia::Shanghai,
         )
         .await
@@ -101,7 +120,10 @@ impl TestEnv {
             &self.session,
             self.default_model,
             &CodexRuntimeProfile::default(),
-            true,
+            CommandActivity {
+                is_busy: true,
+                has_active_turn: true,
+            },
             chrono_tz::Asia::Shanghai,
         )
         .await
@@ -274,7 +296,7 @@ async fn stop_command_restores_most_recent_background_dialog() {
         .await
         .unwrap();
     env.session
-        .move_foreground_to_background(USER, Some("older"))
+        .move_foreground_to_background(USER, Some("older"), false)
         .await
         .unwrap();
     env.session
@@ -291,7 +313,7 @@ async fn stop_command_restores_most_recent_background_dialog() {
         .await
         .unwrap();
     env.session
-        .move_foreground_to_background(USER, Some("newer"))
+        .move_foreground_to_background(USER, Some("newer"), false)
         .await
         .unwrap();
     env.session
@@ -502,7 +524,7 @@ async fn alias_expansion_executes_each_step() {
         .await
         .unwrap();
     env.session
-        .move_foreground_to_background(USER, Some("saved"))
+        .move_foreground_to_background(USER, Some("saved"), false)
         .await
         .unwrap();
     env.session
@@ -559,6 +581,29 @@ async fn bg_with_alias_during_the_first_turn_reserves_that_alias() {
         env.snapshot().await.pending_park_alias.as_deref(),
         Some("main")
     );
+}
+
+#[tokio::test]
+async fn bare_bg_during_the_first_turn_reserves_a_generated_alias() {
+    let env = TestEnv::new().await;
+
+    let reply = env.reply_busy("/bg").await;
+    let snapshot = env.snapshot().await;
+
+    let alias = snapshot
+        .pending_park_alias
+        .expect("a running first turn needs a background destination");
+    assert!(reply.text.contains(&alias), "got: {}", reply.text);
+}
+
+#[tokio::test]
+async fn another_users_busy_turn_does_not_reserve_bg_alias() {
+    let env = TestEnv::new().await;
+
+    let outcome = env.run_busy_for_other_user("/bg main").await;
+
+    assert!(matches!(outcome, CommandOutcome::Reply(_)));
+    assert!(env.snapshot().await.pending_park_alias.is_none());
 }
 
 #[tokio::test]

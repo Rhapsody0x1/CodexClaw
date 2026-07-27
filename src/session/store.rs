@@ -49,8 +49,8 @@ pub(crate) struct DiskSessionMeta {
 pub(crate) struct SwitchResult {
     pub(crate) parked_alias: Option<String>,
     /// Set when the foreground was a blank temporary and therefore discarded
-    /// rather than parked: the alias the user asked for, validated and still
-    /// free. See `SessionStore::set_pending_park_alias`.
+    /// rather than parked: a requested or generated alias, validated and still
+    /// free.
     pub(crate) reserved_alias: Option<String>,
 }
 
@@ -308,6 +308,7 @@ impl SessionStore {
     /// every other field. Returns whether the binding was applied. The check
     /// and the write happen under one state lock, so no swap can slip in
     /// between.
+    #[cfg(test)]
     pub(crate) async fn bind_foreground_session_profile_if_matches(
         &self,
         openid: &str,
@@ -330,12 +331,11 @@ impl SessionStore {
         .await
     }
 
-    /// Persist a *successful* turn's result onto the right dialog. While the
-    /// foreground is still the dialog the turn started on (same generation),
-    /// this behaves like the plain bind: thread id + profile + usage land on
-    /// the foreground and `None` is returned. A turn that produced no thread
-    /// id only clears the foreground binding, and only while the foreground
-    /// is still its own.
+    /// Persist a turn's result onto the right dialog. While the foreground is
+    /// still the dialog the turn started on (same generation), thread id,
+    /// profile and usage land on the foreground and `None` is returned. A turn
+    /// that produced no thread id only clears the foreground binding while the
+    /// foreground is still its own.
     ///
     /// When /bg, /new, /fg or /stop swapped the foreground mid-turn, the
     /// completed thread must not clobber the dialog the user switched to. It
@@ -346,10 +346,15 @@ impl SessionStore {
     ///   name the user has seen. The result is merged into that entry and
     ///   `None` is returned: announcing it again would be noise, and creating
     ///   a second entry would leave two aliases on one thread.
-    /// * `/stop`, or a `/bg` on a still-blank foreground, left nothing
-    ///   behind. A fresh entry is created — under the alias `/bg <alias>`
-    ///   reserved, else a generated one — and returned as `Some(alias)` for
-    ///   the caller to announce.
+    /// * A `/bg` on a still-blank foreground reserves a requested or generated
+    ///   alias. A fresh entry is created under it and returned as `Some(alias)`.
+    /// * `/stop` leaves no claim behind. Successful turns still park there so
+    ///   completed work remains reachable; interrupted turns remain discarded.
+    ///
+    /// `park_unclaimed` is true for successful turns, whose completed thread
+    /// must always remain reachable. Interrupted turns pass false so `/stop`
+    /// still discards a thread that has no foreground, parked entry, or `/bg`
+    /// reservation claiming it.
     pub(crate) async fn bind_turn_result(
         &self,
         openid: &str,
@@ -357,16 +362,16 @@ impl SessionStore {
         session_id: Option<String>,
         profile: DialogProfile,
         usage: Option<TokenUsageSnapshot>,
+        park_unclaimed: bool,
     ) -> Result<Option<String>> {
         self.mutate_state(|state| {
             let (parked_alias, cached_profile) = {
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
                 // The reservation belongs to *this* turn either way: consume it
                 // up front so it can never leak into a later park.
-                let reserved = user
-                    .pending_park_alias
-                    .take()
-                    .filter(|alias| !user.background.contains_key(alias));
+                let reserved = user.pending_park_alias.take();
+                let had_reservation = reserved.is_some();
+                let reserved = reserved.filter(|alias| !user.background.contains_key(alias));
                 let Some(session_id) = session_id else {
                     // No thread came out of the turn: clear the stale binding,
                     // but only if the foreground is still the turn's dialog.
@@ -392,7 +397,7 @@ impl SessionStore {
                 ) {
                     // Already parked by /bg, /new or /fg: merge, stay quiet.
                     (None, cached_profile_from_dialog(&user.background[&alias]))
-                } else {
+                } else if had_reservation || park_unclaimed {
                     let parked = DialogState {
                         session_id: Some(session_id.clone()),
                         origin: DialogOrigin::Local,
@@ -410,6 +415,8 @@ impl SessionStore {
                     let alias = dialogs.add_background(reserved.as_deref(), parked)?;
                     dialogs.register_saved_session(&session_id);
                     (Some(alias), cached)
+                } else {
+                    return Ok(None);
                 }
             };
             persist_cached_profile(state, cached_profile);
@@ -592,9 +599,15 @@ impl SessionStore {
         &self,
         openid: &str,
         requested_alias: Option<&str>,
+        reserve_for_active_turn: bool,
     ) -> Result<SwitchResult> {
         self.mutate_user(openid, |user| {
-            self.park_and_install(user, requested_alias, self.new_temporary_dialog()?)
+            let moved =
+                self.park_and_install(user, requested_alias, self.new_temporary_dialog()?)?;
+            if reserve_for_active_turn && let Some(alias) = moved.reserved_alias.as_ref() {
+                user.pending_park_alias = Some(alias.clone());
+            }
+            Ok(moved)
         })
         .await
     }
@@ -739,6 +752,7 @@ impl SessionStore {
                     state.imported_profiles.insert(session_id, profile);
                 }
                 let user = ensure_user_mut(state, openid, || self.new_temporary_dialog())?;
+                user.pending_park_alias = None;
                 let mut dialogs = Dialogs::of(user);
                 if dropped_unsaved && let Some(session_id) = current.session_id.as_deref() {
                     dialogs.drop_saved_session(session_id);
@@ -841,8 +855,7 @@ impl SessionStore {
         self.view(openid, |user| user.last_sessions_view).await
     }
 
-    /// Reserve the alias the turn-end park should use (see
-    /// `pending_park_alias`); the alias is already normalized by the caller.
+    #[cfg(test)]
     pub(crate) async fn set_pending_park_alias(
         &self,
         openid: &str,
@@ -1413,7 +1426,7 @@ mod tests {
             .unwrap();
         let moved = env
             .store
-            .move_foreground_to_background("u1", None)
+            .move_foreground_to_background("u1", None, false)
             .await
             .unwrap();
         assert!(moved.parked_alias.is_some());
@@ -1656,6 +1669,7 @@ mod tests {
                 Some("finished-thread".into()),
                 DialogProfile::default(),
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -1692,7 +1706,7 @@ mod tests {
         let turn_start = env.snapshot("u1").await;
         let moved = env
             .store
-            .move_foreground_to_background("u1", Some("main"))
+            .move_foreground_to_background("u1", Some("main"), false)
             .await
             .unwrap();
         assert_eq!(moved.parked_alias.as_deref(), Some("main"));
@@ -1708,6 +1722,7 @@ mod tests {
                     ..DialogProfile::default()
                 },
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -1737,16 +1752,16 @@ mod tests {
         let turn_start = env.snapshot("u1").await;
         let moved = env
             .store
-            .move_foreground_to_background("u1", Some("main"))
+            .move_foreground_to_background("u1", Some("main"), true)
             .await
             .unwrap();
         assert!(moved.parked_alias.is_none());
         assert_eq!(moved.reserved_alias.as_deref(), Some("main"));
-        env.store
-            .set_pending_park_alias("u1", moved.reserved_alias)
-            .await
-            .unwrap();
-
+        assert_eq!(
+            env.snapshot("u1").await.pending_park_alias.as_deref(),
+            Some("main"),
+            "the foreground swap and reservation must commit together"
+        );
         let parked = env
             .store
             .bind_turn_result(
@@ -1755,6 +1770,7 @@ mod tests {
                 Some("finished-thread".into()),
                 DialogProfile::default(),
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -1790,6 +1806,7 @@ mod tests {
                 Some("live-thread".into()),
                 DialogProfile::default(),
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -1812,6 +1829,7 @@ mod tests {
                 Some("live-thread".into()),
                 DialogProfile::default(),
                 None,
+                true,
             )
             .await
             .unwrap();
@@ -1824,6 +1842,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_turn_honors_reserved_bg_alias() {
+        let env = TestEnv::new().await;
+        let turn_start = env.snapshot("u1").await;
+        env.store
+            .move_foreground_to_background("u1", Some("main"), true)
+            .await
+            .unwrap();
+
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("interrupted-thread".into()),
+                DialogProfile::default(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(parked.as_deref(), Some("main"));
+        let snapshot = env.snapshot("u1").await;
+        assert_eq!(
+            snapshot.background["main"].session_id.as_deref(),
+            Some("interrupted-thread")
+        );
+        assert!(snapshot.pending_park_alias.is_none());
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_does_not_resurrect_an_unclaimed_dialog() {
+        let env = TestEnv::new().await;
+        let turn_start = env.snapshot("u1").await;
+        env.store.new_foreground("u1").await.unwrap();
+
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("stopped-thread".into()),
+                DialogProfile::default(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(parked.is_none());
+        assert!(env.snapshot("u1").await.background.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_falls_back_when_reserved_alias_was_taken() {
+        let env = TestEnv::new().await;
+        let turn_start = env.snapshot("u1").await;
+        env.store
+            .move_foreground_to_background("u1", Some("main"), true)
+            .await
+            .unwrap();
+        env.store
+            .set_foreground_session_id("u1", Some("other-thread".into()))
+            .await
+            .unwrap();
+        env.store
+            .move_foreground_to_background("u1", Some("main"), false)
+            .await
+            .unwrap();
+
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("interrupted-thread".into()),
+                DialogProfile::default(),
+                None,
+                false,
+            )
+            .await
+            .unwrap()
+            .expect("the reservation still claims the interrupted thread");
+
+        assert_ne!(parked, "main");
+        let snapshot = env.snapshot("u1").await;
+        assert_eq!(
+            snapshot.background[&parked].session_id.as_deref(),
+            Some("interrupted-thread")
+        );
+        assert_eq!(
+            snapshot.background["main"].session_id.as_deref(),
+            Some("other-thread")
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_a_pending_bg_reservation() {
+        let env = TestEnv::new().await;
+        let turn_start = env.snapshot("u1").await;
+        env.store
+            .move_foreground_to_background("u1", Some("main"), true)
+            .await
+            .unwrap();
+
+        env.store.stop_foreground("u1").await.unwrap();
+        let parked = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("stopped-thread".into()),
+                DialogProfile::default(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(parked.is_none());
+        let snapshot = env.snapshot("u1").await;
+        assert!(snapshot.pending_park_alias.is_none());
+        assert!(snapshot.background.is_empty());
+    }
+
+    #[tokio::test]
     async fn supports_multiple_background_dialogs() {
         let env = TestEnv::new().await;
         env.store
@@ -1832,7 +1976,7 @@ mod tests {
             .unwrap();
         let alias_1 = env
             .store
-            .move_foreground_to_background("u1", None)
+            .move_foreground_to_background("u1", None, false)
             .await
             .unwrap()
             .parked_alias
@@ -1843,7 +1987,7 @@ mod tests {
             .unwrap();
         let alias_2 = env
             .store
-            .move_foreground_to_background("u1", None)
+            .move_foreground_to_background("u1", None, false)
             .await
             .unwrap()
             .parked_alias
@@ -1872,7 +2016,7 @@ mod tests {
             .await
             .unwrap();
         env.store
-            .move_foreground_to_background("u1", Some("older"))
+            .move_foreground_to_background("u1", Some("older"), false)
             .await
             .unwrap();
 
@@ -1890,7 +2034,7 @@ mod tests {
             .await
             .unwrap();
         env.store
-            .move_foreground_to_background("u1", Some("newer"))
+            .move_foreground_to_background("u1", Some("newer"), false)
             .await
             .unwrap();
 
