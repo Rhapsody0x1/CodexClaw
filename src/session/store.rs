@@ -332,13 +332,23 @@ impl SessionStore {
     /// Persist a *successful* turn's result onto the right dialog. While the
     /// foreground is still the dialog the turn started on (same generation),
     /// this behaves like the plain bind: thread id + profile + usage land on
-    /// the foreground and `None` is returned. When /bg, /new, /fg or /stop
-    /// swapped the foreground mid-turn, the completed thread must not clobber
-    /// the dialog the user switched to — instead it is parked as a background
-    /// entry under a generated alias (returned as `Some(alias)`), so the
-    /// finished conversation stays reachable rather than silently resurfacing
-    /// or getting lost. A turn that produced no thread id only clears the
-    /// foreground binding, and only while the foreground is still its own.
+    /// the foreground and `None` is returned. A turn that produced no thread
+    /// id only clears the foreground binding, and only while the foreground
+    /// is still its own.
+    ///
+    /// When /bg, /new, /fg or /stop swapped the foreground mid-turn, the
+    /// completed thread must not clobber the dialog the user switched to. It
+    /// goes to the background instead — but which way depends on what the
+    /// swap did with it:
+    ///
+    /// * `/bg`, `/new` and `/fg` *parked* it, so it already has a home and a
+    ///   name the user has seen. The result is merged into that entry and
+    ///   `None` is returned: announcing it again would be noise, and creating
+    ///   a second entry would leave two aliases on one thread.
+    /// * `/stop`, or a `/bg` on a still-blank foreground, left nothing
+    ///   behind. A fresh entry is created — under the alias `/bg <alias>`
+    ///   reserved, else a generated one — and returned as `Some(alias)` for
+    ///   the caller to announce.
     pub(crate) async fn bind_turn_result(
         &self,
         openid: &str,
@@ -373,6 +383,14 @@ impl SessionStore {
                         user.foreground.last_usage = Some(usage);
                     }
                     (None, cached_profile_from_dialog(&user.foreground))
+                } else if let Some(alias) = Dialogs::of(user).attach_to_parked(
+                    expected,
+                    &session_id,
+                    profile.clone(),
+                    usage.clone(),
+                ) {
+                    // Already parked by /bg, /new or /fg: merge, stay quiet.
+                    (None, cached_profile_from_dialog(&user.background[&alias]))
                 } else {
                     let parked = DialogState {
                         session_id: Some(session_id.clone()),
@@ -1641,6 +1659,54 @@ mod tests {
                 .iter()
                 .any(|id| id == "finished-thread"),
             "rollout must survive pruning"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_turn_result_merges_into_the_entry_bg_already_parked() {
+        let env = TestEnv::new().await;
+        env.store
+            .set_foreground_session_id("u1", Some("thread".into()))
+            .await
+            .unwrap();
+
+        // A turn runs on that bound dialog and the user parks it mid-turn.
+        let turn_start = env.snapshot("u1").await;
+        let moved = env
+            .store
+            .move_foreground_to_background("u1", Some("main"))
+            .await
+            .unwrap();
+        assert_eq!(moved.parked_alias.as_deref(), Some("main"));
+
+        let announced = env
+            .store
+            .bind_turn_result(
+                "u1",
+                &turn_start.foreground,
+                Some("thread".into()),
+                DialogProfile {
+                    model_override: Some("gpt-finished".into()),
+                    ..DialogProfile::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(announced.is_none(), "the user already saw where /bg put it");
+        let snapshot = env.snapshot("u1").await;
+        assert_eq!(
+            snapshot.background.keys().collect::<Vec<_>>(),
+            vec!["main"],
+            "one conversation must not end up under two aliases"
+        );
+        let entry = &snapshot.background["main"];
+        assert_eq!(entry.session_id.as_deref(), Some("thread"));
+        assert_eq!(
+            entry.profile.as_ref().unwrap().model_override.as_deref(),
+            Some("gpt-finished"),
+            "the mid-turn clone's profile must be refreshed"
         );
     }
 

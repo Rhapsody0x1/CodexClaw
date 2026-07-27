@@ -18,7 +18,9 @@ use anyhow::Result;
 use rand::{Rng, seq::SliceRandom};
 use std::path::{Path, PathBuf};
 
-use crate::model::settings::{DialogOrigin, DialogProfile, DialogState, UserSessionState};
+use crate::model::settings::{
+    DialogOrigin, DialogProfile, DialogState, TokenUsageSnapshot, UserSessionState,
+};
 
 pub(super) const ALIAS_WORDS: &[&str] = &[
     "sage", "oak", "mint", "lark", "wave", "nova", "reef", "kite", "fern", "dawn", "ember",
@@ -249,6 +251,44 @@ impl<'a> Dialogs<'a> {
         }
         self.bind(Some(session_id), profile);
         true
+    }
+
+    /// Land a finished turn's result on the background entry that already
+    /// holds the dialog it ran on, i.e. the one `/bg`, `/new` or `/fg` parked
+    /// mid-turn. Returns the alias, or `None` when the dialog is not in the
+    /// background (it was discarded, or `/stop` dropped it) and the caller
+    /// must create an entry instead.
+    ///
+    /// Identity is the `(generation, session_id)` pair [`Self::park`] copies
+    /// verbatim off the foreground. [`Self::install`] hands out each
+    /// generation exactly once, so no two dialogs the foreground slot ever
+    /// held can collide; entries born directly in the background carry
+    /// generation 0 together with a thread id, which no unparked foreground
+    /// dialog can match.
+    pub(super) fn attach_to_parked(
+        &mut self,
+        expected: &DialogState,
+        session_id: &str,
+        profile: DialogProfile,
+        usage: Option<TokenUsageSnapshot>,
+    ) -> Option<String> {
+        let (alias, origin) = self.user.background.iter().find_map(|(alias, dialog)| {
+            (dialog.generation == expected.generation
+                && dialog.session_id == expected.session_id
+                && dialog.workspace_dir == expected.workspace_dir)
+                .then(|| (alias.clone(), dialog.origin))
+        })?;
+        let dialog = self.user.background.get_mut(&alias)?;
+        dialog.session_id = Some(session_id.to_string());
+        dialog.profile = Some(profile);
+        if usage.is_some() {
+            dialog.last_usage = usage;
+        }
+        if origin == DialogOrigin::Local {
+            self.register_saved_session(session_id);
+        }
+        self.assert_invariants();
+        Some(alias)
     }
 
     /// Add `session_id` to the saved-session ledger (idempotent).
@@ -511,6 +551,68 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn attach_to_parked_finds_the_dialog_park_just_stored() {
+        let mut u = user();
+        u.foreground = bound("thread-1", "/ws1");
+        let turn_start = u.foreground.clone();
+        Dialogs::of(&mut u)
+            .park(
+                Some("main"),
+                Path::new("/shared"),
+                DialogState::new_temporary(PathBuf::from("/shared")),
+            )
+            .unwrap();
+
+        let alias = Dialogs::of(&mut u).attach_to_parked(
+            &turn_start,
+            "thread-1",
+            DialogProfile {
+                model_override: Some("gpt-finished".into()),
+                ..DialogProfile::default()
+            },
+            None,
+        );
+
+        assert_eq!(alias.as_deref(), Some("main"));
+        assert_eq!(u.background.len(), 1);
+        assert_eq!(
+            u.background["main"]
+                .profile
+                .as_ref()
+                .unwrap()
+                .model_override
+                .as_deref(),
+            Some("gpt-finished")
+        );
+    }
+
+    #[test]
+    fn attach_to_parked_ignores_look_alike_background_entries() {
+        let mut u = user();
+        // Same thread id, but an entry that was never this foreground: it was
+        // loaded straight into the background, so it carries generation 0.
+        Dialogs::of(&mut u)
+            .add_background(Some("disk"), bound("thread-1", "/ws1"))
+            .unwrap();
+        let turn_start = DialogState {
+            generation: 4,
+            ..bound("thread-1", "/ws1")
+        };
+
+        let alias = Dialogs::of(&mut u).attach_to_parked(
+            &turn_start,
+            "thread-1",
+            DialogProfile::default(),
+            None,
+        );
+
+        assert!(
+            alias.is_none(),
+            "the turn's dialog is not in the background"
+        );
     }
 
     #[test]
