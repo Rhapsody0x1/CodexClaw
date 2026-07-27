@@ -19,6 +19,14 @@ CodexClaw is a chat bot written in Rust that provides Codex capabilities through
 | `src/codex/` | Codex execution and event parsing |
 | `src/qq/` | QQ API and gateway handling |
 | `src/session/` | Persistent session state |
+| `src/app/` | Composition hub (`mod.rs`, `turn.rs`, `inbound.rs`, `approvals.rs`, `format.rs`) |
+| `src/commands/` | Slash-command dispatch (`mod.rs`, `alias.rs`, `cron_cmds.rs`, `interactive.rs`, `listing.rs`, `session_cmds.rs`, `settings_cmds.rs`) |
+| `src/scheduler/` | Cron job scheduler (`loop_.rs`, `ctx.rs`, `store.rs`, `runner.rs`, `interactive.rs`, `cron_expr.rs`, `cli.rs`) |
+| `src/memory/` | Per-user memory files (`store.rs`, `inject.rs`, `scan.rs`) |
+| `src/shadow/` | Background memory distillation (`memory.rs`, `prompt.rs`, `runner.rs`) |
+| `src/model/` | Pure value types (`message.rs`, `settings.rs`, `cron.rs`, `wire_compat.rs`) |
+| `src/util/` | Leaf utilities (`fs.rs`, `layout.rs`, `path.rs`, `lang.rs`, `text.rs`, `time.rs`) |
+| `src/self_update.rs` | Self-update from source |
 | `locales/` | Internationalization resource files (`en.yml`, `zh.yml`) |
 | `config/` | Example configuration files |
 | `data/` | Runtime state (not version-controlled) |
@@ -98,6 +106,10 @@ Use the **Conventional Commits** style with short imperative subject lines. Supp
 | `fix` | Bug fix | `fix(session): prevent duplicate writes` |
 | `refactor` | Code refactoring | `refactor(codex): simplify event parser` |
 | `doc` | Documentation update | `doc(README): update setup instructions` |
+| `test` | Adding or modifying tests | `test(session): add persistence coverage` |
+| `chore` | Maintenance tasks (CI, dependencies, etc.) | `chore(deps): bump tokio to 1.35` |
+
+Breaking changes use the `!` suffix (e.g., `feat!:` or `refactor!:`).
 
 Each commit should contain only one logical change. If the change involves a specific module, indicate the scope in parentheses after the prefix, e.g., `feat(scheduler): add cron support`.
 

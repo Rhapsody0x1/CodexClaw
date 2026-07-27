@@ -1,22 +1,49 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/` contains the application code. Use [`src/main.rs`](src/main.rs) for startup, logging setup, CLI dispatch, and bot bootstrapping, and [`src/lib.rs`](src/lib.rs) as the module map. Core areas are `src/codex/` for Codex execution, app-server integration, config snapshots, and event parsing; `src/qq/` for QQ API and gateway handling; `src/session/` for persisted session state; `src/scheduler/` for cron storage, CLI, execution, and interactive job handling; `src/memory/` and `src/shadow/` for memory distillation; and `src/self_update.rs` for `/self-update`. Smoke coverage for the app-server path lives in [`tests/app_server_smoke.rs`](tests/app_server_smoke.rs). User and operator docs live in `docs/`, especially [`docs/scheduler.md`](docs/scheduler.md), [`docs/configuration.md`](docs/configuration.md), and [`docs/commands.md`](docs/commands.md). Example configuration is in [`config/codexclaw.example.toml`](config/codexclaw.example.toml), with model presets in [`config/codex_models.toml`](config/codex_models.toml). `assets/` holds README images, not runtime code.
+`src/` contains the application code. Use [`src/main.rs`](src/main.rs) for startup, logging setup, CLI dispatch, and bot bootstrapping, and [`src/lib.rs`](src/lib.rs) as the module map with these top-level crates:
+
+- **`app/`** -- hub that depends on everything else: `App` struct with `BusyGuard` RAII, message/turn flows (`inbound.rs`, `turn.rs`), approval routing (`approvals.rs`), and pure formatting helpers (`format.rs`).
+- **`codex/`** -- Codex execution: three backends (see below), app-server JSON-RPC client (`app_server/`), config snapshot bootstrap, display helpers, event parsing, CLI subprocess execution, prompt building, runtime profile/model reading, and shared types.
+- **`commands/`** -- pure decision layer that returns `CommandOutcome`, never touches I/O directly: alias management, cron commands, interactive session helpers, listing, session commands, and settings commands.
+- **`config`** -- application configuration loading (`src/config.rs`).
+- **`memory/`** -- memory store, injection, and scan helpers.
+- **`model/`** -- pure value types (no I/O, no services): message types, session settings, cron job definitions, and golden wire-format compatibility tests (`wire_compat.rs`). Breaks what would otherwise be dependency cycles between `session` <-> `scheduler` and `config` -> `session`.
+- **`qq/`** -- QQ API client, gateway (WebSocket event loop), directive parsing, and message rendering.
+- **`scheduler/`** -- cron storage, CLI, execution loop, context, interactive job handling, runner, and cron expression parsing.
+- **`self_update.rs`** -- `/self-update` logic (crate-internal).
+- **`session/`** -- persisted session state: `dialogs.rs` is a pure state machine for dialog topology transitions (no I/O, no locks); `store.rs` wraps it with locking + persistence; `rollout.rs`, `jobs_file.rs`, `state.rs` for rollout and job management.
+- **`shadow/`** -- memory distillation worker, prompt rendering, and runner.
+- **`util/`** -- leaf helpers with no dependency on any other crate module: filesystem, layout, path, language, text, and time utilities.
+
+Dependency DAG (bottom-up): `util` / `model` -> `config` / `memory` -> `codex` / `qq` / `session` -> `commands` / `shadow` / `scheduler` -> `app` -> `main`
+
+Three Codex backends: (1) a long-lived `codex app-server` JSON-RPC child process for foreground turns, (2) `codex exec --json` subprocess for cron `CodexTurn`, and (3) `codex exec --ephemeral --sandbox read-only` for shadow memory distillation. The `codex/app_server/` module is a self-contained HTTP/JSON-RPC client over stdin/stdout to the child process.
+
+User and operator docs live in `docs/`, especially [`docs/scheduler.md`](docs/scheduler.md), [`docs/configuration.md`](docs/configuration.md), and [`docs/commands.md`](docs/commands.md). Example configuration is in [`config/codexclaw.example.toml`](config/codexclaw.example.toml), with model presets in [`config/codex_models.toml`](config/codex_models.toml). `assets/` holds README images, not runtime code.
+
+Internationalization via `rust-i18n` `t!` macro; keys live in `locales/en.yml` and `locales/zh.yml`.
+
+Golden serde snapshot tests in `src/model/wire_compat.rs` protect the on-disk format of `state.json` and `jobs.json` (field renames, variant renames, or serde attribute changes will fail these tests).
+
+Tests live in `#[cfg(test)] mod tests` blocks alongside their source files, not in a separate `tests/` directory. The exception is [`tests/app_server_smoke.rs`](tests/app_server_smoke.rs), a manual (ignored) integration test that exercises the app-server path against a real Codex binary.
 
 ## Build, Test, and Development Commands
 Use standard Cargo workflows from the repo root:
 
-- `cargo check` verifies the crate quickly without producing a release binary.
-- `cargo test` runs unit, integration, and doc tests.
+- `cargo check --all-targets` verifies the crate quickly without producing a release binary.
+- `cargo test --all-targets` runs unit, integration, and doc tests (305+ tests).
 - `cargo test --test app_server_smoke -- --ignored --nocapture` runs the ignored app-server smoke test when a real Codex app-server path is needed.
 - `cargo fmt` applies Rust formatting.
-- `cargo clippy --all-targets --all-features` catches common lint issues before review.
+- `cargo clippy --all-targets --all-features` catches common lint issues before review (must be 0 warnings).
 - `cargo run` starts the bot with `codexclaw.toml` in the current directory.
 - `CODEX_CLAW_CONFIG=./config/codexclaw.example.toml cargo run` runs with an explicit config path.
 - `codex-claw cron add|once|list|rm|pause|resume|run-now|tail` manages scheduled tasks from the CLI when the binary is on `PATH`.
 
 ## Coding Style & Naming Conventions
 Follow `rustfmt` defaults: 4-space indentation, trailing commas where formatter inserts them, and one module per file. Prefer `snake_case` for functions, modules, and test names, `PascalCase` for types, and concise enums/structs that mirror QQ or Codex payloads. Keep async boundaries explicit and return `anyhow::Result` at application edges where the project already does so.
+
+Use `#[serde(default)]` on all new fields added to persisted types to maintain backward compatibility with existing on-disk state.
 
 ## Testing Guidelines
 Write async tests with `#[tokio::test]` when exercising runtime behavior. Prefer focused unit tests beside the owning module; keep real app-server or end-to-end smoke checks in `tests/app_server_smoke.rs` and mark them ignored unless they are safe for default CI. Use descriptive names such as `qq_text_send_falls_back_to_plain_text_when_markdown_is_rejected`. Mock network calls with `wiremock` and temporary filesystem state with `tempfile`. Scheduler changes need more than green tests: explicitly review timeout cancellation, foreground restoration, interactive cleanup, delivery fallback, file-locking behavior, and one-shot lifecycle semantics.

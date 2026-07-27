@@ -27,6 +27,7 @@ The following fields are required and must not be empty strings; otherwise the p
 ## Path Handling Notes
 
 - **Tilde Expansion**: In all fields of type `PathBuf`, a leading `~` is expanded at runtime to the actual value of `$HOME`. For example, `~/.codex-claw/data` expands to `/home/youruser/.codex-claw/data`.
+- **Canonicalization**: All paths are automatically canonicalized after loading (resolving symlinks, normalizing `..` components, etc.).
 - **Relative Paths**: If a relative path is used in the configuration (e.g. `"."`), it is resolved relative to the CodexClaw process's current working directory.
 
 ---
@@ -37,16 +38,17 @@ Controls runtime directories, Codex CLI invocation method, and self-update behav
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `data_dir` | PathBuf | `~/.codex-claw/data` | Root directory for runtime data |
+| `timezone` | String (IANA tz) | `"Asia/Shanghai"` | Timezone for user-facing timestamps. Validated against chrono_tz at startup. |
+| `data_dir` | PathBuf | `~/.codex-claw/data` | Root for all persisted runtime data |
 | `system_codex_home` | PathBuf | `~/.codex` | System Codex installation directory |
-| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | CodexClaw-isolated Codex runtime directory |
-| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | Default working directory for new temporary foreground sessions |
-| `codex_binary` | String | `"codex"` | Codex CLI executable path or command name |
+| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | Home directory for global codex config |
+| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | Default workspace for new temporary sessions |
+| `codex_binary` | String | `"codex"` | Name or path of the codex CLI binary. Must be on PATH |
 | `default_model` | String | `"gpt-5.4"` | Default model for new sessions |
-| `default_reasoning_effort` | ReasoningEffort | `medium` | Default reasoning depth; valid values: `low` / `medium` / `high` / `xhigh` |
+| `default_reasoning_effort` | ReasoningEffort | `"medium"` | Default reasoning effort; valid values: `none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
 | `self_repo_dir` | PathBuf | `"."` | CodexClaw repository root directory (used by the `/self-update` command) |
 | `self_build_command` | String | `"cargo build --release"` | Build command to run during self-update (**required, must not be empty**) |
-| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | Path to the build output binary |
+| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | Path to the build output binary, relative to self_repo_dir |
 
 ---
 
@@ -87,7 +89,7 @@ Controls the task scheduler. The scheduler supports cron-expression-based task t
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Whether to enable the scheduler |
 | `tick_secs` | u64 | `30` | Scheduler polling interval (in seconds) |
-| `default_tz` | String | `"Asia/Shanghai"` | Default timezone (IANA timezone name) |
+| `default_tz` | String | `"Asia/Shanghai"` | Default timezone for cron jobs (IANA timezone name). Unlike general.timezone, this is not validated at startup and is passed through directly |
 | `max_concurrent_jobs` | usize | `4` | Maximum number of concurrent jobs |
 | `max_turn_secs` | u64 | `600` | Timeout for a single job execution (in seconds) |
 | `max_attempts` | u32 | `3` | Maximum number of retries per run |
@@ -99,7 +101,7 @@ Controls the task scheduler. The scheduler supports cron-expression-based task t
 
 ## Full Example
 
-Below is a complete configuration file containing all fields, which can be used as a starting template.
+Below is a complete configuration file containing all fields, which can be used as a starting template. The authoritative configuration template is `config/codexclaw.example.toml` in the repository; refer to that file as the canonical source.
 
 ```toml
 # ============================================================
@@ -112,13 +114,14 @@ Below is a complete configuration file containing all fields, which can be used 
 
 # --- General Settings ---------------------------------------------------
 [general]
+timezone               = "Asia/Shanghai"
 data_dir              = "~/.codex-claw/data"
 system_codex_home     = "~/.codex"
 codex_home_global     = "~/.codex-claw/.codex"
 default_workspace_dir = "~/.codex-claw/data/session/workspace"
 codex_binary          = "codex"
 default_model         = "gpt-5.4"
-default_reasoning_effort = "medium"      # low | medium | high | xhigh
+default_reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh
 self_repo_dir         = "."
 self_build_command    = "cargo build --release"
 self_binary_path      = "./target/release/codex-claw"

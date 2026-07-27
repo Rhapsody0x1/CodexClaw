@@ -1,8 +1,6 @@
 # CodexClaw System Architecture
 
 > CodexClaw System Architecture Document
->
-> This document is written in English. Section headings are in English. A Chinese version is available at the link below.
 
 *Read this in: [English](architecture_en.md) | [中文](architecture.md)*
 
@@ -21,12 +19,12 @@
 
 ## Overview
 
-CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's major messaging platform) to OpenAI Codex CLI through a long-lived app-server process. The system provides the following core capabilities:
+CodexClaw is a Rust async application that bridges QQ (China's major messaging platform) to OpenAI Codex CLI through a long-lived app-server child process. The system provides the following core capabilities:
 
 | Capability                      | Description                                                                                      |
 | ------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Session Management              | Maintains independent session state per user, supports foreground/background session switching    |
-| Background Memory Distillation | Automatically extracts facts and insights from conversation turns                           |
+| Background Memory Distillation  | Automatically extracts facts and insights from conversation turns                                |
 | Scheduled Tasks                 | Cron-like scheduling system supporting reminders, Codex tasks, and shell commands                 |
 | Self-Update                     | Automatically detects source file modifications made by Codex and triggers recompilation          |
 
@@ -40,18 +38,19 @@ CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's majo
 │  (Tencent API)  │                         └──────┬───────┘
 └─────────────────┘                                │ C2CMessageEvent
                                                    v
-┌─────────────────┐  HTTP REST   ┌─────────────────────────────────┐
-│  QQ API Server  │ <----------> │            App (app.rs)         │
-│  (send msgs)    │              │  ┌───────────┐ ┌─────────────┐  │
-└─────────────────┘              │  │commands.rs│ │ PassiveEmit │  │
-                                 │  └───────────┘ └─────────────┘  │
-                                 └────┬──────┬──────┬──────┬───────┘
+┌─────────────────┐  HTTP REST   ┌──────────────────────────────────┐
+│  QQ API Server  │ <----------> │              App                 │
+│  (send msgs)    │              │  ┌──────────┐ ┌──────────────┐   │
+└─────────────────┘              │  │commands/ │ │ PassiveTurn  │   │
+                                 │  │dispatch  │ │   Emitter    │   │
+                                 │  └──────────┘ └──────────────┘   │
+                                 └────┬──────┬──────┬──────┬────────┘
                                       │      │      │      │
                         ┌─────────────┘      │      │      └──────────────┐
                         v                    v      v                     v
                  ┌──────────────┐  ┌─────────────┐ ┌──────────────┐ ┌─────────┐
                  │ SessionStore │  │CodexExecutor│ │  Scheduler   │ │ Shadow  │
-                 │ (session/)   │  │ (codex/)    │ │ (scheduler/) │ │Worker   │
+                 │ (session/)   │  │ (codex/)    │ │ (scheduler/) │ │ Worker  │
                  └──────────────┘  └──────┬──────┘ └──────────────┘ └─────────┘
                                           │ JSON-RPC (stdio)
                                           v
@@ -63,188 +62,263 @@ CodexClaw is a ~24,000-line Rust async application that bridges QQ (China's majo
 
 **Data Flow Overview:**
 
-- QQ Gateway pushes message events to `gateway.rs` via WebSocket.
-- `App` serves as the central dispatcher, coordinating command parsing, Codex execution, approval flows, and message sending.
-- `CodexExecutor` communicates with the long-lived codex app-server child process via JSON-RPC (stdio pipes).
-- `Scheduler` runs scheduled tasks independently and can send synthetic messages through `App`.
-- `ShadowWorker` asynchronously extracts memories in the background.
+- QQ Gateway pushes message events to `qq/gateway.rs` via WebSocket.
+- `App` (`app/mod.rs`) serves as the central dispatcher, coordinating command parsing, Codex execution, approval flows, and message sending.
+- `CodexExecutor` (`codex/executor.rs`) communicates with the long-lived codex app-server child process via JSON-RPC (stdio pipes).
+- `Scheduler` runs scheduled tasks independently and sends synthetic messages through the `ProactiveNotifier` trait.
+- `ShadowWorker` (`shadow/mod.rs`) asynchronously extracts memories in the background.
 
 ---
 
 ## Module Responsibilities
 
-### src/main.rs -- Entry Point
+Modules are organized from bottom to top by dependency. L0 contains leaf modules with no crate-internal dependencies; L4 is the composition hub that depends on everything else.
 
-The program entry point. Responsible for parsing CLI arguments (routing to the scheduler CLI or Bot main service), loading configuration files, normalizing paths, and bootstrapping all services in the following order:
+### Dependency DAG
 
 ```
-Data directory -> Session store -> QQ API -> app-server -> executor
-  -> memory -> shadow -> scheduler -> gateway
+util, model  (L0 leaves)
+    ↓
+config, memory  (L2)
+    ↓
+codex, qq, session, self_update  (L2)
+    ↓
+commands, shadow, scheduler  (L3)
+    ↓
+app  (L4 hub)
+    ↓
+main.rs  (entry point)
 ```
 
-### src/app.rs (~1656 lines) -- Central Dispatcher
+### L0: src/util/ -- Leaf Utilities
 
-The central dispatch module and core hub of the system.
+Pure utility functions with no crate-internal dependencies.
 
-| Responsibility            | Description                                                                                  |
-| ------------------------- | -------------------------------------------------------------------------------------------- |
-| Turn Coordination         | Uses an `AtomicBool` busy flag to globally allow only one turn at a time                      |
-| Message Processing Pipeline | QQ event normalization -> attachment download -> command parsing -> Codex execution          |
-| Approval Broker Integration | Routes approval requests initiated by app-server to QQ users                                |
-| Self-Update Detection     | Triggers recompilation when Codex modifies source files                                      |
+| File      | Responsibility                                                    |
+| --------- | ----------------------------------------------------------------- |
+| fs.rs     | Atomic writes, optional reads, directory walks                    |
+| layout.rs | `DataLayout`: canonical on-disk directory structure definition    |
+| path.rs   | Home directory resolution, PATH search                            |
+| lang.rs   | Language tag normalization (zh/en)                                |
+| text.rs   | Text truncation, JSON extraction, tool labels, token display      |
+| time.rs   | RFC3339 parsing, relative-time formatting (locale + timezone aware)|
 
-### src/commands.rs (~5,700+ lines) -- Command Dispatch
+### L0: src/model/ -- Pure Value Types
 
-Command parsing and dispatch module.
+Pure data types with no I/O and no service dependencies.
 
-- Parses slash commands with Chinese alias canonicalization
-- Interactive settings handlers (e.g., model selector, etc.)
-- Alias expansion with a recursion depth limit of 3 levels
-- Protected command list to prevent alias collisions
+| File          | Responsibility                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------- |
+| message.rs    | `IncomingMessage` type (text, image, file, quote, @mention)                                 |
+| settings.rs   | `SessionSettings`, `DialogState`, `DialogProfile`, `ReasoningEffort`, `ContextMode`, `ServiceTier`, `ApprovalPolicySetting`, `UserSessionState`, `TokenUsageSnapshot`, `CommandAlias`, `PendingSetting` |
+| cron.rs       | `CronJob`, `CronKind`, `JobAction`, `DeliverPolicy`, `RunStatus`, `SessionStrategy`, `InteractiveSpec` |
+| wire_compat.rs| Golden serde snapshot tests protecting `state.json`/`jobs.json` format compatibility        |
 
-### src/codex/ -- Codex Integration
+### L2: src/config.rs -- Configuration
 
-The Codex integration subsystem and the largest module by code volume.
+TOML configuration file (`AppConfig`) loading, path normalization, and validation.
 
-#### app_server/ -- Long-lived JSON-RPC Child Process
+### L2: src/memory/ -- User Memory
 
-| File           | Lines/Size | Responsibility                              |
-| -------------- | ---------- | ------------------------------------------- |
-| supervisor.rs  | --         | Child process lifecycle management          |
-| client.rs      | --         | JSON-RPC request/response handling          |
-| transport.rs   | --         | tokio stdio stream transport                |
-| session.rs     | ~46KB      | Per-turn session wrapper (largest file)     |
-| protocol.rs    | ~31KB      | Hand-copied protocol type definitions       |
-| approvals.rs   | --         | Approval request routing                    |
-| events.rs      | --         | Event stream parsing                        |
+Management of persistent per-user memory files.
+
+| File      | Responsibility                                             |
+| --------- | ---------------------------------------------------------- |
+| store.rs  | `MemoryStore`: snapshot retrieval, append with dedup        |
+| inject.rs | Renders memory snapshots into prompt injection blocks       |
+| scan.rs   | Safety scanning of memory content                           |
+
+### L2: src/codex/ -- Codex CLI Integration
+
+The Codex integration subsystem.
+
+#### codex/app_server/ -- Long-lived JSON-RPC Child Process
+
+| File           | Responsibility                                                   |
+| -------------- | ---------------------------------------------------------------- |
+| protocol.rs    | Hand-copied JSON-RPC protocol type definitions                   |
+| transport.rs   | `StdioTransport`: spawns child, reads/writes NDJSON lines        |
+| client.rs      | `JsonRpcClient`: typed JSON-RPC client over transport             |
+| approvals.rs   | Routes server-initiated approval/elicitation requests            |
+| events.rs      | Translates app-server notifications into `ExecutionUpdate` stream|
+| session.rs     | `AppServerSession`: drives a turn via thread/start + turn/start  |
+| supervisor.rs  | Process lifecycle: file-lock, auto-respawn, atomic client swap   |
 
 #### Other codex/ Files
 
 | File                | Responsibility                                                              |
 | ------------------- | --------------------------------------------------------------------------- |
-| executor.rs         | `ExecutionRequest`/`Result` type definitions, turn strategy selection       |
-| prompt.rs           | System prompt construction with memory injection and qqbot instructions     |
-| output.rs           | Parses qqbot code fence directives (image/file attachments)                 |
-| runtime.rs          | Reads and writes Codex config.toml configuration file and model list        |
+| executor.rs         | `CodexExecutor` facade over the app-server session                          |
+| types.rs            | `ExecutionRequest`, `ExecutionResult`, `ExecutionUpdate`, `CompactRequest`  |
+| display.rs          | Human-readable one-liners for tool blocks streamed during turns             |
+| events.rs           | NDJSON wire-format deserialization for `codex exec --json`                  |
+| exec_cli.rs         | Shared one-shot `codex exec --json` subprocess runner                       |
+| exec_output.rs      | Parses codex exec NDJSON output into agent message text                     |
+| runtime.rs          | `CodexRuntimeProfile`: reads/writes codex config.toml                       |
+| prompt.rs           | Assembles the full turn prompt (system prompt + memory injection + qqbot instructions) |
 | config_snapshot.rs  | Bootstraps `~/.codex-claw/.codex` from the system `~/.codex`               |
-| compact.rs          | Session context compaction                                                   |
 
-### src/qq/ -- QQ Platform Integration
+### L2: src/qq/ -- QQ Platform Integration
 
-QQ platform integration module.
+QQ Bot platform integration module.
 
-| File        | Responsibility                                                                                                 |
-| ----------- | -------------------------------------------------------------------------------------------------------------- |
-| api.rs      | REST client, token caching, chunked file upload (>5MB), message sequence number tracking                       |
-| gateway.rs  | WebSocket connection, heartbeat maintenance, exponential backoff reconnection                                  |
-| passive.rs  | `PassiveTurnEmitter` -- streams Codex events to QQ (batches tool calls, splits long messages at 500 characters)|
-| types.rs    | QQ Gateway protocol type definitions                                                                           |
+| File        | Responsibility                                                                                           |
+| ----------- | -------------------------------------------------------------------------------------------------------- |
+| types.rs    | Gateway wire types (`C2CMessageEvent`, `GatewayEnvelope`)                                                |
+| api.rs      | `QqApiClient`: HTTP+WebSocket API client, token caching, chunked file upload (>5MB)                      |
+| gateway.rs  | `spawn_gateway`: WebSocket connect, identify, heartbeat, exponential backoff reconnection                 |
+| directive.rs| Parses \`\`\`qqbot fence protocol for image/file attachment directives                                  |
+| render.rs   | `PassiveTurnEmitter`: streams `ExecutionUpdate` into QQ messages                                         |
 
-### src/session/ -- Session State
+### L2: src/session/ -- Session State
 
-Session state module.
+Session state management module.
 
-| File      | Responsibility                                                                                               |
-| --------- | ------------------------------------------------------------------------------------------------------------ |
-| state.rs  | `SessionSettings`, `ReasoningEffort`, `ContextMode`, `ApprovalPolicy`, `TokenUsageSnapshot`, and other types |
-| store.rs  | Disk-backed per-user state store, file locking, foreground/background session management, workspace directories|
+| File        | Responsibility                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------- |
+| dialogs.rs  | Pure state machine: dialog topology (foreground/background transitions), sticky aliases, CAS binding with generation counter |
+| store.rs    | `SessionStore`: locking, disk persistence, workspace lifecycle                                          |
+| rollout.rs  | Scans codex-home sessions/ tree, parses rollout .jsonl files                                            |
+| jobs_file.rs| Advisory-locked persistence for scheduler `jobs.json`                                                   |
+| state.rs    | Re-export shim for `model::settings` types                                                              |
 
-### src/scheduler/ -- Cron Scheduling
+### L3: src/commands/ -- Slash Command Dispatch
+
+Command parsing and dispatch module (pure decision layer).
+
+| File            | Responsibility                                                              |
+| --------------- | --------------------------------------------------------------------------- |
+| mod.rs          | `Dispatcher`: `maybe_handle_command`, `CmdCtx`, command canonicalization    |
+| alias.rs        | Command alias resolution, protection, and expansion (3-level recursion limit)|
+| cron_cmds.rs    | `/cron` family of command handlers                                          |
+| interactive.rs  | Multi-step interactive pickers (model, reasoning effort, etc.)              |
+| listing.rs      | Shared list rendering (sessions, models, cron jobs, status)                 |
+| session_cmds.rs | `/new`, `/bg`, `/fg`, `/stop`, `/save`, `/rename`, `/resume`, `/loadbg`, `/import`, `/sessions` |
+| settings_cmds.rs| `/model`, `/lang`, `/fast`, `/context`, `/reasoning`, `/verbose`, `/approvals` |
+| tests.rs        | Integration tests for command dispatch                                      |
+
+### L3: src/scheduler/ -- Cron Scheduling
 
 Scheduled task module.
 
-| File            | Responsibility                                               |
-| --------------- | ------------------------------------------------------------ |
-| mod.rs          | Main loop, semaphore-based concurrency control               |
-| store.rs        | `CronJob` schema definition, disk persistence, task directory management |
-| runner.rs       | Task execution (reminder/codex-turn/codex-exec/shell)        |
-| cli.rs          | CLI subcommands                                              |
-| cron_expr.rs    | Cron expression parsing, timezone support                    |
-| interactive.rs  | Multi-turn scheduled tasks, foreground session hijacking     |
+| File            | Responsibility                                                         |
+| --------------- | ---------------------------------------------------------------------- |
+| mod.rs          | Module declarations + re-exports                                      |
+| loop_.rs        | `Scheduler`: periodic tick loop (default 30s), in-flight set, concurrency semaphore |
+| ctx.rs          | `SchedulerCtx` + `ProactiveNotifier` trait                            |
+| store.rs        | Job directory layout, Toml persistence, pending-delivery queue        |
+| runner.rs       | Runs a single cron job, writes run logs                               |
+| interactive.rs  | Interactive job flows                                                  |
+| cron_expr.rs    | `next_after`: computes next fire time from cron expression + timezone  |
+| cli.rs          | Standalone `codex-claw cron` CLI subcommand                            |
 
-### src/memory/ -- User Memory
-
-User memory module.
-
-| File      | Responsibility                                                     |
-| --------- | ------------------------------------------------------------------ |
-| store.rs  | Per-user `MEMORY.md` and `USER.md` files, `§`-delimited entries    |
-| inject.rs | Formats memory blocks for prompt injection                         |
-| scan.rs   | Memory entry scanning and filtering                                |
-
-### src/shadow/ -- Background Distillation
+### L3: src/shadow/ -- Background Memory Distillation
 
 Background distillation module.
 
-| File      | Responsibility                                       |
-| --------- | ---------------------------------------------------- |
-| mod.rs    | `ShadowWorker`, FIFO deduplication by openid         |
-| memory.rs | Extracts facts and insights from conversation turns  |
-| prompt.rs | Prompts for memory synthesis                         |
-| runner.rs | One-shot Codex invocations for shadow tasks          |
+| File      | Responsibility                                                   |
+| --------- | ---------------------------------------------------------------- |
+| memory.rs | `ShadowContext`, threshold check, JSON response parsing          |
+| prompt.rs | Distillation prompt template                                     |
+| runner.rs | Runs one-shot codex exec with strict success-only contract       |
 
-### Other Files
+### L3: src/self_update.rs -- Self-Update
 
-| File                | Responsibility                                             |
-| ------------------- | ---------------------------------------------------------- |
-| src/config.rs       | TOML configuration file loading and validation             |
-| src/message.rs      | `IncomingMessage` type (text, image, file, quote, @mention)|
-| src/self_update.rs  | Binary self-update (compile -> replace -> exit)            |
-| src/lib.rs          | Module mapping and i18n initialization (`rust_i18n` macro) |
+Binary self-update: build, smoke-test, atomic replacement.
+
+### L4: src/app/ -- Composition Hub
+
+The composition layer that depends on all other modules.
+
+| File        | Responsibility                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| mod.rs      | `App` struct, `BusyGuard` RAII, `ProactiveNotifier` impl                                    |
+| turn.rs     | Full turn lifecycle: busy acquire → memory inject → prompt build → execute → render passive reply → shadow distillation → interrupt/cancel |
+| inbound.rs  | Normalizes incoming QQ events, downloads attachments, extracts quotes, dispatches command outcomes, renders `DialogError` |
+| approvals.rs| Routes server-initiated approval requests to QQ users                                       |
+| format.rs   | Pure formatting: plan blocks, token snapshots, context warnings                             |
+
+### src/main.rs -- Entry Point
+
+The program entry point. Parses CLI arguments (routing to the `cron` subcommand or Bot main service), loads `AppConfig`, creates `SessionStore`, spawns the codex app-server child process, creates `App`, starts the `Scheduler`, spawns the QQ gateway, and services C2C events.
+
+```
+Load config → Create SessionStore → spawn app-server → create App
+  → start Scheduler → spawn QQ gateway → service C2C events
+```
+
+### src/lib.rs -- Crate Root
+
+Declares 12 modules, re-exports `model::message` to the crate root (backward compatibility) and `util::layout::DataLayout` (for main.rs). Initializes the `rust_i18n` macro.
 
 ---
 
 ## Key Data Flows
 
-### 1. Normal Conversation Turn
+### 1. Conversation Turn
 
 ```
 QQ WebSocket event
-  -> gateway.rs dispatches C2CMessageEvent
-  -> App.handle_c2c_event()
-  -> Download/cache attachments
-  -> commands.rs: Check if it is a slash command
-    -> If it is a command: Process and return reply
-    -> If not: run_normal_message()
-  -> Acquire busy lock (AtomicBool)
-  -> Set active_openid for approval routing
-  -> Build prompt (session state + memory injection)
-  -> CodexExecutor.execute(ExecutionRequest)
-    -> AppServerSession -> codex app-server (JSON-RPC)
-  -> PassiveTurnEmitter streams updates to QQ
-  -> Parse qqbot directives in output (images/files)
-  -> Send directive attachments via QQ API
-  -> ShadowWorker asynchronously launches background memory extraction
-  -> Release busy lock
+  → qq/gateway.rs dispatches C2CMessageEvent
+  → App.handle_c2c_event()
+  → app/inbound.rs: normalize event, download attachments, extract quotes
+  → commands/mod.rs: maybe_handle_command dispatch
+    → If command: process and return CommandReply
+    → If Continue: proceed with turn execution
+  → Acquire BusyGuard (AtomicBool)
+  → memory/inject.rs: inject memory into prompt
+  → codex/prompt.rs: build full turn prompt
+  → codex/app_server/session.rs: turn/start (JSON-RPC)
+  → codex/app_server/events.rs: stream ExecutionUpdate
+  → qq/render.rs: PassiveTurnEmitter pushes to QQ
+  → Parse qqbot directives (image/file)
+  → Send directive attachments via QQ API
+  → shadow/runner.rs: asynchronously launch background memory distillation
+  → session/store.rs: bind_turn_result to SessionStore
+  → BusyGuard released
 ```
 
 ### 2. Approval Flow
 
 ```
-codex app-server -> Approval notification (JSON-RPC)
-  -> ApprovalBroker receives
-  -> Enqueue to App.pending_approvals[openid]
-  -> Send approval request message to QQ user
-  -> User sends /approve, /deny, or /cancel
-  -> App.resolve_pending_approval() finds the earliest pending approval
-  -> Send ApprovalOutcome via oneshot channel
-  -> app-server continues execution or cancels the turn
+codex app-server → Approval notification (JSON-RPC)
+  → codex/app_server/approvals.rs receives
+  → Enqueue to App.pending_approvals[openid]
+  → Send approval request message to QQ user
+  → User sends /approve or /deny
+  → app/approvals.rs: find earliest pending approval
+  → Send ApprovalOutcome via oneshot channel
+  → app-server continues execution or cancels the turn
 ```
 
 ### 3. Scheduler
 
 ```
-Scheduler.tick() runs every tick_secs (default 30 seconds)
-  -> Scans all jobs, finds those that are due (next_run_at <= now or run_now_at is set)
-  -> Acquire semaphore permit (max_concurrent_jobs)
-  -> runner.run_job() dispatches by action type
-    -> Reminder: Send message via QQ API
-    -> CodexTurn: Dispatch as synthetic message through App
-    -> Shell: Launch subprocess
-  -> On success: Update run_count, last_run_status, write run log
-  -> On failure: Increment failure_streak, retry with backoff
-  -> On reaching circuit_breaker_threshold: Auto-disable and notify job owner
-  -> One-shot jobs: Recycle to cron-jobs-trash/
+Scheduler loop (tick_secs, default 30s)
+  → Scan all jobs, find those due (next_run_at <= now)
+  → Acquire semaphore permit (max_concurrent_jobs)
+  → scheduler/runner.rs: dispatch by JobAction
+    → Reminder: Send message via QQ API
+    → CodexTurn: Dispatch as synthetic message through App
+    → Shell: Launch subprocess
+    → Interactive: Hijack foreground session
+  → On success: Update run_count, last_run_status, write run log
+  → On failure: Increment failure_streak, retry with backoff
+  → On reaching circuit_breaker_threshold: Auto-disable and notify job owner
+  → One-shot jobs: Recycle to cron-jobs-trash/
+```
+
+### 4. Dialog State Machine
+
+```
+foreground ↔ background transitions
+  /bg: Move foreground dialog into background map, assign or retain alias
+  /fg: Restore dialog from background map to foreground, alias migrates with it
+  /new: Archive current foreground, create new foreground dialog
+  /stop: Terminate current foreground dialog (cleanup workspace)
+
+Sticky aliases: A dialog remembers its user-given name across /fg and /bg cycles
+CAS binding: Generation counter prevents mid-turn dialog swaps from corrupting the wrong dialog
 ```
 
 ---
@@ -255,14 +329,14 @@ CodexClaw is built on the tokio multi-threaded runtime and uses the following as
 
 | Pattern                         | Purpose                                                  |
 | ------------------------------- | -------------------------------------------------------- |
-| `Arc<App>`                      | Shared application state across all spawned tasks        |
-| `AtomicBool`                    | Busy flag (fast, expected uncontended)                   |
-| `tokio::sync::Mutex`           | Per-user state (active_turn, pending_approvals)          |
-| `tokio::sync::RwLock`          | Gateway session state                                    |
-| `tokio::sync::Semaphore`       | Scheduler concurrency control                            |
-| `oneshot` channel               | Approval resolution and turn cancellation                |
-| `mpsc::unbounded_channel`      | Execution update streaming                               |
-| `Weak<App>`                     | Avoids reference cycles in the Scheduler                 |
+| `Arc<App>`                      | Shared application state across gateway and scheduler tasks |
+| `AtomicBool`                    | Global single-turn busy flag (BusyGuard RAII)            |
+| `tokio::sync::Mutex`           | pending_approvals, pending_settings, resume_messages     |
+| `tokio::sync::RwLock`          | `PersistedSessionState` session state                    |
+| `tokio::sync::Semaphore`       | Scheduler job concurrency control                        |
+| `oneshot` channel               | Approval resolution                                      |
+| `mpsc::unbounded_channel`      | gateway → App C2C event flow                             |
+| `Weak<SchedulerCtx>`            | Scheduler → App linkage, avoids reference cycles         |
 | `fs2` file locking              | Disk synchronization for concurrent session state writes |
 
 ---
@@ -271,17 +345,19 @@ CodexClaw is built on the tokio multi-threaded runtime and uses the following as
 
 ### How to Add a New Command
 
-1. Add the command string to `PROTECTED_COMMANDS` in `src/commands.rs`.
-2. Add a Chinese alias in `canonicalize_core_command()` near the bottom of `commands.rs`.
-3. Add a match branch in the main dispatch block (around line 245).
-4. Implement the handler function (async, accepting openid + session + other state parameters).
-5. Add locale keys in `locales/en.yml` and `locales/zh.yml`.
-6. Add a help entry under `commands.help` in both locale files.
+1. Add the command string to the protected command list in `src/commands/alias.rs`.
+2. Add a Chinese alias in `canonicalize_core_command()` in `src/commands/mod.rs`.
+3. Implement the handler function in the appropriate command file (`session_cmds.rs`, `settings_cmds.rs`, or `cron_cmds.rs`).
+4. Add a match branch in the main dispatch `maybe_handle_command()` in `src/commands/mod.rs`.
+5. The handler returns a `CommandOutcome`, which is processed uniformly by `app/inbound.rs`.
+6. Add locale keys in `locales/en.yml` and `locales/zh.yml`.
+7. Add a help entry under `commands.help` in both locale files.
 
 ### How to Add a New Module
 
-1. Create `src/<module>/mod.rs`.
+1. Create `src/<module>/mod.rs` (and its sub-files).
 2. Add `pub mod <module>;` in `src/lib.rs`.
-3. If needed, wire the module into the `App` struct (follow the patterns used by session/memory/shadow).
-4. Add unit tests using `#[cfg(test)] mod tests` in each file.
-5. If needed, add integration tests in the `tests/` directory.
+3. Determine the module's tier in the dependency DAG to avoid circular dependencies.
+4. If stateful, pass it into the `App` struct via `Arc` (follow the patterns used by session/memory/shadow).
+5. Add unit tests using `#[cfg(test)] mod tests` in each file.
+6. Use the `rust-i18n` `t!` macro for internationalization, updating both locale files.

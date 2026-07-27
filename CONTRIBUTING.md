@@ -19,6 +19,14 @@ CodexClaw 是一个使用 Rust 编写、通过 QQ 平台提供 Codex 能力的�
 | `src/codex/` | Codex 执行与事件解析 |
 | `src/qq/` | QQ API 与网关处理 |
 | `src/session/` | 持久化会话状态 |
+| `src/app/` | 组合中枢 (`mod.rs`, `turn.rs`, `inbound.rs`, `approvals.rs`, `format.rs`) |
+| `src/commands/` | 斜杠命令分发 (`mod.rs`, `alias.rs`, `cron_cmds.rs`, `interactive.rs`, `listing.rs`, `session_cmds.rs`, `settings_cmds.rs`) |
+| `src/scheduler/` | Cron 任务调度 (`loop_.rs`, `ctx.rs`, `store.rs`, `runner.rs`, `interactive.rs`, `cron_expr.rs`, `cli.rs`) |
+| `src/memory/` | 用户记忆文件 (`store.rs`, `inject.rs`, `scan.rs`) |
+| `src/shadow/` | 后台记忆蒸馏 (`memory.rs`, `prompt.rs`, `runner.rs`) |
+| `src/model/` | 纯数据类型 (`message.rs`, `settings.rs`, `cron.rs`, `wire_compat.rs`) |
+| `src/util/` | 叶子工具模块 (`fs.rs`, `layout.rs`, `path.rs`, `lang.rs`, `text.rs`, `time.rs`) |
+| `src/self_update.rs` | 从源码自更新 |
 | `locales/` | 国际化资源文件 (`en.yml`, `zh.yml`) |
 | `config/` | 配置文件示例 |
 | `data/` | 运行时状态（不纳入版本控制） |
@@ -98,6 +106,10 @@ async fn test_session_persist() {
 | `fix` | 修复缺陷 | `fix(session): prevent duplicate writes` |
 | `refactor` | 重构代码 | `refactor(codex): simplify event parser` |
 | `doc` | 文档更新 | `doc(README): update setup instructions` |
+| `test` | 添加或修改测试 | `test(session): add persistence coverage` |
+| `chore` | 维护任务（CI、依赖等） | `chore(deps): bump tokio to 1.35` |
+
+带有破坏性变更时，在前缀后添加 `!` 后缀（例如 `feat!:` 或 `refactor!:`）。
 
 每个 commit 应当只包含一个逻辑变更。如果变更涉及特定模块，请在前缀后用括号标注作用域，例如 `feat(scheduler): add cron support`。
 

@@ -27,6 +27,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 ## 路径处理说明
 
 - **波浪号展开**：所有 `PathBuf` 类型的字段中，前缀 `~` 会在运行时展开为 `$HOME` 的实际值。例如 `~/.codex-claw/data` 会展开为 `/home/youruser/.codex-claw/data`。
+- **路径规范化**：所有路径在加载后会自动进行规范化处理（解析符号链接、去除 `..` 等），确保路径的规范形式。
 - **相对路径**：如果配置中使用了相对路径（如 `"."`），则相对于 CodexClaw 进程的当前工作目录解析。
 
 ---
@@ -37,16 +38,17 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `data_dir` | PathBuf | `~/.codex-claw/data` | 运行时数据根目录 |
+| `timezone` | String (IANA tz) | `"Asia/Shanghai"` | 用户时间戳使用的时区（IANA 时区名称）。启动时通过 chrono_tz 校验，必须为有效时区 |
+| `data_dir` | PathBuf | `~/.codex-claw/data` | 所有持久化运行时数据的根目录 |
 | `system_codex_home` | PathBuf | `~/.codex` | 系统 Codex 安装目录 |
-| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | CodexClaw 隔离的 Codex 运行目录 |
-| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | 新建临时前台会话的默认工作目录 |
-| `codex_binary` | String | `"codex"` | Codex CLI 可执行文件路径或命令名 |
+| `codex_home_global` | PathBuf | `~/.codex-claw/.codex` | 全局 Codex 配置的 Home 目录 |
+| `default_workspace_dir` | PathBuf | `~/.codex-claw/data/session/workspace` | 新建临时会话的默认工作目录 |
+| `codex_binary` | String | `"codex"` | Codex CLI 可执行文件路径或命令名。必须在 PATH 中可找到 |
 | `default_model` | String | `"gpt-5.4"` | 新建会话的默认模型 |
-| `default_reasoning_effort` | ReasoningEffort | `medium` | 默认推理深度，可选值：`low` / `medium` / `high` / `xhigh` |
+| `default_reasoning_effort` | ReasoningEffort | `"medium"` | 默认推理深度，可选值：`none` / `minimal` / `low` / `medium` / `high` / `xhigh` |
 | `self_repo_dir` | PathBuf | `"."` | CodexClaw 仓库根目录（用于 `/self-update` 命令） |
 | `self_build_command` | String | `"cargo build --release"` | 自更新时执行的编译命令（**必填，不可为空**） |
-| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | 编译产物路径 |
+| `self_binary_path` | PathBuf | `"./target/release/codex-claw"` | 编译产物路径，相对于 self_repo_dir |
 
 ---
 
@@ -88,7 +90,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 |------|------|--------|------|
 | `enabled` | bool | `true` | 是否启用调度器 |
 | `tick_secs` | u64 | `30` | 调度器轮询间隔（秒） |
-| `default_tz` | String | `"Asia/Shanghai"` | 默认时区（IANA 时区名称） |
+| `default_tz` | String | `"Asia/Shanghai"` | 定时任务的默认时区（IANA 时区名称）。与 general.timezone 不同，此字段启动时不校验，直接传入 |
 | `max_concurrent_jobs` | usize | `4` | 最大并发任务数 |
 | `max_turn_secs` | u64 | `600` | 单次任务执行超时（秒） |
 | `max_attempts` | u32 | `3` | 单次运行最大重试次数 |
@@ -100,7 +102,7 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 ## 完整配置示例
 
-以下是一份包含所有字段的完整配置文件，可作为起始模板使用。
+以下是一份包含所有字段的完整配置文件，可作为起始模板使用。仓库中的 `config/codexclaw.example.toml` 是权威的配置模板，推荐以该文件为准。
 
 ```toml
 # ============================================================
@@ -113,13 +115,14 @@ CodexClaw 按以下顺序查找配置文件，使用第一个找到的文件：
 
 # --- 通用配置 ---------------------------------------------------
 [general]
+timezone               = "Asia/Shanghai"
 data_dir              = "~/.codex-claw/data"
 system_codex_home     = "~/.codex"
 codex_home_global     = "~/.codex-claw/.codex"
 default_workspace_dir = "~/.codex-claw/data/session/workspace"
 codex_binary          = "codex"
 default_model         = "gpt-5.4"
-default_reasoning_effort = "medium"      # low | medium | high | xhigh
+default_reasoning_effort = "medium"      # none | minimal | low | medium | high | xhigh
 self_repo_dir         = "."
 self_build_command    = "cargo build --release"
 self_binary_path      = "./target/release/codex-claw"
